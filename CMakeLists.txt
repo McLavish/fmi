@@ -13,6 +13,7 @@ if (hasParent)
 endif()
 
 find_package(Boost COMPONENTS log REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(AWSSDK COMPONENTS s3 REQUIRED)
 find_package(hiredis REQUIRED)
 
