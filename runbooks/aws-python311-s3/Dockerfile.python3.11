@@ -1,0 +1,57 @@
+FROM public.ecr.aws/sam/build-python3.11:latest
+
+ENV LANG=en_US.UTF-8
+ENV PATH=/var/lang/bin:/usr/local/bin:/usr/bin:/bin:/opt/bin
+ENV LD_LIBRARY_PATH=/var/lang/lib:/lib64:/usr/lib64:/var/runtime:/var/runtime/lib:/var/task:/var/task/lib:/opt/lib
+ENV LAMBDA_TASK_ROOT=/var/task
+ENV LAMBDA_RUNTIME_DIR=/var/runtime
+ENV CURL_INCLUDE_DIR=/usr/include
+ENV CURL_LIBRARY=/usr/lib64/libcurl.so
+ENV OPENSSL_ROOT_DIR=/usr
+ENV crypto_INCLUDE_DIR=/usr/include
+ENV crypto_LIBRARY=/usr/lib64/libcrypto.so
+
+RUN yum -y groupinstall "Development Tools" \
+    && yum -y install curl libcurl libcurl-devel openssl11-devel which git tar gzip xz unzip \
+    && yum clean all
+
+RUN curl -LO https://cmake.org/files/v3.28/cmake-3.28.6-linux-x86_64.tar.gz \
+    && tar -C /usr/local --strip-components=1 -xzf cmake-3.28.6-linux-x86_64.tar.gz \
+    && rm -f cmake-3.28.6-linux-x86_64.tar.gz
+
+RUN curl -LO https://archives.boost.io/release/1.84.0/source/boost_1_84_0.tar.gz \
+    && tar -xzf boost_1_84_0.tar.gz \
+    && cd boost_1_84_0 \
+    && ./bootstrap.sh \
+    && ./b2 cxxflags="-fPIC" link=static install \
+    && cd .. \
+    && rm -rf boost_1_84_0 boost_1_84_0.tar.gz
+
+RUN git clone --depth=1 --recurse-submodules https://github.com/aws/aws-sdk-cpp.git \
+    && cd aws-sdk-cpp \
+    && test -f "$CURL_LIBRARY" \
+    && test -f "$crypto_LIBRARY" \
+    && test -f "$OPENSSL_ROOT_DIR/include/openssl/ssl.h" \
+    && cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3" \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DENABLE_TESTING=OFF \
+        -DAUTORUN_UNIT_TESTS=OFF \
+        -DCPP_STANDARD=17 \
+        -DUSE_OPENSSL=ON \
+        -DCURL_INCLUDE_DIR="$CURL_INCLUDE_DIR" \
+        -DCURL_LIBRARY="$CURL_LIBRARY" \
+        -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR" \
+        -Dcrypto_INCLUDE_DIR="$crypto_INCLUDE_DIR" \
+        -Dcrypto_LIBRARY="$crypto_LIBRARY" \
+    && cmake --build build -j"$(nproc)" \
+    && cmake --install build \
+    && cd .. \
+    && rm -rf aws-sdk-cpp
+
+RUN git clone --depth=1 https://github.com/redis/hiredis.git \
+    && cd hiredis \
+    && make static install \
+    && cd .. \
+    && rm -rf hiredis

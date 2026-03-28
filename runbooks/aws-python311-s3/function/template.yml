@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Parameters:
+  FmiLayerArn:
+    Type: String
+  FmiBucketName:
+    Type: String
+
+Resources:
+  FmiExampleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: fmi-python311-s3-example
+      CodeUri: .
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.11
+      Architectures:
+        - x86_64
+      MemorySize: 1024
+      Timeout: 120
+      Layers:
+        - !Ref FmiLayerArn
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref FmiBucketName
+
+Outputs:
+  FunctionName:
+    Description: Deployed Lambda function name
+    Value: !Ref FmiExampleFunction

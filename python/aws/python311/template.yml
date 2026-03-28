@@ -1,0 +1,20 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Resources:
+  python311:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: fmi-python311
+      ContentUri: .
+      CompatibleRuntimes:
+        - python3.11
+      CompatibleArchitectures:
+        - x86_64
+    Metadata:
+      BuildMethod: makefile
+
+Outputs:
+  LayerVersionArn:
+    Description: ARN of the published FMI Lambda layer version
+    Value: !Ref python311
