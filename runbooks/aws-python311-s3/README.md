@@ -1,17 +1,6 @@
 # FMI on AWS Lambda: Python 3.11 + S3 Runbook
 
-This folder is the shortest path I could make from this repo to a working FMI deployment on AWS Lambda.
-
-Assumptions:
-
-- Linux or WSL on `x86_64`
-- Docker is installed and your user can access the Docker daemon
-- AWS CLI credentials are already configured, or you will run `aws configure`
-- You want the least operationally painful backend first, so this runbook uses `S3`, not `Direct`
-
 ## 1. Install missing tools
-
-Skip the `aws` install if you already have it. This repo already sees `aws`, but not `sam`.
 
 ```bash
 aws --version
@@ -19,36 +8,17 @@ docker --version
 sam --version
 ```
 
-If `sam` is missing on Linux `x86_64`, install it:
-
-```bash
-cd /tmp
-curl -L -o aws-sam-cli-linux-x86_64.zip https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-x86_64.zip
-rm -rf sam-installation
-unzip -q aws-sam-cli-linux-x86_64.zip -d sam-installation
-sudo ./sam-installation/install
-sam --version
-```
-
-If your AWS CLI is not configured yet:
-
-```bash
-aws configure
-```
-
 ## 2. Initialize the repo correctly
 
 The actual Git repo is the `fmi/` subdirectory.
 
 ```bash
-cd /home/luca/fmi-original/fmi
+cd fmi
 git submodule set-url extern/TCPunch https://github.com/OpenCoreCH/TCPunch.git
 git submodule update --init --recursive
 ```
 
 ## 3. Set the variables used by the rest of the commands
-
-This runbook uses `us-east-2` as the default region to avoid the special `us-east-1` S3 bucket creation case.
 
 ```bash
 export AWS_REGION=eu-central-1
@@ -71,8 +41,6 @@ aws s3api create-bucket \
 
 ## 5. Build the Python 3.11 FMI build image
 
-This Dockerfile now uses the AWS SAM Python 3.11 build image as its base instead of the raw Lambda runtime image. That avoids the current Amazon Linux 2 `openssl-snapsafe-libs` conflict that breaks `yum` installs on some Lambda base image revisions.
-
 ```bash
 cd /home/luca/fmi-original
 docker build -t fmi-build-python311:latest -f fmi/runbooks/aws-python311-s3/Dockerfile.python3.11 .
@@ -81,7 +49,7 @@ docker build -t fmi-build-python311:latest -f fmi/runbooks/aws-python311-s3/Dock
 ## 6. Build and deploy the FMI Lambda layer
 
 ```bash
-cd /home/luca/fmi-original/fmi/python/aws/python311
+cd fmi/python/aws/python311
 sam build
 sam deploy \
   --stack-name "$FMI_LAYER_STACK" \
@@ -105,7 +73,7 @@ echo "$FMI_LAYER_ARN"
 ## 7. Generate the example FMI config for the Lambda function
 
 ```bash
-cd /home/luca/fmi-original/fmi/runbooks/aws-python311-s3/function
+cd fmi/runbooks/aws-python311-s3/function
 sed \
   -e "s#__FMI_BUCKET__#${FMI_BUCKET}#g" \
   -e "s#__AWS_REGION__#${AWS_REGION}#g" \
@@ -115,7 +83,7 @@ sed \
 ## 8. Build and deploy the example Lambda function
 
 ```bash
-cd /home/luca/fmi-original/fmi/runbooks/aws-python311-s3/function
+cd fmi/runbooks/aws-python311-s3/function
 sam build
 sam deploy \
   --stack-name "$FMI_APP_STACK" \
@@ -173,7 +141,7 @@ Expected result: both responses should report the same `sum_of_peer_ids`, which 
 sam logs --stack-name "$FMI_APP_STACK" --region "$AWS_REGION" --tail
 ```
 
-## 11. Clean up when you are done
+## 11. Clean up
 
 ```bash
 aws cloudformation delete-stack --stack-name "$FMI_APP_STACK" --region "$AWS_REGION"
