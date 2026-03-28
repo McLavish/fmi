@@ -1,14 +1,27 @@
 #include "../../include/comm/Channel.h"
+#include <cstring>
+#if FMI_ENABLE_S3
 #include "../../include/comm/S3.h"
+#endif
+#if FMI_ENABLE_REDIS
 #include "../../include/comm/Redis.h"
+#endif
 #include "../../include/comm/Direct.h"
 
 std::shared_ptr<FMI::Comm::Channel> FMI::Comm::Channel::get_channel(std::string name, std::map<std::string, std::string> params,
                                                                     std::map<std::string, std::string> model_params) {
     if (name == "S3") {
+#if FMI_ENABLE_S3
         return std::make_shared<S3>(params, model_params);
+#else
+        throw std::runtime_error("S3 backend was disabled at build time");
+#endif
     } else if (name == "Redis") {
+#if FMI_ENABLE_REDIS
         return std::make_shared<Redis>(params, model_params);
+#else
+        throw std::runtime_error("Redis backend was disabled at build time");
+#endif
     } else if (name == "Direct") {
         return std::make_shared<Direct>(params, model_params);
     } else {

@@ -2,8 +2,12 @@ cmake_minimum_required(VERSION 3.10)
 project(FMI)
 set(CMAKE_CXX_STANDARD 17)
 
+option(FMI_ENABLE_S3 "Enable the S3 backend" ON)
+option(FMI_ENABLE_REDIS "Enable the Redis backend" ON)
+option(FMI_USE_STATIC_BOOST "Prefer static Boost libraries" ON)
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(Boost_USE_STATIC_LIBS   ON)
+set(Boost_USE_STATIC_LIBS ${FMI_USE_STATIC_BOOST})
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -14,17 +18,43 @@ endif()
 
 find_package(Boost COMPONENTS log REQUIRED)
 find_package(ZLIB REQUIRED)
-find_package(AWSSDK COMPONENTS s3 REQUIRED)
-find_package(hiredis REQUIRED)
 
 add_subdirectory(extern/TCPunch/client/)
 
-add_library(FMI STATIC src/Communicator.cpp src/utils/Configuration.cpp src/comm/Channel.cpp src/comm/ClientServer.cpp
-        src/comm/S3.cpp src/comm/Redis.cpp src/utils/ChannelPolicy.cpp src/comm/PeerToPeer.cpp src/comm/Direct.cpp)
+set(FMI_SOURCES
+    src/Communicator.cpp
+    src/utils/Configuration.cpp
+    src/comm/Channel.cpp
+    src/comm/ClientServer.cpp
+    src/utils/ChannelPolicy.cpp
+    src/comm/PeerToPeer.cpp
+    src/comm/Direct.cpp
+)
+
+set(FMI_LINK_LIBS
+    ${Boost_Libraries}
+    Boost::log
+    tcpunch
+)
+
+if(FMI_ENABLE_S3)
+    find_package(AWSSDK COMPONENTS s3 REQUIRED)
+    list(APPEND FMI_SOURCES src/comm/S3.cpp)
+    list(APPEND FMI_LINK_LIBS ${AWSSDK_LINK_LIBRARIES})
+endif()
+
+if(FMI_ENABLE_REDIS)
+    find_package(hiredis REQUIRED)
+    list(APPEND FMI_SOURCES src/comm/Redis.cpp)
+    list(APPEND FMI_LINK_LIBS ${HIREDIS_LIBRARIES})
+endif()
+
+add_library(FMI STATIC ${FMI_SOURCES})
 
 target_include_directories(FMI PRIVATE ${Boost_INCLUDE_DIRS} ${TCPUNCH_INCLUDE_DIRS})
+target_compile_definitions(FMI PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}>)
 
-target_link_libraries(FMI ${Boost_Libraries} Boost::log ${AWSSDK_LINK_LIBRARIES} ${HIREDIS_LIBRARIES} tcpunch)
+target_link_libraries(FMI ${FMI_LINK_LIBS})
 
 #find_package(OpenMP REQUIRED)
 
