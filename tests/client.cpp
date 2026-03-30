@@ -3,8 +3,12 @@
 #include "../include/comm/Data.h"
 #include "../include/comm/Channel.h"
 #include "../include/utils/Function.h"
+#if FMI_ENABLE_S3
 #include "../include/comm/S3.h"
+#endif
+#if FMI_ENABLE_REDIS
 #include "../include/comm/Redis.h"
+#endif
 #include "../include/comm/Direct.h"
 #include <iostream>
 #include <omp.h>
@@ -57,13 +61,17 @@ std::map<std::string, std::string> direct_test_model_params = {
 };
 
 int main() {
+#if FMI_ENABLE_S3
     auto ch_s3 = FMI::Comm::Channel::get_channel("S3", s3_test_params, s3_test_model_params);
     std::cout << ch_s3->get_price(1, 1, 1) << std::endl;
     std::cout << ch_s3->get_latency(1, 1, 1) << std::endl;
+#endif
 
+#if FMI_ENABLE_REDIS
     auto ch_redis = FMI::Comm::Channel::get_channel("Redis", redis_test_params, redis_test_model_params);
     std::cout << ch_redis->get_price(1, 1, 1) << std::endl;
     std::cout << ch_redis->get_latency(1, 1, 1) << std::endl;
+#endif
 
     auto ch_direct = FMI::Comm::Channel::get_channel("Direct", direct_test_params, direct_test_model_params);
     std::cout << ch_direct->get_price(1, 1, 1) << std::endl;

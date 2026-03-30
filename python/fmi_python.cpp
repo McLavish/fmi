@@ -4,6 +4,7 @@
 #include <Communicator.h>
 #include <comm/Data.h>
 #include "PythonCommunicator.h"
+#include "PythonFT.h"
 
 using namespace boost::python;
 
@@ -11,6 +12,12 @@ using namespace boost::python;
 
 BOOST_PYTHON_MODULE(fmi)
 {
+    enum_<FMI::FT::Event>("ft_events")
+        .value("none", FMI::FT::Event::None)
+        .value("migrate_self", FMI::FT::Event::MigrateSelf)
+        .value("reconfigured", FMI::FT::Event::Reconfigured)
+    ;
+
     class_<FMI::Utils::PythonCommunicator>("Communicator", init<FMI::Utils::peer_num, FMI::Utils::peer_num, std::string, std::string, optional<unsigned int> >())
         .def("send", &FMI::Utils::PythonCommunicator::send)
         .def("recv", &FMI::Utils::PythonCommunicator::recv)
@@ -22,6 +29,28 @@ BOOST_PYTHON_MODULE(fmi)
         .def("allreduce", &FMI::Utils::PythonCommunicator::allreduce)
         .def("scan", &FMI::Utils::PythonCommunicator::scan)
         .def("hint", &FMI::Utils::PythonCommunicator::hint)
+    ;
+
+    class_<FMI::Utils::PythonFTSession>("FTSession", init<FMI::Utils::peer_num, FMI::Utils::peer_num, std::string, std::string,
+                                                         optional<std::string, unsigned int> >())
+        .def("send", &FMI::Utils::PythonFTSession::send)
+        .def("recv", &FMI::Utils::PythonFTSession::recv)
+        .def("bcast", &FMI::Utils::PythonFTSession::bcast)
+        .def("barrier", &FMI::Utils::PythonFTSession::barrier)
+        .def("gather", &FMI::Utils::PythonFTSession::gather)
+        .def("scatter", &FMI::Utils::PythonFTSession::scatter)
+        .def("reduce", &FMI::Utils::PythonFTSession::reduce)
+        .def("allreduce", &FMI::Utils::PythonFTSession::allreduce)
+        .def("scan", &FMI::Utils::PythonFTSession::scan)
+        .def("hint", &FMI::Utils::PythonFTSession::hint)
+        .def("safe_point", &FMI::Utils::PythonFTSession::safe_point)
+        .def("epoch", &FMI::Utils::PythonFTSession::epoch)
+    ;
+
+    class_<FMI::Utils::PythonFTCoordinator>("FTCoordinator", init<std::string, std::string, FMI::Utils::peer_num>())
+        .def("request_migration", &FMI::Utils::PythonFTCoordinator::request_migration)
+        .def("clear_job_state", &FMI::Utils::PythonFTCoordinator::clear_job_state)
+        .def("epoch", &FMI::Utils::PythonFTCoordinator::epoch)
     ;
 
     enum_<FMI::Utils::PythonType>("datatypes")
@@ -52,4 +81,3 @@ BOOST_PYTHON_MODULE(fmi)
         .value("fast", FMI::Utils::Hint::fast)
     ;
 }
-

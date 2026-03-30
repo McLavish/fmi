@@ -8,15 +8,15 @@
       "max_timeout": 1000
     },
     "Redis": {
-      "enabled": false,
+      "enabled": true,
       "host": "127.0.0.1",
       "port": 6379,
       "timeout": 1,
       "max_timeout": 1000
     },
     "Direct": {
-      "enabled": true,
-      "host": "192.168.0.166",
+      "enabled": false,
+      "host": "127.0.0.1",
       "port": 10000,
       "max_timeout": 1000
     }
@@ -24,13 +24,6 @@
   "model": {
     "FaaS": {
       "gib_second_price": 0.0000166667
-    },
-    "S3": {
-      "bandwidth": 50.0,
-      "overhead": 40.4,
-      "transfer_price": 0.0,
-      "download_price": 0.00000043,
-      "upload_price": 0.0000054
     },
     "Redis": {
       "bandwidth_single": 100.0,
@@ -51,12 +44,12 @@
     }
   },
   "fault_tolerance": {
-    "enabled": false,
+    "enabled": true,
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
-    "heartbeat_ms": 50,
-    "lease_ms": 500,
+    "heartbeat_ms": 25,
+    "lease_ms": 250,
     "safe_point_only": true,
     "preferred_data_backend": "Direct"
   }

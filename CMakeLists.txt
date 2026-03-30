@@ -29,6 +29,8 @@ set(FMI_SOURCES
     src/utils/ChannelPolicy.cpp
     src/comm/PeerToPeer.cpp
     src/comm/Direct.cpp
+    src/ft/Coordinator.cpp
+    src/ft/Session.cpp
 )
 
 set(FMI_LINK_LIBS
@@ -56,10 +58,18 @@ target_compile_definitions(FMI PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FM
 
 target_link_libraries(FMI ${FMI_LINK_LIBS})
 
+if(FMI_ENABLE_REDIS)
+    target_include_directories(FMI PRIVATE ${HIREDIS_INCLUDE_DIRS})
+endif()
+
 #find_package(OpenMP REQUIRED)
 
 #add_executable(client tests/client.cpp)
 
 #target_link_libraries(client FMI OpenMP::OpenMP_CXX)
 
-#add_subdirectory(tests)
+option(FMI_BUILD_TESTS "Build FMI tests" OFF)
+
+if (FMI_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

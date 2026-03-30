@@ -11,7 +11,7 @@ namespace FMI::Utils {
     class ChannelPolicy {
     public:
         ChannelPolicy(std::map<std::string, std::shared_ptr<FMI::Comm::Channel>>& channels, peer_num num_peers,
-                      double faas_price, Hint hint);
+                      double faas_price, Hint hint, std::string preferred_backend = "");
 
         //! Return the ideal channel for the given operation.
         std::string get_channel(OperationInfo op_info);
@@ -24,6 +24,7 @@ namespace FMI::Utils {
         peer_num num_peers;
         double faas_price;
         Hint hint;
+        std::string preferred_backend;
 
         double get_faas_price(double execution_time);
     };

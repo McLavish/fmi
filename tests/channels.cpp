@@ -1,7 +1,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "../include/comm/Channel.h"
-#include "../include/comm/S3.h"
+#include <chrono>
 #include <numeric>
 #include <ctime>
 #include <omp.h>

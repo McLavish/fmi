@@ -40,5 +40,22 @@ namespace FMI::Utils {
     double Configuration::get_faas_price() {
         return root.get_child("model").get_child("FaaS").get<double>("gib_second_price");
     }
-}
 
+    FaultToleranceConfig Configuration::get_fault_tolerance_config() {
+        FaultToleranceConfig config;
+        if (!root.count("fault_tolerance")) {
+            return config;
+        }
+
+        auto ft_tree = root.get_child("fault_tolerance");
+        config.enabled = ft_tree.get("enabled", false);
+        config.control_backend = ft_tree.get("control_backend", config.control_backend);
+        config.control_host = ft_tree.get("control_host", config.control_host);
+        config.control_port = ft_tree.get("control_port", config.control_port);
+        config.heartbeat_ms = ft_tree.get("heartbeat_ms", config.heartbeat_ms);
+        config.lease_ms = ft_tree.get("lease_ms", config.lease_ms);
+        config.safe_point_only = ft_tree.get("safe_point_only", config.safe_point_only);
+        config.preferred_data_backend = ft_tree.get("preferred_data_backend", config.preferred_data_backend);
+        return config;
+    }
+}

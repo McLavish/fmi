@@ -2,13 +2,13 @@
   "backends": {
     "S3": {
       "enabled": false,
-      "bucket_name": "romanboe-uploadtest",
+      "bucket_name": "unused-for-local-runbook",
       "s3_region": "eu-central-1",
       "timeout": 100,
       "max_timeout": 1000
     },
     "Redis": {
-      "enabled": false,
+      "enabled": true,
       "host": "127.0.0.1",
       "port": 6379,
       "timeout": 1,
@@ -16,9 +16,9 @@
     },
     "Direct": {
       "enabled": true,
-      "host": "192.168.0.166",
+      "host": "127.0.0.1",
       "port": 10000,
-      "max_timeout": 1000
+      "max_timeout": 4000
     }
   },
   "model": {
@@ -51,12 +51,12 @@
     }
   },
   "fault_tolerance": {
-    "enabled": false,
+    "enabled": true,
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
     "heartbeat_ms": 50,
-    "lease_ms": 500,
+    "lease_ms": 5000,
     "safe_point_only": true,
     "preferred_data_backend": "Direct"
   }

@@ -16,7 +16,7 @@
     },
     "Direct": {
       "enabled": true,
-      "host": "192.168.0.166",
+      "host": "127.0.0.1",
       "port": 10000,
       "max_timeout": 1000
     }
@@ -51,12 +51,12 @@
     }
   },
   "fault_tolerance": {
-    "enabled": false,
+    "enabled": true,
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
-    "heartbeat_ms": 50,
-    "lease_ms": 500,
+    "heartbeat_ms": 25,
+    "lease_ms": 250,
     "safe_point_only": true,
     "preferred_data_backend": "Direct"
   }

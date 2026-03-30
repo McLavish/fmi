@@ -1,12 +1,30 @@
 #include "../../include/utils/ChannelPolicy.h"
 #include "../../include/comm/Channel.h"
 
+#include <algorithm>
+#include <stdexcept>
 #include <utility>
 
 FMI::Utils::ChannelPolicy::ChannelPolicy(std::map<std::string, std::shared_ptr<FMI::Comm::Channel>>& channels, peer_num num_peers,
-                                         double faas_price, Hint hint) : channels(channels), num_peers(num_peers), faas_price(faas_price), hint(hint) {}
+                                         double faas_price, Hint hint, std::string preferred_backend) :
+        channels(channels),
+        num_peers(num_peers),
+        faas_price(faas_price),
+        hint(hint),
+        preferred_backend(std::move(preferred_backend)) {}
 
 std::string FMI::Utils::ChannelPolicy::get_channel(OperationInfo op_info) {
+    if (channels.empty()) {
+        throw std::runtime_error("No channels are registered in the communicator");
+    }
+    if (!preferred_backend.empty()) {
+        auto preferred = channels.find(preferred_backend);
+        if (preferred == channels.end()) {
+            throw std::runtime_error("Preferred backend is not registered in the communicator");
+        }
+        return preferred->first;
+    }
+
     std::map<std::string, double> times;
     std::map<std::string, double> prices;
     for (const auto& [channel_name, channel] : channels) {

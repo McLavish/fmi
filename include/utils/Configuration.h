@@ -4,10 +4,20 @@
 
 #include <string>
 #include <map>
-#include <any>
 #include <boost/property_tree/ptree.hpp>
 
 namespace FMI::Utils {
+    struct FaultToleranceConfig {
+        bool enabled = false;
+        std::string control_backend = "Redis";
+        std::string control_host = "127.0.0.1";
+        unsigned int control_port = 6379;
+        unsigned int heartbeat_ms = 1000;
+        unsigned int lease_ms = 10000;
+        bool safe_point_only = true;
+        std::string preferred_data_backend;
+    };
+
     //! Configuration parser for the FMI JSON configuration file
     class Configuration {
     public:
@@ -18,6 +28,9 @@ namespace FMI::Utils {
 
         //! Returns the configured GiB Second Price for the FaaS platform.
         double get_faas_price();
+
+        //! Returns fault-tolerance settings. Missing configuration disables fault tolerance.
+        FaultToleranceConfig get_fault_tolerance_config();
 
     private:
         boost::property_tree::ptree root;
