@@ -1,7 +1,20 @@
 #include "../../include/utils/Configuration.h"
 #include <boost/property_tree/json_parser.hpp>
 #include <iostream>
+#include <stdexcept>
 #include <utility>
+
+namespace {
+    FMI::FT::Mode parse_ft_mode(const std::string& mode) {
+        if (mode == "safe_point_restart") {
+            return FMI::FT::Mode::SafePointRestart;
+        }
+        if (mode == "criu_coordinated") {
+            return FMI::FT::Mode::CriuCoordinated;
+        }
+        throw std::runtime_error("Unknown fault tolerance mode: " + mode);
+    }
+}
 
 namespace FMI::Utils {
 
@@ -49,6 +62,7 @@ namespace FMI::Utils {
 
         auto ft_tree = root.get_child("fault_tolerance");
         config.enabled = ft_tree.get("enabled", false);
+        config.mode = parse_ft_mode(ft_tree.get("mode", std::string("safe_point_restart")));
         config.control_backend = ft_tree.get("control_backend", config.control_backend);
         config.control_host = ft_tree.get("control_host", config.control_host);
         config.control_port = ft_tree.get("control_port", config.control_port);
@@ -56,6 +70,10 @@ namespace FMI::Utils {
         config.lease_ms = ft_tree.get("lease_ms", config.lease_ms);
         config.safe_point_only = ft_tree.get("safe_point_only", config.safe_point_only);
         config.preferred_data_backend = ft_tree.get("preferred_data_backend", config.preferred_data_backend);
+        config.images_dir = ft_tree.get("images_dir", config.images_dir);
+        config.poll_ms = ft_tree.get("poll_ms", config.poll_ms);
+        config.quiesce_timeout_ms = ft_tree.get("quiesce_timeout_ms", config.quiesce_timeout_ms);
+        config.host_id = ft_tree.get("host_id", config.host_id);
         return config;
     }
 }

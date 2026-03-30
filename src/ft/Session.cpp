@@ -30,6 +30,9 @@ FMI::FT::Session::Session(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num
         communicator = std::make_shared<FMI::Communicator>(peer_id, num_peers, this->config_path, base_comm_name, faas_memory);
         return;
     }
+    if (ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
+        throw std::runtime_error("FMI::FT::Session does not support fault_tolerance.mode = criu_coordinated");
+    }
     if (!ft_config.safe_point_only) {
         throw std::runtime_error("Only safe_point_only fault tolerance is supported");
     }

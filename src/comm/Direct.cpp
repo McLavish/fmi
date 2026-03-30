@@ -1,6 +1,7 @@
 #include "../../include/comm/Direct.h"
 #include <tcpunch.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #include <boost/log/trivial.hpp>
 #include <thread>
 #include <netinet/tcp.h>
@@ -83,4 +84,21 @@ double FMI::Comm::Direct::get_price(Utils::peer_num producer, Utils::peer_num co
         total_costs += 1. / requests_per_hour * vm_price;
     }
     return total_costs;
+}
+
+void FMI::Comm::Direct::finalize() {
+    close_sockets();
+}
+
+void FMI::Comm::Direct::prepare_for_checkpoint() {
+    close_sockets();
+}
+
+void FMI::Comm::Direct::close_sockets() {
+    for (auto& socket_fd : sockets) {
+        if (socket_fd >= 0) {
+            close(socket_fd);
+            socket_fd = -1;
+        }
+    }
 }

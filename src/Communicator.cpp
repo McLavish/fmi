@@ -1,4 +1,5 @@
 #include "../include/Communicator.h"
+#include "../include/ft/CriuRuntime.h"
 
 #include <utility>
 namespace FMI {
@@ -10,6 +11,14 @@ namespace FMI {
         this->num_peers = num_peers;
         this->comm_name = comm_name;
         auto backends = config.get_active_channels();
+        if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
+            if (backends.find("Direct") == backends.end()) {
+                throw std::runtime_error("CRIU-coordinated fault tolerance requires the Direct backend");
+            }
+            if (backends.size() != 1 || !ft_config.preferred_data_backend.empty() && ft_config.preferred_data_backend != "Direct") {
+                throw std::runtime_error("CRIU-coordinated fault tolerance only supports the Direct backend");
+            }
+        }
         if (ft_config.enabled && !ft_config.preferred_data_backend.empty() &&
             backends.find(ft_config.preferred_data_backend) == backends.end()) {
             throw std::runtime_error("Preferred data backend " + ft_config.preferred_data_backend + " is not enabled");
@@ -30,6 +39,9 @@ namespace FMI {
         std::string preferred_backend;
         if (ft_config.enabled) {
             preferred_backend = ft_config.preferred_data_backend;
+            if (ft_config.mode == FMI::FT::Mode::CriuCoordinated && preferred_backend.empty()) {
+                preferred_backend = "Direct";
+            }
         }
         set_channel_policy(std::make_shared<FMI::Utils::ChannelPolicy>(
                 channels,
@@ -37,6 +49,16 @@ namespace FMI {
                 faas_price,
                 channel_hint,
                 preferred_backend));
+
+        if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
+            criu_runtime = std::make_shared<FMI::FT::CriuRuntime>(
+                    peer_id,
+                    num_peers,
+                    std::move(config_path),
+                    this->comm_name,
+                    "Direct",
+                    [this]() { prepare_channels_for_checkpoint(); });
+        }
     }
 
     void Communicator::register_channel(std::string name, std::shared_ptr<FMI::Comm::Channel> c) {
@@ -47,6 +69,9 @@ namespace FMI {
     }
 
     Communicator::~Communicator() {
+        if (criu_runtime != nullptr) {
+            criu_runtime->shutdown();
+        }
         for (auto const& [name, channel] : channels) {
             channel->finalize();
         }
@@ -59,6 +84,24 @@ namespace FMI {
     void Communicator::hint(FMI::Utils::Hint hint) {
         this->channel_hint = hint;
         policy->set_hint(hint);
+    }
+
+    void Communicator::enter_operation() {
+        if (criu_runtime != nullptr) {
+            criu_runtime->enter_operation();
+        }
+    }
+
+    void Communicator::exit_operation() {
+        if (criu_runtime != nullptr) {
+            criu_runtime->exit_operation();
+        }
+    }
+
+    void Communicator::prepare_channels_for_checkpoint() {
+        for (const auto& [name, channel] : channels) {
+            channel->prepare_for_checkpoint();
+        }
     }
 
 }

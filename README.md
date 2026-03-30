@@ -74,6 +74,12 @@ For even easier deployment, we provide AWS CloudFormation templates to create La
 ## Examples
 C++ sample code for the library is available at [tests/communicator.cpp](tests/communicator.cpp), the usage from Python is demonstrated in [python/tests/client.py](python/tests/client.py). 
 
+Fault-tolerance examples are documented in [docs/fault-tolerance.md](docs/fault-tolerance.md). The repository includes:
+
+- epoch-based rank migration with `FMI::FT::Session`
+- CRIU-coordinated same-host checkpoint/restore with plain `FMI::Communicator`
+- the `fmi-criu-supervisor` CLI for CRIU-mode checkpoint, restore, status, and cleanup
+
 ## Documentation
 
 The architecture of the system, including a comparison with existing systems and benchmarks, is documented in the ACM ICS'23 paper [FMI: Fast and Cheap Message Passing for Serverless Functions](https://spcl.inf.ethz.ch/Publications/.pdf/2023_ics_fmi.pdf). More details can be found in the thesis [FMI: The FaaS Message Interface](https://doi.org/10.3929/ethz-b-000532425).

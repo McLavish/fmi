@@ -5,10 +5,12 @@
 #include <string>
 #include <map>
 #include <boost/property_tree/ptree.hpp>
+#include "../ft/Common.h"
 
 namespace FMI::Utils {
     struct FaultToleranceConfig {
         bool enabled = false;
+        FMI::FT::Mode mode = FMI::FT::Mode::SafePointRestart;
         std::string control_backend = "Redis";
         std::string control_host = "127.0.0.1";
         unsigned int control_port = 6379;
@@ -16,6 +18,10 @@ namespace FMI::Utils {
         unsigned int lease_ms = 10000;
         bool safe_point_only = true;
         std::string preferred_data_backend;
+        std::string images_dir = "/tmp/fmi-criu-images";
+        unsigned int poll_ms = 100;
+        unsigned int quiesce_timeout_ms = 10000;
+        std::string host_id;
     };
 
     //! Configuration parser for the FMI JSON configuration file

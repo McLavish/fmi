@@ -5,6 +5,10 @@
 #include "comm/Channel.h"
 #include "utils/ChannelPolicy.h"
 
+namespace FMI::FT {
+    class CriuRuntime;
+}
+
 namespace FMI {
     //! Interface that is exposed to the user for interaction with the FMI system.
     class Communicator {
@@ -25,6 +29,7 @@ namespace FMI {
         //! Send buf to peer dest
         template<typename T>
         void send(Comm::Data<T> &buf, FMI::Utils::peer_num dest) {
+            OperationGuard guard(this);
             std::string channel = policy->get_channel({Utils::send, buf.size_in_bytes()});
             channel_data data {buf.data(), buf.size_in_bytes()};
             channels[channel]->send(data, dest);
@@ -33,6 +38,7 @@ namespace FMI {
         //! Receive data from src and store data into the provided buf
         template<typename T>
         void recv(Comm::Data<T> &buf, FMI::Utils::peer_num src) {
+            OperationGuard guard(this);
             std::string channel = policy->get_channel({Utils::send, buf.size_in_bytes()});
             channel_data data {buf.data(), buf.size_in_bytes()};
             channels[channel]->recv(data, src);
@@ -41,6 +47,7 @@ namespace FMI {
         //! Broadcast the data that is in the provided buf of the root peer. Result is stored in buf for all peers.
         template<typename T>
         void bcast(Comm::Data<T> &buf, FMI::Utils::peer_num root) {
+            OperationGuard guard(this);
             std::string channel = policy->get_channel({Utils::bcast, buf.size_in_bytes()});
             channel_data data {buf.data(), buf.size_in_bytes()};
             channels[channel]->bcast(data, root);
@@ -48,6 +55,7 @@ namespace FMI {
 
         //! Barrier synchronization collective
         void barrier() {
+            OperationGuard guard(this);
             std::string channel = policy->get_channel({Utils::barrier, 0});
             channels[channel]->barrier();
         }
@@ -59,6 +67,7 @@ namespace FMI {
          */
         template<typename T>
         void gather(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::peer_num root) {
+            OperationGuard guard(this);
             std::string channel = policy->get_channel({Utils::gather, sendbuf.size_in_bytes()});
             channel_data senddata {sendbuf.data(), sendbuf.size_in_bytes()};
             channel_data recvdata {recvbuf.data(), recvbuf.size_in_bytes()};
@@ -72,6 +81,7 @@ namespace FMI {
          */
         template<typename T>
         void scatter(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::peer_num root) {
+            OperationGuard guard(this);
             std::string channel = policy->get_channel({Utils::scatter, recvbuf.size_in_bytes()});
             channel_data senddata {sendbuf.data(), sendbuf.size_in_bytes()};
             channel_data recvdata {recvbuf.data(), recvbuf.size_in_bytes()};
@@ -86,6 +96,7 @@ namespace FMI {
          */
         template <typename T>
         void reduce(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::peer_num root, FMI::Utils::Function<T> f) {
+            OperationGuard guard(this);
             if (peer_id == root && sendbuf.size_in_bytes() != recvbuf.size_in_bytes()) {
                 throw std::runtime_error("Dimensions of send and receive data must match");
             }
@@ -110,6 +121,7 @@ namespace FMI {
          */
         template <typename T>
         void allreduce(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::Function<T> f) {
+            OperationGuard guard(this);
             if (sendbuf.size_in_bytes() != recvbuf.size_in_bytes()) {
                 throw std::runtime_error("Dimensions of send and receive data must match");
             }
@@ -134,6 +146,7 @@ namespace FMI {
          */
         template<typename T>
         void scan(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::Function<T> f) {
+            OperationGuard guard(this);
             if (sendbuf.size_in_bytes() != recvbuf.size_in_bytes()) {
                 throw std::runtime_error("Dimensions of send and receive data must match");
             }
@@ -168,6 +181,7 @@ namespace FMI {
         FMI::Utils::peer_num num_peers;
         std::string comm_name;
         FMI::Utils::Hint channel_hint = FMI::Utils::Hint::cheap;
+        std::shared_ptr<FMI::FT::CriuRuntime> criu_runtime;
 
         //! Helper utility to convert a typed function to a raw function without type information.
         template <typename T>
@@ -190,6 +204,28 @@ namespace FMI {
             };
             return func;
         }
+
+        class OperationGuard {
+        public:
+            explicit OperationGuard(Communicator* comm) : comm(comm) {
+                if (comm != nullptr) {
+                    comm->enter_operation();
+                }
+            }
+
+            ~OperationGuard() {
+                if (comm != nullptr) {
+                    comm->exit_operation();
+                }
+            }
+
+        private:
+            Communicator* comm;
+        };
+
+        void enter_operation();
+        void exit_operation();
+        void prepare_channels_for_checkpoint();
     };
 }
 

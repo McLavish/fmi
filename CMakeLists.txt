@@ -16,6 +16,12 @@ if (hasParent)
     set(FMI_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include/" PARENT_SCOPE)
 endif()
 
+if (hasParent)
+    set(FMI_BUILD_TOOLS_DEFAULT OFF)
+else()
+    set(FMI_BUILD_TOOLS_DEFAULT ON)
+endif()
+
 find_package(Boost COMPONENTS log REQUIRED)
 find_package(ZLIB REQUIRED)
 
@@ -30,6 +36,8 @@ set(FMI_SOURCES
     src/comm/PeerToPeer.cpp
     src/comm/Direct.cpp
     src/ft/Coordinator.cpp
+    src/ft/CriuRuntime.cpp
+    src/ft/CriuSupervisor.cpp
     src/ft/Session.cpp
 )
 
@@ -69,7 +77,12 @@ endif()
 #target_link_libraries(client FMI OpenMP::OpenMP_CXX)
 
 option(FMI_BUILD_TESTS "Build FMI tests" OFF)
+option(FMI_BUILD_TOOLS "Build FMI tools" ${FMI_BUILD_TOOLS_DEFAULT})
 
 if (FMI_BUILD_TESTS)
     add_subdirectory(tests)
+endif()
+
+if (FMI_BUILD_TOOLS)
+    add_subdirectory(tools)
 endif()

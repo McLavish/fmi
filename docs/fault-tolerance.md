@@ -1,6 +1,15 @@
 # FMI Fault Tolerance
 
-FMI fault tolerance v1 is coordinated rank migration across communicator epochs. It is designed for planned migration and restart, not transparent live process migration.
+FMI currently supports two distinct fault-tolerance modes:
+
+- `safe_point_restart`
+- `criu_coordinated`
+
+Both modes use Redis as the control plane. They differ in what happens to application state.
+
+## `safe_point_restart`
+
+This is the epoch-based migration mode that preserves logical rank IDs across communicator rebuilds.
 
 What it does:
 
@@ -16,9 +25,9 @@ What it does not do:
 - preserve in-flight collectives
 - recover arbitrary crashes in the middle of an FMI operation
 
-## Programming Model
+### Programming model
 
-The FT layer adds two APIs:
+The restart mode adds two APIs:
 
 - `FMI::FT::Session` / `fmi.FTSession`
 - `FMI::FT::Coordinator` / `fmi.FTCoordinator`
@@ -41,26 +50,13 @@ The intended flow is:
 6. Call `safe_point()` on the replacement worker.
 7. Continue on the rebuilt communicator for the new epoch.
 
-## Configuration
-
-Enable FT in the FMI JSON config and point the control plane at Redis.
+### Configuration
 
 ```json
 {
-  "backends": {
-    "Redis": {
-      "enabled": true,
-      "host": "127.0.0.1",
-      "port": 6379
-    },
-    "Direct": {
-      "enabled": true,
-      "host": "127.0.0.1",
-      "port": 10000
-    }
-  },
   "fault_tolerance": {
     "enabled": true,
+    "mode": "safe_point_restart",
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
@@ -74,7 +70,7 @@ Enable FT in the FMI JSON config and point the control plane at Redis.
 
 `preferred_data_backend = "Direct"` makes FT-enabled communicators fail fast if the TCP backend is not available.
 
-## C++ Usage
+### C++ usage
 
 ```cpp
 #include <fmi.h>
@@ -107,9 +103,9 @@ FMI::FT::Coordinator coordinator("config/fmi.json", comm_name, world_size);
 coordinator.request_migration(rank_to_move);
 ```
 
-## Python Usage
+### Python usage
 
-The Python bindings mirror the same model:
+The Python bindings mirror the restart model:
 
 - `fmi.FTSession`
 - `fmi.FTCoordinator`
@@ -143,9 +139,9 @@ phase2_sum = session.allreduce(state["phase2_value"], fmi.func(fmi.op.sum), fmi.
 
 The local Python demo that exercises this flow lives in [ft_migration_demo.py](/home/luca/fmi-original/fmi/runbooks/local-python311-direct/ft_migration_demo.py).
 
-## Checkpointing Responsibility
+### Checkpointing responsibility
 
-The FT layer only reconfigures communication. It does not serialize application memory for you.
+The restart mode only reconfigures communication. It does not serialize application memory for you.
 
 That means the application is responsible for:
 
@@ -153,12 +149,142 @@ That means the application is responsible for:
 - writing that state on `MigrateSelf`
 - restoring that state in the replacement worker before continuing
 
-For small Python services this can be as simple as writing a JSON file. For larger C++ applications it may be a custom binary checkpoint or an external durable store.
+## `criu_coordinated`
 
-## Local Demo
+This is a second FT mode that uses CRIU for coordinated rollback/restart on the same host. It is transparent at the FMI API layer: applications continue to use plain `FMI::Communicator`.
 
-For a runnable local Python example, see:
+What it does:
+
+- uses CRIU to capture process state instead of application-managed serialization
+- coordinates checkpoint and restore through Redis
+- quiesces only at FMI operation boundaries
+- keeps the `Communicator` API unchanged for C++ applications
+
+Current v1 limits:
+
+- same-host only
+- `Direct` is the only supported FMI data backend
+- Redis is required for control-plane coordination
+- no Python CRIU binding
+- no single-rank transparent migration
+- no cross-machine restore
+
+### Programming model
+
+In CRIU mode, the application does not use `FMI::FT::Session`. It uses `FMI::Communicator` directly.
+
+Internally, FMI:
+
+- registers each rank in Redis
+- counts active FMI operations
+- stops admitting new FMI operations after a checkpoint request
+- waits until the current operation drains
+- closes `Direct` sockets before the checkpoint
+- blocks until the supervisor publishes the restore generation
+
+Because CRIU captures memory, the application does not need explicit serialize/restore hooks for in-memory state.
+
+### Configuration
+
+```json
+{
+  "backends": {
+    "Direct": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 10000,
+      "max_timeout": 1000
+    },
+    "Redis": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 6379
+    }
+  },
+  "fault_tolerance": {
+    "enabled": true,
+    "mode": "criu_coordinated",
+    "control_backend": "Redis",
+    "control_host": "127.0.0.1",
+    "control_port": 6379,
+    "preferred_data_backend": "Direct",
+    "images_dir": "/tmp/fmi-criu-images",
+    "poll_ms": 25,
+    "quiesce_timeout_ms": 2000
+  }
+}
+```
+
+The checked-in example is [fmi_criu_test.json](/home/luca/fmi-original/fmi/config/fmi_criu_test.json).
+
+### C++ usage
+
+```cpp
+#include <fmi.h>
+
+FMI::Communicator comm(rank, world_size, "config/fmi_criu_test.json", comm_name);
+
+int state = rank + 1;
+
+FMI::Comm::Data<int> phase1_value(state);
+FMI::Comm::Data<int> phase1_sum;
+comm.allreduce(phase1_value, phase1_sum, sum_fn());
+
+state += 100;
+
+comm.barrier();
+
+FMI::Comm::Data<int> phase2_value(state);
+FMI::Comm::Data<int> phase2_sum;
+comm.allreduce(phase2_value, phase2_sum, sum_fn());
+```
+
+The plain-`Communicator` demo for this mode lives in [criu_checkpoint_demo.cpp](/home/luca/fmi-original/fmi/tests/criu_checkpoint_demo.cpp).
+
+### Supervisor flow
+
+CRIU mode is driven by `fmi-criu-supervisor`:
+
+```text
+fmi-criu-supervisor checkpoint <comm_name> <num_peers> <config>
+fmi-criu-supervisor restore <comm_name> <num_peers> <config> [generation]
+fmi-criu-supervisor status <comm_name> <num_peers> <config>
+fmi-criu-supervisor cleanup <comm_name> <num_peers> <config>
+```
+
+Checkpoint flow:
+
+1. The supervisor requests a new checkpoint generation in Redis.
+2. FMI ranks stop entering new communication operations.
+3. Once all local ranks report `QUIESCED`, the supervisor runs `criu dump`.
+4. Images are stored under `images_dir/<comm_name>/generation-<N>/rank-<r>/`.
+
+Restore flow:
+
+1. The supervisor chooses a completed generation.
+2. It publishes the restore generation and launches `criu restore` for each rank image directory.
+3. Restored processes resume from the memory state captured at checkpoint time.
+
+### Operational requirements
+
+You need all of the following on the target Linux host:
+
+- a running Redis instance for the control plane
+- a running `tcpunchd` instance for the `Direct` backend
+- a working CRIU installation
+- the required kernel capabilities for checkpoint/restore
+
+On a typical system, `criu check` must succeed before live checkpoint/restore will work. In this development environment, CRIU is installed but the required capabilities are not available, so the repository test suite uses a mock `criu` binary to exercise the supervisor flow without performing a real dump/restore.
+
+## Local demos
+
+Restart-mode Python demo:
 
 - [runbooks/local-python311-direct/README.md](/home/luca/fmi-original/fmi/runbooks/local-python311-direct/README.md)
 - [runbooks/local-python311-direct/fmi-ft.json](/home/luca/fmi-original/fmi/runbooks/local-python311-direct/fmi-ft.json)
 - [runbooks/local-python311-direct/ft_migration_demo.py](/home/luca/fmi-original/fmi/runbooks/local-python311-direct/ft_migration_demo.py)
+
+CRIU-mode C++ demo:
+
+- [fmi_criu_test.json](/home/luca/fmi-original/fmi/config/fmi_criu_test.json)
+- [criu_checkpoint_demo.cpp](/home/luca/fmi-original/fmi/tests/criu_checkpoint_demo.cpp)

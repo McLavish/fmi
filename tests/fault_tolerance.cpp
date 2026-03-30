@@ -3,11 +3,18 @@
 #include "../include/fmi.h"
 
 #include <chrono>
+#include <filesystem>
 #include <future>
 
 namespace {
-    const std::string ft_config_path = "../../config/fmi_ft_test.json";
-    const std::string missing_direct_config_path = "../../config/fmi_ft_direct_missing.json";
+    namespace fs = std::filesystem;
+
+    std::string repo_config_path(const std::string& name) {
+        return (fs::path(__FILE__).parent_path().parent_path() / "config" / name).lexically_normal().string();
+    }
+
+    const std::string ft_config_path = repo_config_path("fmi_ft_test.json");
+    const std::string missing_direct_config_path = repo_config_path("fmi_ft_direct_missing.json");
 
     std::string unique_comm_name() {
         auto now = std::chrono::system_clock::now().time_since_epoch();

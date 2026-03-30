@@ -17,6 +17,10 @@ namespace FMI::Comm {
 
         double get_price(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;
 
+        void finalize() override;
+
+        void prepare_for_checkpoint() override;
+
     private:
         //! Contains the socket file descriptor for the communication with the peers.
         std::vector<int> sockets;
@@ -33,6 +37,8 @@ namespace FMI::Comm {
 
         //! Checks if connection with a peer partner_id is already established, otherwise establishes it using TCPunch.
         void check_socket(Utils::peer_num partner_id, std::string pair_name);
+
+        void close_sockets();
     };
 }
 
