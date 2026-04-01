@@ -25,6 +25,10 @@ endif()
 find_package(Boost COMPONENTS log REQUIRED)
 find_package(ZLIB REQUIRED)
 
+if(NOT FMI_USE_STATIC_BOOST)
+    add_definitions(BOOST_LOG_DYN_LINK BOOST_ALL_DYN_LINK)
+endif()
+
 add_subdirectory(extern/TCPunch/client/)
 
 set(FMI_SOURCES
