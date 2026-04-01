@@ -64,11 +64,18 @@ if(FMI_ENABLE_REDIS)
 endif()
 
 add_library(FMI STATIC ${FMI_SOURCES})
+add_library(FMI::FMI ALIAS FMI)
 
-target_include_directories(FMI PRIVATE ${Boost_INCLUDE_DIRS} ${TCPUNCH_INCLUDE_DIRS})
+target_include_directories(FMI
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        ${Boost_INCLUDE_DIRS}
+        ${TCPUNCH_INCLUDE_DIRS}
+)
 target_compile_definitions(FMI PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}>)
 
-target_link_libraries(FMI ${FMI_LINK_LIBS})
+target_link_libraries(FMI PUBLIC ${FMI_LINK_LIBS})
 
 if(FMI_ENABLE_REDIS)
     target_include_directories(FMI PRIVATE ${HIREDIS_INCLUDE_DIRS})
