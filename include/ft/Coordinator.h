@@ -10,10 +10,13 @@
 #include <string>
 #include <vector>
 
-namespace FMI::FT {
-    class Session;
+namespace FMI {
+    class Communicator;
+}
 
-    //! Control-plane client used both by FMI::FT::Session and by external daemons that request migrations.
+namespace FMI::FT {
+    class TransparentMigrationRuntime;
+    //! Control-plane client used by FMI::Communicator (transparent migration) and by external daemons that request migrations.
     class Coordinator {
     public:
         Coordinator(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
@@ -60,7 +63,8 @@ namespace FMI::FT {
         struct Impl;
         std::shared_ptr<Impl> impl;
 
-        friend class Session;
+        friend class FMI::Communicator;
+        friend class TransparentMigrationRuntime;
 
         void ensure_job() const;
         [[nodiscard]] bool has_pending_migration() const;

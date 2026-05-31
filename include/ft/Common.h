@@ -9,7 +9,7 @@
 
 namespace FMI::FT {
     enum class Mode : std::uint8_t {
-        SafePointRestart,
+        TransparentMigration,
         CriuCoordinated
     };
 

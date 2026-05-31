@@ -42,7 +42,7 @@ set(FMI_SOURCES
     src/ft/Coordinator.cpp
     src/ft/CriuRuntime.cpp
     src/ft/CriuSupervisor.cpp
-    src/ft/Session.cpp
+    src/ft/TransparentMigrationRuntime.cpp
 )
 
 set(FMI_LINK_LIBS

@@ -6,7 +6,7 @@
 #include "utils/ChannelPolicy.h"
 
 namespace FMI::FT {
-    class CriuRuntime;
+    class OperationRuntime;
 }
 
 namespace FMI {
@@ -21,7 +21,7 @@ namespace FMI {
          * @param faas_memory Amount of memory (in MiB) that is allocated to the function, used for performance model calculations.
          */
         Communicator(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path, std::string comm_name,
-                     unsigned int faas_memory = 128);
+                     unsigned int faas_memory = 128, std::string worker_id = "", std::string placement = "");
 
         //! Finalizes all active channels
         ~Communicator();
@@ -174,14 +174,19 @@ namespace FMI {
         //! Returns the communicator name passed to the underlying channels.
         [[nodiscard]] std::string get_comm_name() const { return comm_name; }
 
+        //! Rebuild all channels under a new epoch-fenced comm_name (in-place; object identity preserved).
+        void reconfigure_to_epoch(const std::string& new_comm_name);
+
     private:
         std::shared_ptr<FMI::Utils::ChannelPolicy> policy;
         std::map<std::string, std::shared_ptr<FMI::Comm::Channel>> channels;
         FMI::Utils::peer_num peer_id;
         FMI::Utils::peer_num num_peers;
         std::string comm_name;
+        std::string config_path;
+        unsigned int faas_memory = 128;
         FMI::Utils::Hint channel_hint = FMI::Utils::Hint::cheap;
-        std::shared_ptr<FMI::FT::CriuRuntime> criu_runtime;
+        std::shared_ptr<FMI::FT::OperationRuntime> operation_runtime;
 
         //! Helper utility to convert a typed function to a raw function without type information.
         template <typename T>
@@ -226,6 +231,7 @@ namespace FMI {
         void enter_operation();
         void exit_operation();
         void prepare_channels_for_checkpoint();
+        void build_channels(const std::string& effective_comm_name);
     };
 }
 

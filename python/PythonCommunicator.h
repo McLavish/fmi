@@ -10,7 +10,7 @@ namespace FMI::Utils {
     class PythonCommunicator : private PythonBindingSupport {
     public:
         PythonCommunicator(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path, std::string comm_name,
-                           unsigned int faas_memory = 128);
+                           unsigned int faas_memory = 128, std::string worker_id = "", std::string placement = "");
 
         void send(const boost::python::object& py_obj, FMI::Utils::peer_num dst, FMI::Utils::PythonData type);
 

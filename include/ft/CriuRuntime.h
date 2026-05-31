@@ -4,6 +4,7 @@
 #include "../utils/Common.h"
 #include "../utils/Configuration.h"
 #include "Coordinator.h"
+#include "OperationRuntime.h"
 
 #include <condition_variable>
 #include <cstdint>
@@ -13,7 +14,7 @@
 #include <string>
 
 namespace FMI::FT {
-    class CriuRuntime {
+    class CriuRuntime : public OperationRuntime {
     public:
         CriuRuntime(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path, std::string comm_name,
                     std::string backend_name, std::function<void()> prepare_for_checkpoint);

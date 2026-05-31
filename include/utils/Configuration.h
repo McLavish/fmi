@@ -10,7 +10,7 @@
 namespace FMI::Utils {
     struct FaultToleranceConfig {
         bool enabled = false;
-        FMI::FT::Mode mode = FMI::FT::Mode::SafePointRestart;
+        FMI::FT::Mode mode = FMI::FT::Mode::TransparentMigration;
         std::string control_backend = "Redis";
         std::string control_host = "127.0.0.1";
         unsigned int control_port = 6379;
