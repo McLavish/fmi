@@ -39,10 +39,20 @@ Post-migration directory (epoch 1):
   rank1: same worker_id,  placement=vm
 ```
 
-**Known limitation:** the consistent cut (both ranks stopping epoch 0 at the same
-boundary) is not enforced by a protocol — the demo relies on the migration flag
-being observed between collectives. The residual race (flag set mid-collective on
-one rank) is resolved in production by CRIU's coordinated cut.
+**Known limitations:**
+
+1. **Consistent cut** — the demo relies on the migration flag being observed
+   between collectives; no protocol enforces it. Resolved in production by CRIU's
+   coordinated cut.
+
+2. **Fixed-count loop tail** — with a `range(N)` loop and a stateless restart,
+   the replacement runs all N iterations on epoch 1 while the survivor only runs
+   `N - k` (where `k` iterations completed before migration). The survivor exits
+   after N total; the replacement's last `k` allreduces run without a partner and
+   return stale/partial values (the Direct backend logs `Broken pipe` but does not
+   raise). This does not affect the rank-directory assertion; the migration
+   mechanism is demonstrated correctly. A barrier-terminated loop (where the stop
+   condition is itself an allreduce) eliminates the mismatch.
 
 ---
 
