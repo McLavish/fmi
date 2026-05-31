@@ -1,6 +1,8 @@
 #ifndef FMI_PYTHONFT_H
 #define FMI_PYTHONFT_H
 
+#include <boost/python/list.hpp>
+
 #include <ft/Coordinator.h>
 #include <ft/Session.h>
 #include <memory>
@@ -9,10 +11,17 @@
 #include "PythonBindingSupport.h"
 
 namespace FMI::Utils {
+    struct PythonRankDirectoryEntry {
+        FMI::Utils::peer_num rank = 0;
+        std::string worker_id;
+        std::string placement;
+        std::string state;
+    };
+
     class PythonFTSession : private PythonBindingSupport {
     public:
         PythonFTSession(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path, std::string comm_name,
-                        std::string worker_id = "", unsigned int faas_memory = 128);
+                        std::string worker_id = "", unsigned int faas_memory = 128, std::string placement = "");
 
         void send(const boost::python::object& py_obj, FMI::Utils::peer_num dst, FMI::Utils::PythonData type);
         boost::python::object recv(FMI::Utils::peer_num src, FMI::Utils::PythonData type);
@@ -42,6 +51,8 @@ namespace FMI::Utils {
         void request_migration(FMI::Utils::peer_num rank);
         void clear_job_state();
         [[nodiscard]] std::uint64_t epoch() const;
+        std::string placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank);
+        boost::python::list directory_snapshot(std::uint64_t epoch);
 
     private:
         std::shared_ptr<FMI::FT::Coordinator> coordinator;

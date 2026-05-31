@@ -32,7 +32,7 @@ BOOST_PYTHON_MODULE(fmi)
     ;
 
     class_<FMI::Utils::PythonFTSession>("FTSession", init<FMI::Utils::peer_num, FMI::Utils::peer_num, std::string, std::string,
-                                                         optional<std::string, unsigned int> >())
+                                                         optional<std::string, unsigned int, std::string> >())
         .def("send", &FMI::Utils::PythonFTSession::send)
         .def("recv", &FMI::Utils::PythonFTSession::recv)
         .def("bcast", &FMI::Utils::PythonFTSession::bcast)
@@ -47,10 +47,19 @@ BOOST_PYTHON_MODULE(fmi)
         .def("epoch", &FMI::Utils::PythonFTSession::epoch)
     ;
 
+    class_<FMI::Utils::PythonRankDirectoryEntry>("RankDirectoryEntry")
+        .def_readonly("rank", &FMI::Utils::PythonRankDirectoryEntry::rank)
+        .def_readonly("worker_id", &FMI::Utils::PythonRankDirectoryEntry::worker_id)
+        .def_readonly("placement", &FMI::Utils::PythonRankDirectoryEntry::placement)
+        .def_readonly("state", &FMI::Utils::PythonRankDirectoryEntry::state)
+    ;
+
     class_<FMI::Utils::PythonFTCoordinator>("FTCoordinator", init<std::string, std::string, FMI::Utils::peer_num>())
         .def("request_migration", &FMI::Utils::PythonFTCoordinator::request_migration)
         .def("clear_job_state", &FMI::Utils::PythonFTCoordinator::clear_job_state)
         .def("epoch", &FMI::Utils::PythonFTCoordinator::epoch)
+        .def("placement_for_rank", &FMI::Utils::PythonFTCoordinator::placement_for_rank)
+        .def("directory_snapshot", &FMI::Utils::PythonFTCoordinator::directory_snapshot)
     ;
 
     enum_<FMI::Utils::PythonType>("datatypes")

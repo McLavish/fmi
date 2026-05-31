@@ -2,10 +2,29 @@
 
 #include <boost/python/extract.hpp>
 
+#include <stdexcept>
+
+namespace {
+    std::string rank_state_to_string(FMI::FT::RankState state) {
+        switch (state) {
+            case FMI::FT::RankState::Active:
+                return "ACTIVE";
+            case FMI::FT::RankState::MigrationPending:
+                return "MIGRATION_PENDING";
+            case FMI::FT::RankState::Quiesced:
+                return "QUIESCED";
+            case FMI::FT::RankState::Replaced:
+                return "REPLACED";
+        }
+        throw std::runtime_error("Unknown rank state");
+    }
+}
+
 FMI::Utils::PythonFTSession::PythonFTSession(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path,
-                                             std::string comm_name, std::string worker_id, unsigned int faas_memory) {
+                                             std::string comm_name, std::string worker_id, unsigned int faas_memory,
+                                             std::string placement) {
     session = std::make_shared<FMI::FT::Session>(peer_id, num_peers, std::move(config_path), std::move(comm_name), std::move(worker_id),
-                                                 faas_memory);
+                                                 faas_memory, std::move(placement));
     this->peer_id = peer_id;
     this->num_peers = num_peers;
 }
@@ -280,4 +299,22 @@ void FMI::Utils::PythonFTCoordinator::clear_job_state() {
 
 std::uint64_t FMI::Utils::PythonFTCoordinator::epoch() const {
     return coordinator->epoch();
+}
+
+std::string FMI::Utils::PythonFTCoordinator::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) {
+    return coordinator->placement_for_rank(epoch, rank);
+}
+
+boost::python::list FMI::Utils::PythonFTCoordinator::directory_snapshot(std::uint64_t epoch) {
+    boost::python::list result;
+    auto snapshot = coordinator->directory_snapshot(epoch);
+    for (const auto& entry : snapshot) {
+        FMI::Utils::PythonRankDirectoryEntry python_entry;
+        python_entry.rank = entry.rank;
+        python_entry.worker_id = entry.worker_id;
+        python_entry.placement = entry.placement;
+        python_entry.state = rank_state_to_string(entry.state);
+        result.append(boost::python::object(python_entry));
+    }
+    return result;
 }
