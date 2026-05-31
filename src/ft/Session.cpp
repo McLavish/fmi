@@ -16,13 +16,14 @@ namespace {
 }
 
 FMI::FT::Session::Session(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path, std::string comm_name,
-                          std::string worker_id, unsigned int faas_memory) :
+                          std::string worker_id, unsigned int faas_memory, std::string placement) :
         peer_id(peer_id),
         num_peers(num_peers),
         config_path(std::move(config_path)),
         base_comm_name(std::move(comm_name)),
         worker_id(worker_id.empty() ? make_worker_id(peer_id) : std::move(worker_id)),
-        faas_memory(faas_memory) {
+        faas_memory(faas_memory),
+        placement(std::move(placement)) {
     Utils::Configuration config(this->config_path);
     auto ft_config = config.get_fault_tolerance_config();
     ft_enabled = ft_config.enabled;
@@ -47,6 +48,9 @@ FMI::FT::Session::Session(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num
 
     if (!replacement_candidate) {
         coordinator->register_rank(active_epoch, peer_id, this->worker_id, RankState::Active);
+        if (!placement.empty()) {
+            coordinator->set_placement(active_epoch, peer_id, placement);
+        }
         coordinator->refresh_lease(active_epoch, peer_id, this->worker_id);
     }
 
@@ -70,6 +74,9 @@ FMI::FT::Event FMI::FT::Session::safe_point() {
         active_epoch = observed_epoch;
         replacement_candidate = false;
         coordinator->register_rank(active_epoch, peer_id, worker_id, RankState::Active);
+        if (!placement.empty()) {
+            coordinator->set_placement(active_epoch, peer_id, placement);
+        }
         coordinator->refresh_lease(active_epoch, peer_id, worker_id);
         build_communicator(active_epoch);
         return Event::Reconfigured;
@@ -77,6 +84,9 @@ FMI::FT::Event FMI::FT::Session::safe_point() {
 
     if (!replacement_candidate) {
         coordinator->register_rank(active_epoch, peer_id, worker_id, RankState::Active);
+        if (!placement.empty()) {
+            coordinator->set_placement(active_epoch, peer_id, placement);
+        }
         coordinator->refresh_lease(active_epoch, peer_id, worker_id);
     }
 
@@ -94,6 +104,9 @@ FMI::FT::Event FMI::FT::Session::safe_point() {
     std::uint64_t next_epoch = active_epoch + 1;
     RankState join_state = replacement_candidate ? RankState::Replaced : RankState::Active;
     coordinator->register_rank(next_epoch, peer_id, worker_id, join_state);
+    if (!placement.empty()) {
+        coordinator->set_placement(next_epoch, peer_id, placement);
+    }
     coordinator->refresh_lease(next_epoch, peer_id, worker_id);
 
     auto start = std::chrono::steady_clock::now();
@@ -103,12 +116,18 @@ FMI::FT::Event FMI::FT::Session::safe_point() {
             active_epoch = observed_epoch;
             replacement_candidate = false;
             coordinator->register_rank(active_epoch, peer_id, worker_id, RankState::Active);
+            if (!placement.empty()) {
+                coordinator->set_placement(active_epoch, peer_id, placement);
+            }
             coordinator->refresh_lease(active_epoch, peer_id, worker_id);
             build_communicator(active_epoch);
             return Event::Reconfigured;
         }
 
         coordinator->register_rank(next_epoch, peer_id, worker_id, join_state);
+        if (!placement.empty()) {
+            coordinator->set_placement(next_epoch, peer_id, placement);
+        }
         coordinator->refresh_lease(next_epoch, peer_id, worker_id);
         if (coordinator->live_member_count(next_epoch) >= num_peers) {
             coordinator->promote_epoch(next_epoch);

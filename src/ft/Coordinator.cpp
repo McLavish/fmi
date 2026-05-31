@@ -67,6 +67,22 @@ namespace {
         throw std::runtime_error("Unknown rank state");
     }
 
+    FMI::FT::RankState rank_state_from_string(const std::string& state) {
+        if (state == "ACTIVE") {
+            return FMI::FT::RankState::Active;
+        }
+        if (state == "MIGRATION_PENDING") {
+            return FMI::FT::RankState::MigrationPending;
+        }
+        if (state == "QUIESCED") {
+            return FMI::FT::RankState::Quiesced;
+        }
+        if (state == "REPLACED") {
+            return FMI::FT::RankState::Replaced;
+        }
+        throw std::runtime_error("Unknown rank state string: " + state);
+    }
+
     std::string state_to_string(FMI::FT::CriuJobState state) {
         switch (state) {
             case FMI::FT::CriuJobState::Running:
@@ -159,6 +175,10 @@ struct FMI::FT::Coordinator::Impl {
         return prefix() + "epoch:" + std::to_string(epoch) + ":states";
     }
 
+    [[nodiscard]] std::string placement_key(std::uint64_t epoch) const {
+        return prefix() + "epoch:" + std::to_string(epoch) + ":placement";
+    }
+
     [[nodiscard]] std::string lease_key(std::uint64_t epoch, Utils::peer_num rank) const {
         return prefix() + "epoch:" + std::to_string(epoch) + ":lease:" + std::to_string(rank);
     }
@@ -239,6 +259,64 @@ void FMI::FT::Coordinator::request_migration(FMI::Utils::peer_num rank) {
     auto current_epoch = epoch();
     run_command(impl->config, "SADD " + impl->pending_key() + " " + std::to_string(rank));
     set_rank_state(current_epoch, rank, RankState::MigrationPending);
+#endif
+}
+
+void FMI::FT::Coordinator::set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const {
+#if FMI_ENABLE_REDIS
+    run_command(impl->config, "HSET " + impl->placement_key(epoch) + " " + std::to_string(rank) + " " + placement);
+#endif
+}
+
+std::string FMI::FT::Coordinator::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
+#if FMI_ENABLE_REDIS
+    auto reply = run_command(impl->config, "HGET " + impl->placement_key(epoch) + " " + std::to_string(rank));
+    if (reply->type == REDIS_REPLY_NIL || reply->str == nullptr) {
+        return "";
+    }
+    return reply->str;
+#else
+    return "";
+#endif
+}
+
+std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::Coordinator::directory_snapshot(std::uint64_t epoch) const {
+#if FMI_ENABLE_REDIS
+    std::vector<FMI::FT::RankDirectoryEntry> ranks;
+    auto reply = run_command(impl->config, "HKEYS " + impl->members_key(epoch));
+    if (reply->type != REDIS_REPLY_ARRAY) {
+        return ranks;
+    }
+    for (std::size_t i = 0; i < reply->elements; i++) {
+        auto* rank_reply = reply->element[i];
+        if (rank_reply == nullptr || rank_reply->str == nullptr) {
+            continue;
+        }
+        auto rank_id = static_cast<FMI::Utils::peer_num>(std::stoul(rank_reply->str));
+        FMI::FT::RankDirectoryEntry info;
+        info.rank = rank_id;
+
+        auto worker = run_command(impl->config, "HGET " + impl->members_key(epoch) + " " + std::to_string(rank_id));
+        if (worker->type != REDIS_REPLY_NIL && worker->str != nullptr) {
+            info.worker_id = worker->str;
+        }
+        auto state = run_command(impl->config, "HGET " + impl->states_key(epoch) + " " + std::to_string(rank_id));
+        if (state->type != REDIS_REPLY_NIL && state->str != nullptr) {
+            info.state = rank_state_from_string(state->str);
+        }
+        auto placement = run_command(impl->config, "HGET " + impl->placement_key(epoch) + " " + std::to_string(rank_id));
+        if (placement->type != REDIS_REPLY_NIL && placement->str != nullptr) {
+            info.placement = placement->str;
+        }
+        ranks.push_back(info);
+    }
+
+    std::sort(ranks.begin(), ranks.end(), [](const FMI::FT::RankDirectoryEntry& left, const FMI::FT::RankDirectoryEntry& right) {
+        return left.rank < right.rank;
+    });
+    return ranks;
+#else
+    return {};
 #endif
 }
 

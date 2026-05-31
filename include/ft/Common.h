@@ -26,6 +26,13 @@ namespace FMI::FT {
         Replaced
     };
 
+    struct RankDirectoryEntry {
+        FMI::Utils::peer_num rank = 0;
+        std::string worker_id;
+        std::string placement;
+        RankState state = RankState::Active;
+    };
+
     enum class CriuJobState : std::uint8_t {
         Running,
         CheckpointRequested,

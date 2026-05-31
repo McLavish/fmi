@@ -13,7 +13,7 @@ namespace FMI::FT {
     class Session {
     public:
         Session(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path, std::string comm_name,
-                std::string worker_id = "", unsigned int faas_memory = 128);
+                std::string worker_id = "", unsigned int faas_memory = 128, std::string placement = "");
 
         //! Returns the communicator for the currently active epoch.
         FMI::Communicator& comm();
@@ -31,6 +31,7 @@ namespace FMI::FT {
         std::string base_comm_name;
         std::string worker_id;
         unsigned int faas_memory;
+        std::string placement;
         bool ft_enabled = false;
         bool replacement_candidate = false;
         std::uint64_t active_epoch = 0;

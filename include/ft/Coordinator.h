@@ -27,6 +27,10 @@ namespace FMI::FT {
         //! Request a migration for the logical rank.
         void request_migration(FMI::Utils::peer_num rank);
 
+        void set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const;
+        [[nodiscard]] std::string placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
+        [[nodiscard]] std::vector<RankDirectoryEntry> directory_snapshot(std::uint64_t epoch) const;
+
         //! Remove all FT metadata associated with this communicator name.
         void clear_job_state();
 
