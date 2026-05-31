@@ -8,3 +8,4 @@ docs/latex/
 samconfig.toml
 build*
 extern*
+__pycache__/
