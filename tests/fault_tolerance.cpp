@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <thread>
 
 namespace {
     namespace fs = std::filesystem;
@@ -35,40 +36,96 @@ namespace {
 
 BOOST_AUTO_TEST_SUITE(FaultTolerance);
 
-BOOST_AUTO_TEST_CASE(preferred_backend_requires_direct) {
+// Preferred data backend listed in FT config but not in active backends → throw
+BOOST_AUTO_TEST_CASE(preferred_backend_missing) {
     BOOST_CHECK_THROW(FMI::Communicator(0, 2, missing_direct_config_path, "ft-missing"), std::runtime_error);
 }
 
-BOOST_AUTO_TEST_CASE(session_reconfigures_epoch_after_migration) {
+// In transparent_migration mode the Communicator adopts an epoch-fenced comm_name
+BOOST_AUTO_TEST_CASE(transparent_migration_epoch_fenced_comm_name) {
     std::string comm_name = unique_comm_name();
     if (!redis_available(comm_name)) {
-        BOOST_TEST_MESSAGE("Skipping FT session migration test because Redis is unavailable");
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
         return;
     }
 
     FMI::FT::Coordinator coordinator(ft_config_path, comm_name, 2);
     coordinator.clear_job_state();
 
-    FMI::FT::Session non_target(0, 2, ft_config_path, comm_name, "worker-a");
-    FMI::FT::Session target(1, 2, ft_config_path, comm_name, "worker-b");
+    FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a");
+    FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b");
 
+    BOOST_CHECK_EQUAL(rank0.get_comm_name(), comm_name + "@epoch=0");
+    BOOST_CHECK_EQUAL(rank1.get_comm_name(), comm_name + "@epoch=0");
+
+    coordinator.clear_job_state();
+}
+
+// Placement is stored in the rank directory and visible via directory_snapshot
+BOOST_AUTO_TEST_CASE(transparent_migration_placement_in_directory) {
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+
+    FMI::FT::Coordinator coordinator(ft_config_path, comm_name, 2);
+    coordinator.clear_job_state();
+
+    FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a", "vm");
+    FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b", "vm");
+
+    auto dir = coordinator.directory_snapshot(0);
+    BOOST_REQUIRE_EQUAL(dir.size(), 2u);
+    auto entry0 = *std::find_if(dir.begin(), dir.end(), [](const FMI::FT::RankDirectoryEntry& e){ return e.rank == 0; });
+    auto entry1 = *std::find_if(dir.begin(), dir.end(), [](const FMI::FT::RankDirectoryEntry& e){ return e.rank == 1; });
+    BOOST_CHECK_EQUAL(entry0.placement, "vm");
+    BOOST_CHECK_EQUAL(entry1.placement, "vm");
+    BOOST_CHECK_EQUAL(entry0.worker_id, "worker-a");
+    BOOST_CHECK_EQUAL(entry1.worker_id, "worker-b");
+
+    coordinator.clear_job_state();
+}
+
+// Replacement rank constructor detects worker_id mismatch and joins epoch N+1
+BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+
+    FMI::FT::Coordinator coordinator(ft_config_path, comm_name, 2);
+    coordinator.clear_job_state();
+
+    // Rank 0 and rank 1 register into epoch 0
+    FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a");
+    FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b");
+
+    // Trigger migration for rank 1
     coordinator.request_migration(1);
 
-    auto non_target_result = std::async(std::launch::async, [&non_target]() {
-        return non_target.safe_point();
+    // Launch replacement in a thread (its constructor will block until epoch 1 is promoted)
+    std::future<std::string> replacement_comm_name = std::async(std::launch::async, [&]() {
+        // Different worker_id → detected as replacement candidate → joins epoch 1
+        FMI::Communicator replacement(1, 2, ft_config_path, comm_name, 128, "worker-c", "serverless");
+        return replacement.get_comm_name();
     });
 
-    BOOST_CHECK(target.safe_point() == FMI::FT::Event::MigrateSelf);
+    // Give the replacement thread a moment to enter its constructor spin loop,
+    // then promote epoch 1 externally (simulating what a survivor's enter_operation
+    // would do after calling a collective — not possible here without tcpunchd).
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    coordinator.promote_epoch(1);
 
-    FMI::FT::Session replacement(1, 2, ft_config_path, comm_name, "worker-c");
-    BOOST_CHECK(replacement.safe_point() == FMI::FT::Event::Reconfigured);
-    BOOST_CHECK(non_target_result.get() == FMI::FT::Event::Reconfigured);
+    std::string rep_name = replacement_comm_name.get();
+    BOOST_CHECK_EQUAL(rep_name, comm_name + "@epoch=1");
 
-    BOOST_CHECK_EQUAL(non_target.epoch(), 1);
-    BOOST_CHECK_EQUAL(replacement.epoch(), 1);
-    BOOST_CHECK_EQUAL(non_target.comm().get_comm_name(), comm_name + "@epoch=1");
-    BOOST_CHECK_EQUAL(replacement.comm().get_comm_name(), comm_name + "@epoch=1");
-    BOOST_CHECK(non_target.safe_point() == FMI::FT::Event::None);
+    auto dir1 = coordinator.directory_snapshot(1);
+    auto rep = std::find_if(dir1.begin(), dir1.end(), [](const FMI::FT::RankDirectoryEntry& e){ return e.rank == 1; });
+    BOOST_REQUIRE(rep != dir1.end());
+    BOOST_CHECK_EQUAL(rep->worker_id, "worker-c");
+    BOOST_CHECK_EQUAL(rep->placement, "serverless");
 
     coordinator.clear_job_state();
 }

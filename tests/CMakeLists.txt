@@ -8,8 +8,5 @@ add_executable (Boost_Tests_run channels.cpp communicator.cpp fault_tolerance.cp
 target_link_libraries (Boost_Tests_run ${Boost_LIBRARIES} FMI OpenMP::OpenMP_CXX)
 target_compile_definitions (Boost_Tests_run PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}>)
 
-add_executable (ft_migration_demo ft_migration_demo.cpp)
-target_link_libraries (ft_migration_demo FMI)
-
 add_executable (criu_checkpoint_demo criu_checkpoint_demo.cpp)
 target_link_libraries (criu_checkpoint_demo FMI)

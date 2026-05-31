@@ -30,12 +30,20 @@ namespace FMI::FT {
         //! Request a migration for the logical rank.
         void request_migration(FMI::Utils::peer_num rank);
 
-        void set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const;
         [[nodiscard]] std::string placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
         [[nodiscard]] std::vector<RankDirectoryEntry> directory_snapshot(std::uint64_t epoch) const;
 
         //! Remove all FT metadata associated with this communicator name.
         void clear_job_state();
+
+        //! Return the number of members with a live lease in the given epoch.
+        [[nodiscard]] std::size_t live_member_count(std::uint64_t epoch) const;
+
+        //! Promote the epoch to next_epoch (idempotent).
+        void promote_epoch(std::uint64_t next_epoch) const;
+
+        //! Write placement for a rank in a given epoch.
+        void set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const;
 
         //! Remove all CRIU FT metadata associated with this communicator name.
         void clear_criu_job_state();
@@ -73,8 +81,6 @@ namespace FMI::FT {
         void set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, RankState state) const;
         [[nodiscard]] std::string worker_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
         void refresh_lease(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id) const;
-        [[nodiscard]] std::size_t live_member_count(std::uint64_t epoch) const;
-        void promote_epoch(std::uint64_t next_epoch) const;
         [[nodiscard]] unsigned int heartbeat_ms() const;
         [[nodiscard]] unsigned int lease_ms() const;
     };

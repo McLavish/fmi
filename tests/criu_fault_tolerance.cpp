@@ -229,10 +229,6 @@ BOOST_AUTO_TEST_CASE(criu_mode_requires_direct_only_backend) {
     fs::remove_all(temp_dir);
 }
 
-BOOST_AUTO_TEST_CASE(session_rejects_criu_mode) {
-    BOOST_CHECK_THROW(FMI::FT::Session(0, 2, criu_config_path, unique_comm_name("criu-session"), "worker-0"), std::runtime_error);
-}
-
 BOOST_AUTO_TEST_CASE(coordinator_tracks_criu_checkpoint_and_restore_state) {
     std::string comm_name = unique_comm_name();
     if (!redis_available(criu_config_path, comm_name, 2)) {
