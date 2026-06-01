@@ -1,0 +1,30 @@
+# AMI image for LocalStack EC2 Docker VM Manager.
+# Tagged localstack-ec2/fmi-vm:ami-00000001 so that
+# "aws ec2 run-instances --image-id ami-00000001" launches a real container.
+#
+# Based on the GCC10 Lambda build image that already contains Python 3.11 and
+# the compiled fmi.so bundle.  The bundle is COPY'd in from the host build
+# output so the image is self-contained (no bind-mounts needed at runtime).
+
+FROM fmi-localstack-build:redis-gcc10
+
+# Runtime paths match those used by the Lambda zip so worker_core.py is
+# identical on both substrates.
+ENV PYTHONPATH=/var/task
+ENV LD_LIBRARY_PATH=/var/task/lib:/var/lang/lib:/lib64:/usr/lib64
+
+# Copy the pre-built bundle
+COPY build/bundle/fmi.so /var/task/fmi.so
+
+# Copy bundle shared libs (may be empty directory, COPY handles that)
+COPY build/bundle/lib/ /var/task/lib/
+
+# Copy worker Python sources and FMI config
+COPY worker_core.py    /var/task/worker_core.py
+COPY vm_worker.py      /var/task/vm_worker.py
+COPY fmi-worker.json   /var/task/fmi-worker.json
+
+WORKDIR /var/task
+
+# Default entrypoint: run vm_worker.py (overridden per-instance via user-data)
+ENTRYPOINT ["/var/lang/bin/python3.11", "/var/task/vm_worker.py"]

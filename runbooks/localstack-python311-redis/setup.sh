@@ -5,6 +5,7 @@ RUNBOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$RUNBOOK_DIR/../.." && pwd)"
 ENDPOINT_URL="http://localhost:4566"
 BUILD_IMAGE_TAG="${BUILD_IMAGE_TAG:-fmi-localstack-build:redis-gcc10}"
+AMI_IMAGE_TAG="localstack-ec2/fmi-vm:ami-00000001"
 BUNDLE_DIR="$RUNBOOK_DIR/build/bundle"
 FUNCTION_ZIP="$RUNBOOK_DIR/build/function.zip"
 FUNCTION_CONFIG_JSON='{"FunctionName":"fmi-migration-worker","Environment":{"Variables":{"LD_LIBRARY_PATH":"/var/task/lib"}},"Layers":[]}'
@@ -18,12 +19,28 @@ cd "$RUNBOOK_DIR"
 
 docker compose up -d
 
+# Wait for LocalStack health endpoint
 for attempt in $(seq 1 30); do
   if curl -sf "$ENDPOINT_URL/_localstack/health" >/dev/null; then
     break
   fi
   if [ "$attempt" -eq 30 ]; then
     echo "LocalStack health check did not pass after 60 seconds" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+# Wait for Pro license activation (required for EC2 Docker VM Manager)
+echo "Waiting for LocalStack Pro license activation..."
+for attempt in $(seq 1 30); do
+  if docker compose logs localstack 2>/dev/null | grep -q "Successfully requested and activated new license"; then
+    echo "License activated."
+    break
+  fi
+  if [ "$attempt" -eq 30 ]; then
+    echo "LocalStack Pro license did not activate after 60 seconds" >&2
+    echo "Check that LOCALSTACK_AUTH_TOKEN in .env is valid." >&2
     exit 1
   fi
   sleep 2
@@ -37,6 +54,13 @@ docker run --rm \
   --mount type=bind,source="$REPO_ROOT",target=/opt/fmi \
   "$BUILD_IMAGE_TAG" \
   /opt/fmi/runbooks/localstack-python311-redis/make-fmi-bundle.sh
+
+# Build the AMI Docker image for LocalStack EC2 VM Manager.
+# The image must be tagged localstack-ec2/<name>:<ami-id> so that
+# "aws ec2 run-instances --image-id ami-00000001" finds it.
+echo "Building AMI image $AMI_IMAGE_TAG"
+docker build -t "$AMI_IMAGE_TAG" -f "$RUNBOOK_DIR/Dockerfile.ami" "$RUNBOOK_DIR"
+echo "AMI image built: $AMI_IMAGE_TAG"
 
 rm -f "$FUNCTION_ZIP"
 mkdir -p "$RUNBOOK_DIR/build"
@@ -83,3 +107,4 @@ for attempt in $(seq 1 30); do
 done
 
 echo "Deployed fmi-migration-worker with Redis-only fat function zip"
+echo "AMI image ready: $AMI_IMAGE_TAG"
