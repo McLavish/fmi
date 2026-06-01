@@ -45,7 +45,13 @@ LAYER_JSON="$(aws --endpoint-url="$ENDPOINT_URL" lambda publish-layer-version \
   --compatible-runtimes python3.11)"
 LAYER_ARN="$(printf '%s' "$LAYER_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["LayerVersionArn"])')"
 
-zip -q function.zip lambda_function.py fmi-worker.json
+STAGING_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGING_DIR"' EXIT
+cp lambda_function.py fmi-worker.json "$STAGING_DIR/"
+cp "$LAYER_DIR/python/fmi.so" "$STAGING_DIR/"
+mkdir -p "$STAGING_DIR/lib"
+cp -L "$LAYER_DIR"/lib/* "$STAGING_DIR/lib/"
+(cd "$STAGING_DIR" && zip -qr "$RUNBOOK_DIR/function.zip" .)
 
 if ! aws --endpoint-url="$ENDPOINT_URL" lambda create-function \
   --function-name fmi-migration-worker \
@@ -55,14 +61,15 @@ if ! aws --endpoint-url="$ENDPOINT_URL" lambda create-function \
   --memory-size 1024 \
   --role arn:aws:iam::000000000000:role/lambda-role \
   --zip-file fileb://function.zip \
+  --environment Variables={LD_LIBRARY_PATH=/var/task/lib:/opt/lib} \
   --layers "$LAYER_ARN"; then
   aws --endpoint-url="$ENDPOINT_URL" lambda update-function-code \
     --function-name fmi-migration-worker \
     --zip-file fileb://function.zip
+  aws --endpoint-url="$ENDPOINT_URL" lambda update-function-configuration \
+    --function-name fmi-migration-worker \
+    --environment Variables={LD_LIBRARY_PATH=/var/task/lib:/opt/lib} \
+    --layers "$LAYER_ARN" >/dev/null
 fi
 
-# Fat-zip fallback: if the LocalStack layer path fails, bundle fmi.so and
-# runtime-lib/ into function.zip, then create/update the function with:
-# --environment Variables={LD_LIBRARY_PATH=/var/task/lib}
-
-echo "Deployed fmi-migration-worker with layer $LAYER_ARN"
+echo "Deployed fmi-migration-worker with layer $LAYER_ARN and fat function zip"
