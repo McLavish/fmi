@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -72,6 +73,9 @@ def launch_vm_rank(peer_id, worker_id, comm_name, num_peers, n, gap_s):
     are injected via user-data which is executed on boot by LocalStack.
     """
     # Build a shell user-data script that sets env vars and starts the worker.
+    # LD_LIBRARY_PATH: /usr/lib64 first so the AL2023 libpython3.11 (with the
+    # correct PYTHONHOME prefix) is picked up before the Lambda-bundled one in
+    # /var/task/lib.  The Python binary is the AL2023-native /usr/bin/python3.11.
     user_data_script = f"""\
 #!/bin/sh
 export PEER_ID={peer_id}
@@ -82,8 +86,8 @@ export PLACEMENT=vm
 export N={n}
 export GAP_S={gap_s}
 export PYTHONPATH=/var/task
-export LD_LIBRARY_PATH=/var/task/lib:/var/lang/lib:/lib64:/usr/lib64
-exec /var/lang/bin/python3.11 /var/task/vm_worker.py
+export LD_LIBRARY_PATH=/usr/lib64:/var/task/lib:/lib64
+exec /usr/bin/python3.11 /var/task/vm_worker.py
 """
 
     with tempfile.NamedTemporaryFile(
@@ -194,9 +198,14 @@ def run(comm_name, n):
     instance_ids = []
 
     # Epoch 0: launch both ranks as genuine LocalStack EC2 instances.
-    iid0 = launch_vm_rank(0, rank0_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
+    # Launch concurrently so both workers start within the Redis collective
+    # timeout window (user-data runs immediately inside the container).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f0 = pool.submit(launch_vm_rank, 0, rank0_vm_wid, comm_name, NUM_PEERS, n, 5.0)
+        f1 = pool.submit(launch_vm_rank, 1, rank1_vm_wid, comm_name, NUM_PEERS, n, 5.0)
+        iid0 = f0.result()
+        iid1 = f1.result()
     instance_ids.append(iid0)
-    iid1 = launch_vm_rank(1, rank1_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
     instance_ids.append(iid1)
 
     epoch0 = wait_for_snapshot(
