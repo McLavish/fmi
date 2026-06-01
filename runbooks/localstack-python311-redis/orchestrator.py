@@ -42,7 +42,8 @@ def lambda_client():
     return ENDPOINT_URL
 
 
-def invoke_worker(endpoint_url, payload):
+def invoke_worker_async(endpoint_url, payload):
+    """Fire-and-forget Lambda invocation (Event mode) — used for epoch-0 VM ranks via Lambda."""
     url = f"{endpoint_url}/2015-03-31/functions/{FUNCTION_NAME}/invocations"
     request = urllib.request.Request(
         url,
@@ -62,6 +63,38 @@ def invoke_worker(endpoint_url, payload):
 
     if status_code not in (202, 204):
         raise RuntimeError(f"unexpected invoke status for {payload}: {status_code}")
+
+
+def invoke_worker_sync(endpoint_url, payload, timeout=120):
+    """Synchronous Lambda invocation (RequestResponse) — blocks until the function returns.
+
+    Returns the parsed JSON response body dict.
+    """
+    url = f"{endpoint_url}/2015-03-31/functions/{FUNCTION_NAME}/invocations"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Amz-Invocation-Type": "RequestResponse",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status_code = response.status
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"sync invoke failed for {payload}: HTTP {e.code}: {body}") from e
+
+    if status_code not in (200, 202):
+        raise RuntimeError(f"unexpected sync invoke status for {payload}: {status_code}, body={body}")
+
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"sync invoke returned non-JSON body: {body!r}") from exc
 
 
 def launch_vm_rank(peer_id, worker_id, comm_name, num_peers, n, gap_s):
@@ -228,7 +261,12 @@ def run(comm_name, n):
     )
 
     # Epoch 1: replacement rank comes in as a Lambda (serverless substrate).
-    invoke_worker(
+    # Invoke synchronously so we can inspect the return value and assert the
+    # post-migration allreduce result.  resume=True tells worker_core to skip
+    # phase-1 (already done by the original rank0) and start at the barrier,
+    # aligning its epoch-1 op sequence with the survivor (rank1).
+    print("[orchestrator] invoking replacement Lambda (synchronous, resume=True)", flush=True)
+    lambda_response = invoke_worker_sync(
         client,
         {
             "peer_id": 0,
@@ -237,14 +275,17 @@ def run(comm_name, n):
             "worker_id": rank0_sl_wid,
             "placement": "serverless",
             "n": n,
+            "resume": True,
         },
+        timeout=120,
     )
+    print(f"[orchestrator] Lambda response: {lambda_response}", flush=True)
 
     epoch1 = wait_for_snapshot(
         coordinator,
         1,
-        both_ranks_present,
-        "epoch 1 ranks 0 and 1 present",
+        both_ranks_active,
+        "epoch 1 ranks 0 and 1 ACTIVE",
         timeout_s=90,
     )
 
@@ -274,6 +315,8 @@ def run(comm_name, n):
     if 0 not in epoch1:
         failures.append("epoch1 rank0 missing")
     else:
+        if epoch1[0].state != "ACTIVE":
+            failures.append(f"epoch1 rank0 state expected 'ACTIVE', got '{epoch1[0].state}'")
         if epoch1[0].placement != "serverless":
             failures.append(f"epoch1 rank0 placement expected 'serverless', got '{epoch1[0].placement}'")
         if epoch1[0].worker_id != rank0_sl_wid:
@@ -284,10 +327,37 @@ def run(comm_name, n):
     if 1 not in epoch1:
         failures.append("epoch1 rank1 missing")
     else:
+        if epoch1[1].state != "ACTIVE":
+            failures.append(f"epoch1 rank1 state expected 'ACTIVE', got '{epoch1[1].state}'")
         if epoch1[1].placement != "vm":
             failures.append(f"epoch1 rank1 placement expected 'vm', got '{epoch1[1].placement}'")
         if epoch1[1].worker_id != rank1_vm_wid:
             failures.append(f"epoch1 rank1 worker_id changed: {epoch1[1].worker_id}")
+
+    # Validate the post-migration communication result.
+    # The replacement Lambda must have completed the epoch-1 allreduce with the
+    # survivor (rank1).  rank0 contributes 1.0, rank1 contributes 2.0 → sum = 3.0.
+    # This can only be 3.0 if the two ranks genuinely communicated after migration.
+    lambda_status = lambda_response.get("status", "")
+    lambda_result = lambda_response.get("result")
+    EXPECTED_RESULT = 3.0
+
+    if lambda_status != "ok":
+        failures.append(f"Lambda replacement status expected 'ok', got '{lambda_status}'")
+    else:
+        if lambda_result is None:
+            failures.append("Lambda replacement did not return a numeric result")
+        elif abs(float(lambda_result) - EXPECTED_RESULT) > 1e-9:
+            failures.append(
+                f"Lambda replacement allreduce result expected {EXPECTED_RESULT}, "
+                f"got {lambda_result!r} — post-migration communication did NOT succeed"
+            )
+        else:
+            print(
+                f"[orchestrator] post-migration allreduce result = {lambda_result} "
+                f"(expected {EXPECTED_RESULT}) ✓",
+                flush=True,
+            )
 
     if failures:
         print("\nFAILED:")
@@ -298,7 +368,7 @@ def run(comm_name, n):
         cleanup_leftover_ec2_containers()
         sys.exit(1)
 
-    print("\nPASSED: rank directory flip verified")
+    print("\nPASSED: rank directory flip verified AND post-migration allreduce result == 3.0")
     coordinator.clear_job_state()
 
     # Clean up EC2 instances
