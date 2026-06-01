@@ -1,5 +1,7 @@
 #include "../include/Communicator.h"
+#ifdef FMI_ENABLE_CRIU
 #include "../include/ft/CriuRuntime.h"
+#endif
 #include "../include/ft/TransparentMigrationRuntime.h"
 #include "../include/ft/Coordinator.h"
 
@@ -31,6 +33,9 @@ namespace FMI {
         this->faas_memory = faas_memory;
 
         if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
+#ifndef FMI_ENABLE_CRIU
+            throw std::runtime_error("FMI built without CRIU support");
+#else
             auto backends = config.get_active_channels();
             if (backends.find("Direct") == backends.end()) {
                 throw std::runtime_error("CRIU-coordinated fault tolerance requires the Direct backend");
@@ -38,6 +43,7 @@ namespace FMI {
             if (backends.size() != 1 || !ft_config.preferred_data_backend.empty() && ft_config.preferred_data_backend != "Direct") {
                 throw std::runtime_error("CRIU-coordinated fault tolerance only supports the Direct backend");
             }
+#endif
         }
         if (ft_config.enabled && !ft_config.preferred_data_backend.empty()) {
             auto backends = config.get_active_channels();
@@ -129,10 +135,12 @@ namespace FMI {
                     channels, num_peers, faas_price, channel_hint, preferred_backend));
 
             if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
+#ifdef FMI_ENABLE_CRIU
                 operation_runtime = std::make_shared<FMI::FT::CriuRuntime>(
                         peer_id, num_peers, std::move(config_path), this->comm_name,
                         "Direct",
                         [this]() { prepare_channels_for_checkpoint(); });
+#endif
             }
         }
     }

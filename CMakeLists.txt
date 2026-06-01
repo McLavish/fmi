@@ -4,6 +4,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 option(FMI_ENABLE_S3 "Enable the S3 backend" ON)
 option(FMI_ENABLE_REDIS "Enable the Redis backend" ON)
+option(FMI_ENABLE_CRIU "Build CRIU coordinated fault-tolerance support" ON)
 option(FMI_USE_STATIC_BOOST "Prefer static Boost libraries" ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -40,8 +41,6 @@ set(FMI_SOURCES
     src/comm/PeerToPeer.cpp
     src/comm/Direct.cpp
     src/ft/Coordinator.cpp
-    src/ft/CriuRuntime.cpp
-    src/ft/CriuSupervisor.cpp
     src/ft/TransparentMigrationRuntime.cpp
 )
 
@@ -63,6 +62,13 @@ if(FMI_ENABLE_REDIS)
     list(APPEND FMI_LINK_LIBS ${HIREDIS_LIBRARIES})
 endif()
 
+if(FMI_ENABLE_CRIU)
+    list(APPEND FMI_SOURCES
+        src/ft/CriuRuntime.cpp
+        src/ft/CriuSupervisor.cpp
+    )
+endif()
+
 add_library(FMI STATIC ${FMI_SOURCES})
 add_library(FMI::FMI ALIAS FMI)
 
@@ -74,6 +80,10 @@ target_include_directories(FMI
         ${TCPUNCH_INCLUDE_DIRS}
 )
 target_compile_definitions(FMI PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}>)
+
+if(FMI_ENABLE_CRIU)
+    target_compile_definitions(FMI PUBLIC FMI_ENABLE_CRIU)
+endif()
 
 target_link_libraries(FMI PUBLIC ${FMI_LINK_LIBS})
 
