@@ -10,5 +10,6 @@ def lambda_handler(event, context):
     placement = event["placement"]
     n = int(event.get("n", 2))
     gap_s = float(event.get("gap_s", 5.0))
+    resume = bool(event.get("resume", False))
 
-    return run_worker(peer_id, num_peers, comm_name, worker_id, placement, n, gap_s)
+    return run_worker(peer_id, num_peers, comm_name, worker_id, placement, n, gap_s, resume=resume)
