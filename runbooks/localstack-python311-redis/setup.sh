@@ -6,6 +6,11 @@ REPO_ROOT="$(cd "$RUNBOOK_DIR/../.." && pwd)"
 LAYER_BUILD_DIR="$REPO_ROOT/python/aws/python311/.aws-sam/build"
 ENDPOINT_URL="http://localhost:4566"
 
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+export AWS_EC2_METADATA_DISABLED=true
+
 echo "Prerequisites: build the FMI Python 3.11 image and SAM layer first:"
 echo "  docker build -t fmi-build-python311 -f runbooks/aws-python311-s3/Dockerfile.python3.11 ."
 echo "  (cd python/aws/python311 && sam build)"
