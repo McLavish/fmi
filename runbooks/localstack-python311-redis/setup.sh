@@ -72,4 +72,19 @@ if ! aws --endpoint-url="$ENDPOINT_URL" lambda create-function \
     --layers "$LAYER_ARN" >/dev/null
 fi
 
+for attempt in $(seq 1 30); do
+  read -r state update_status < <(aws --endpoint-url="$ENDPOINT_URL" lambda get-function-configuration \
+    --function-name fmi-migration-worker \
+    --query '[State,LastUpdateStatus]' \
+    --output text)
+  if [ "$state" = "Active" ] && [ "$update_status" = "Successful" ]; then
+    break
+  fi
+  if [ "$attempt" -eq 30 ]; then
+    echo "Function did not become active after 30 seconds: state=$state update=$update_status" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
 echo "Deployed fmi-migration-worker with layer $LAYER_ARN and fat function zip"
