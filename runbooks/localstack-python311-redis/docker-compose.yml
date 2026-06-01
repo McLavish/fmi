@@ -1,12 +1,17 @@
 services:
   localstack:
-    image: localstack/localstack:3.8.1
+    image: localstack/localstack-pro:latest
     ports:
       - "4566:4566"
     environment:
-      SERVICES: lambda
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN}
+      SERVICES: ec2,lambda
+      EC2_VM_MANAGER: docker
+      EC2_DOCKER_FLAGS: --network fmi-net
       LAMBDA_DOCKER_NETWORK: fmi-net
       DOCKER_HOST: unix:///var/run/docker.sock
+    env_file:
+      - .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
