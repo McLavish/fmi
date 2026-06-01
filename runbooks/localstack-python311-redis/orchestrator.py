@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import urllib.error
@@ -22,7 +24,17 @@ HOST_CONFIG = RUNBOOK_DIR / "fmi-host.json"
 NUM_PEERS = 2
 ENDPOINT_URL = "http://localhost:4566"
 BUILD_IMAGE_TAG = "fmi-localstack-build:redis-gcc10"
+AMI_ID = "ami-00000001"
 BUNDLE_DIR = RUNBOOK_DIR / "build" / "bundle"
+
+# Dummy credentials matching what setup.sh uses for LocalStack
+_AWS_ENV = {
+    **os.environ,
+    "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID", "test"),
+    "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY", "test"),
+    "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+    "AWS_EC2_METADATA_DISABLED": "true",
+}
 
 
 def lambda_client():
@@ -52,38 +64,80 @@ def invoke_worker(endpoint_url, payload):
 
 
 def launch_vm_rank(peer_id, worker_id, comm_name, num_peers, n, gap_s):
-    """Launch a detached Docker container as a long-lived VM rank.
+    """Launch a LocalStack EC2 instance (Docker VM Manager) as a long-lived VM rank.
 
-    The container reuses the GCC10 build image and bind-mounts the repo root
-    so that the already-built bundle/fmi.so is available without a separate
-    image.  It joins fmi-net so that fmi-redis resolves identically to Lambda.
+    Uses aws ec2 run-instances against the LocalStack endpoint.  The instance
+    boots from the AMI image localstack-ec2/fmi-vm:ami-00000001 which already
+    contains fmi.so, vm_worker.py, and fmi-worker.json.  Per-rank parameters
+    are injected via user-data which is executed on boot by LocalStack.
     """
-    container_name = f"fmi-vm-rank{peer_id}"
-    cmd = [
-        "docker", "run", "-d", "--rm",
-        "--name", container_name,
-        "--network", "fmi-net",
-        "-e", f"PEER_ID={peer_id}",
-        "-e", f"NUM_PEERS={num_peers}",
-        "-e", f"COMM_NAME={comm_name}",
-        "-e", f"WORKER_ID={worker_id}",
-        "-e", "PLACEMENT=vm",
-        "-e", f"N={n}",
-        "-e", f"GAP_S={gap_s}",
-        "-v", f"{REPO_ROOT}:/opt/fmi",
-        "-e", "PYTHONPATH=/opt/fmi/runbooks/localstack-python311-redis/build/bundle"
-              ":/opt/fmi/runbooks/localstack-python311-redis",
-        "-e", "LD_LIBRARY_PATH=/opt/fmi/runbooks/localstack-python311-redis/build/bundle/lib",
-        BUILD_IMAGE_TAG,
-        "/var/lang/bin/python3.11",
-        "/opt/fmi/runbooks/localstack-python311-redis/vm_worker.py",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"docker run failed for rank {peer_id}: {result.stderr.strip()}"
+    # Build a shell user-data script that sets env vars and starts the worker.
+    user_data_script = f"""\
+#!/bin/sh
+export PEER_ID={peer_id}
+export NUM_PEERS={num_peers}
+export COMM_NAME={comm_name}
+export WORKER_ID={worker_id}
+export PLACEMENT=vm
+export N={n}
+export GAP_S={gap_s}
+export PYTHONPATH=/var/task
+export LD_LIBRARY_PATH=/var/task/lib:/var/lang/lib:/lib64:/usr/lib64
+exec /var/lang/bin/python3.11 /var/task/vm_worker.py
+"""
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sh", delete=False, prefix=f"fmi-ud-rank{peer_id}-"
+    ) as f:
+        f.write(user_data_script)
+        ud_path = f.name
+
+    try:
+        cmd = [
+            "aws", "--endpoint-url", ENDPOINT_URL,
+            "ec2", "run-instances",
+            "--image-id", AMI_ID,
+            "--count", "1",
+            "--instance-type", "t2.micro",
+            "--user-data", f"file://{ud_path}",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=_AWS_ENV)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ec2 run-instances failed for rank {peer_id}: {result.stderr.strip()}"
+            )
+        reservation = json.loads(result.stdout)
+        instance_id = reservation["Instances"][0]["InstanceId"]
+        print(
+            f"[orchestrator] launched EC2 instance {instance_id} for rank {peer_id}",
+            flush=True,
         )
-    print(f"[orchestrator] started VM container {container_name} ({result.stdout.strip()})", flush=True)
+        return instance_id
+    finally:
+        os.unlink(ud_path)
+
+
+def terminate_ec2_instances(instance_ids):
+    """Terminate a list of EC2 instance IDs via the LocalStack endpoint."""
+    if not instance_ids:
+        return
+    cmd = [
+        "aws", "--endpoint-url", ENDPOINT_URL,
+        "ec2", "terminate-instances",
+        "--instance-ids", *instance_ids,
+    ]
+    subprocess.run(cmd, capture_output=True, env=_AWS_ENV)
+
+
+def cleanup_leftover_ec2_containers():
+    """Remove any leftover localstack-ec2.i-* containers on the host."""
+    result = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    for name in result.stdout.splitlines():
+        if name.startswith("localstack-ec2.i-"):
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
 def snapshot_by_rank(coordinator, epoch):
@@ -137,16 +191,20 @@ def run(comm_name, n):
     rank1_vm_wid = f"rank1-vm-{uuid.uuid4().hex[:8]}"
     rank0_sl_wid = f"rank0-serverless-{uuid.uuid4().hex[:8]}"
 
-    # Epoch 0: launch both ranks as genuine long-lived Docker containers.
-    launch_vm_rank(0, rank0_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
-    launch_vm_rank(1, rank1_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
+    instance_ids = []
+
+    # Epoch 0: launch both ranks as genuine LocalStack EC2 instances.
+    iid0 = launch_vm_rank(0, rank0_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
+    instance_ids.append(iid0)
+    iid1 = launch_vm_rank(1, rank1_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
+    instance_ids.append(iid1)
 
     epoch0 = wait_for_snapshot(
         coordinator,
         0,
         both_ranks_active,
         "epoch 0 ranks 0 and 1 ACTIVE",
-        timeout_s=60,
+        timeout_s=90,
     )
 
     print("[orchestrator] requesting migration of rank 0", flush=True)
@@ -178,7 +236,7 @@ def run(comm_name, n):
         1,
         both_ranks_present,
         "epoch 1 ranks 0 and 1 present",
-        timeout_s=60,
+        timeout_s=90,
     )
 
     print_snapshot("Epoch 0 directory", epoch0)
@@ -226,19 +284,35 @@ def run(comm_name, n):
         print("\nFAILED:")
         for failure in failures:
             print(f"  - {failure}")
+        # Terminate EC2 instances before exit
+        terminate_ec2_instances(instance_ids)
+        cleanup_leftover_ec2_containers()
         sys.exit(1)
 
     print("\nPASSED: rank directory flip verified")
     coordinator.clear_job_state()
 
+    # Clean up EC2 instances
+    terminate_ec2_instances(instance_ids)
+    cleanup_leftover_ec2_containers()
+
 
 def cleanup(comm_name):
     fmi.FTCoordinator(str(HOST_CONFIG), comm_name, NUM_PEERS).clear_job_state()
-    for rank in (0, 1):
-        subprocess.run(
-            ["docker", "rm", "-f", f"fmi-vm-rank{rank}"],
-            capture_output=True,
-        )
+    # Terminate any running EC2 instances via LocalStack
+    result = subprocess.run(
+        [
+            "aws", "--endpoint-url", ENDPOINT_URL,
+            "ec2", "describe-instances",
+            "--query", "Reservations[].Instances[].InstanceId",
+            "--output", "text",
+        ],
+        capture_output=True, text=True, env=_AWS_ENV,
+    )
+    instance_ids = result.stdout.split()
+    if instance_ids:
+        terminate_ec2_instances(instance_ids)
+    cleanup_leftover_ec2_containers()
     print(f"cleaned up {comm_name}")
 
 
