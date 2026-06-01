@@ -4,9 +4,9 @@ import json
 import sys
 import time
 import uuid
+import urllib.error
+import urllib.request
 from pathlib import Path
-
-import boto3
 
 
 RUNBOOK_DIR = Path(__file__).resolve().parent
@@ -19,25 +19,31 @@ import fmi
 FUNCTION_NAME = "fmi-migration-worker"
 HOST_CONFIG = RUNBOOK_DIR / "fmi-host.json"
 NUM_PEERS = 2
+ENDPOINT_URL = "http://localhost:4566"
 
 
 def lambda_client():
-    return boto3.client(
-        "lambda",
-        endpoint_url="http://localhost:4566",
-        region_name="us-east-1",
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-    )
+    return ENDPOINT_URL
 
 
-def invoke_worker(client, payload):
-    response = client.invoke(
-        FunctionName=FUNCTION_NAME,
-        InvocationType="Event",
-        Payload=json.dumps(payload).encode("utf-8"),
+def invoke_worker(endpoint_url, payload):
+    url = f"{endpoint_url}/2015-03-31/functions/{FUNCTION_NAME}/invocations"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Amz-Invocation-Type": "Event",
+        },
     )
-    status_code = response.get("StatusCode")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            status_code = response.status
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"invoke failed for {payload}: HTTP {e.code}: {body}") from e
+
     if status_code not in (202, 204):
         raise RuntimeError(f"unexpected invoke status for {payload}: {status_code}")
 
