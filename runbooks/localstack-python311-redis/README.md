@@ -1,46 +1,50 @@
 # FMI LocalStack Transparent Migration Demo — Heterogeneous Topology
 
 This runbook runs FMI's `transparent_migration` fault-tolerance mode on genuinely
-heterogeneous execution substrates.  Epoch-0 ranks run as **real long-lived Docker
-containers** (a VM/instance analog — a persistent process holding state in memory), while
-the migrated replacement in epoch 1 is a **LocalStack Lambda invocation** (ephemeral,
-serverless).  The migration therefore crosses two distinct execution models, observable via
-`docker ps`.
+heterogeneous execution substrates.  Epoch-0 ranks run as **real LocalStack EC2 instances**
+(Docker VM Manager — each instance is a real `localstack-ec2.i-*` Docker container launched
+from a custom AMI via `aws ec2 run-instances`), while the migrated replacement in epoch 1 is
+a **LocalStack Lambda invocation** (ephemeral, serverless).  The migration therefore crosses
+two distinct execution models, observable via `docker ps` and `aws ec2 describe-instances`.
 
-The VM ranks are launched here as plain `docker run` containers on the host Docker daemon
-(not through any AWS API).  Note that LocalStack *can* emulate EC2 instances as real Docker
-containers via its Docker VM Manager (`EC2_VM_MANAGER=docker`, the default, available on the
-free tier) — running them through `RunInstances` against a custom AMI is a possible future
-upgrade so the "VM" side also goes through emulated AWS.  Note that state is not transferred
-on migration (work from epoch 0 is lost on quiesce); CRIU is the path to a true stateful cut.
+Both the EC2 and Lambda paths run through a single LocalStack Pro endpoint at
+`http://localhost:4566`.  EC2 VM Manager requires LocalStack Pro >= 4.4.0; the compose file
+pins `localstack/localstack-pro:latest` (consider a concrete 4.x tag for reproducibility).
+
+Note: state is not transferred on migration (work from epoch 0 is lost on quiesce); CRIU is
+the path to a true stateful cut.
 
 ## Architecture
 
 ```
-Epoch 0                          Epoch 1
---------                         --------
-rank 0: fmi-vm-rank0             rank 0: localstack lambda container
-        (fmi-localstack-build:           (public.ecr.aws/lambda/python:3.11)
-         redis-gcc10)                     placement=serverless
+Epoch 0                                 Epoch 1
+--------                                --------
+rank 0: localstack-ec2.i-<id0>          rank 0: localstack lambda container
+        (localstack-ec2/fmi-vm:                 (public.ecr.aws/lambda/python:3.11)
+         ami-00000001)                           placement=serverless
          placement=vm
-                        MIGRATION
-rank 1: fmi-vm-rank1  ---------->  rank 1: fmi-vm-rank1 (unchanged survivor)
-        placement=vm                        placement=vm
+                           MIGRATION
+rank 1: localstack-ec2.i-<id1>  ------> rank 1: localstack-ec2.i-<id1> (unchanged)
+        (localstack-ec2/fmi-vm:                  placement=vm
+         ami-00000001)
+         placement=vm
 ```
 
-The VM containers join `fmi-net` (same Docker network as the Lambda) so `fmi-redis`
-resolves identically from both substrates.  The bind-mounted repo root exposes the same
-`build/bundle/fmi.so` (GCC 10, AL2 ABI) that the Lambda zip contains, giving both
-substrates identical library behaviour.
+All containers join `fmi-net` (via `EC2_DOCKER_FLAGS=--network fmi-net` and
+`LAMBDA_DOCKER_NETWORK=fmi-net`) so `fmi-redis` resolves identically from every substrate.
 
 ## Prerequisites
 
-Docker must be available.  The setup script builds a demo-local Lambda-compatible image
-tagged `fmi-localstack-build:redis-gcc10`, then builds a Redis-only `fmi.so` bundle from it.
-
-The host orchestrator imports the native debug module from `python/build-native-debug/fmi.so`.
-Build that first if it is not already present (see the top-level CLAUDE.md for the exact
-cmake flags; use `-DFMI_ENABLE_REDIS=ON -DFMI_ENABLE_CRIU=OFF`).
+- Docker with the Docker socket accessible at `/var/run/docker.sock`.
+- LocalStack Pro auth token in `runbooks/localstack-python311-redis/.env`:
+  ```
+  LOCALSTACK_AUTH_TOKEN=ls-...
+  ```
+  This file is gitignored.  `docker compose` reads it automatically for `${VAR}` expansion.
+- AWS CLI (`aws`) available on `PATH`.
+- The host orchestrator imports the native debug module from `python/build-native-debug/fmi.so`.
+  Build that first if it is not already present (see CLAUDE.md; use
+  `-DFMI_ENABLE_REDIS=ON -DFMI_ENABLE_CRIU=OFF`).
 
 ## Start Services
 
@@ -49,41 +53,39 @@ cd runbooks/localstack-python311-redis
 docker compose up -d
 ```
 
-This starts LocalStack on `localhost:4566` and Redis as `fmi-redis` on the Docker network
-`fmi-net`, with Redis also published to `127.0.0.1:6379` for the host orchestrator.
+This starts LocalStack Pro on `localhost:4566` and Redis as `fmi-redis` on `fmi-net`.
+Verify that the Pro license activates:
 
-## Deploy the Function
+```bash
+docker compose logs localstack | grep "Successfully requested and activated new license"
+```
+
+## Deploy the Function and AMI
 
 ```bash
 ./setup.sh
 ```
 
-`setup.sh` waits for LocalStack health, builds the GCC 10 Redis-only function bundle, and
-creates or updates the `fmi-migration-worker` function.  The function zip contains
-`lambda_function.py`, `worker_core.py`, `fmi-worker.json`, `fmi.so`, and `lib/`;
-`LD_LIBRARY_PATH` is set to `/var/task/lib`.  The script uses the AWS CLI with
-`--endpoint-url=http://localhost:4566`; it does not require `awslocal`.
-
-The same `fmi-localstack-build:redis-gcc10` image and `build/bundle/` are reused when
-launching the VM containers, so no additional image build is needed.
+`setup.sh`:
+1. Waits for the LocalStack health endpoint and Pro license activation.
+2. Builds `fmi-localstack-build:redis-gcc10` (GCC 10 / Python 3.11 AL2 image).
+3. Runs `make-fmi-bundle.sh` inside that image to produce `build/bundle/fmi.so` + `lib/`.
+4. Builds the AMI image `localstack-ec2/fmi-vm:ami-00000001` from `Dockerfile.ami` — this
+   bakes `fmi.so`, the shared libs, `worker_core.py`, `vm_worker.py`, and `fmi-worker.json`
+   into a self-contained image that LocalStack EC2 launches directly as a container.
+5. Creates or updates the `fmi-migration-worker` Lambda function.
 
 ## Run the Demo
-
-```bash
-python3 orchestrator.py run
-```
-
-You can also choose a stable communication name:
 
 ```bash
 python3 orchestrator.py run --comm-name demo-$(date +%s)
 ```
 
-Expected output includes epoch directory dumps like:
+Expected output:
 
 ```text
-[orchestrator] started VM container fmi-vm-rank0 (...)
-[orchestrator] started VM container fmi-vm-rank1 (...)
+[orchestrator] launched EC2 instance i-<id0> for rank 0
+[orchestrator] launched EC2 instance i-<id1> for rank 1
 [orchestrator] requesting migration of rank 0
 
 --- Epoch 0 directory ---
@@ -99,30 +101,56 @@ PASSED: rank directory flip verified
 
 ## Heterogeneity Evidence
 
-Run `docker ps` during the epoch-0 → epoch-1 transition to see three different containers
-at the same time:
+During epoch 0, two real EC2 instances are visible:
 
-```
-NAMES                     IMAGE                              STATUS
-fmi-vm-rank0              fmi-localstack-build:redis-gcc10   Up 2 seconds
-fmi-vm-rank1              fmi-localstack-build:redis-gcc10   Up 2 seconds
-...-lambda-fmi-...-...    public.ecr.aws/lambda/python:3.11  Up 4 seconds
-fmi-redis                 redis:7                            Up 55 minutes
-localstack-...            localstack/localstack:3.8.1        Up 55 minutes
+```bash
+aws --endpoint-url=http://localhost:4566 ec2 describe-instances \
+    --query 'Reservations[].Instances[].[InstanceId,State.Name,ImageId]' \
+    --output table
 ```
 
-After migration completes:
+Expected output (two `running` instances on `ami-00000001`):
+```
+--------------------------------------------------
+|             DescribeInstances                  |
++----------------+----------+-------------------+
+|  i-<id0>       | running  | ami-00000001      |
+|  i-<id1>       | running  | ami-00000001      |
++----------------+----------+-------------------+
+```
 
-- `fmi-vm-rank0` is gone (quiesced, exited via `--rm`)
-- `fmi-vm-rank1` persists (VM survivor, now in epoch 1)
-- A `public.ecr.aws/lambda/python:3.11` container replaces rank 0 (serverless)
+The matching Docker containers:
 
-The two epoch-1 peers (`fmi-vm-rank1` and the Lambda replacement) communicate over
-different execution substrates sharing a single Redis data plane.
+```bash
+docker ps --filter "name=localstack-ec2.i-"
+```
+
+```
+CONTAINER ID  IMAGE                                 NAMES
+...           localstack-ec2/fmi-vm:ami-00000001    localstack-ec2.i-<id0>
+...           localstack-ec2/fmi-vm:ami-00000001    localstack-ec2.i-<id1>
+```
+
+During epoch 1 (after migration), the Lambda replacement appears:
+
+```bash
+docker ps
+```
+
+```
+NAMES                                    IMAGE
+localstack-ec2.i-<id1>                  localstack-ec2/fmi-vm:ami-00000001
+...-lambda-fmi-migration-worker-...     public.ecr.aws/lambda/python:3.11
+fmi-redis                               redis:7
+localstack-...                          localstack/localstack-pro:latest
+```
+
+After the demo completes orchestrator.py terminates the EC2 instances and removes any
+leftover `localstack-ec2.i-*` containers automatically.
 
 ## Cleanup
 
-Clear the Redis FT state for a specific run:
+Clear FT state for a specific run:
 
 ```bash
 python3 orchestrator.py cleanup --comm-name <name>
@@ -140,16 +168,20 @@ docker compose down
 |------|------|
 | `worker_core.py` | Shared FMI collective body (`run_worker`), used by both substrates |
 | `lambda_function.py` | Thin Lambda handler — parses event, calls `run_worker` |
-| `vm_worker.py` | VM container entrypoint — reads env vars, calls `run_worker` |
-| `orchestrator.py` | Host driver: launches VM containers + Lambda replacement, asserts flip |
+| `vm_worker.py` | VM instance entrypoint — reads env vars, calls `run_worker` |
+| `orchestrator.py` | Host driver: launches EC2 instances + Lambda replacement, asserts flip |
 | `fmi-worker.json` | FMI config for workers (Redis on `fmi-net`) |
 | `fmi-host.json` | FMI config for host orchestrator (Redis on `127.0.0.1`) |
-| `setup.sh` | Builds bundle, deploys Lambda function |
+| `setup.sh` | Builds bundle, builds AMI image, deploys Lambda function |
 | `Dockerfile.build` | GCC 10 / Python 3.11 AL2 build environment |
+| `Dockerfile.ami` | AMI image for LocalStack EC2 VM Manager (bakes bundle in) |
 | `make-fmi-bundle.sh` | Builds `fmi.so` + runtime libs inside the build image |
+| `.env` | `LOCALSTACK_AUTH_TOKEN=ls-...` (gitignored, required for Pro) |
 
 ## Known Limitations
 
+- LocalStack Pro >= 4.4.0 is required for EC2 Docker VM Manager.  Pin a concrete version
+  tag (e.g. `localstack-pro:4.4.0`) instead of `:latest` for reproducible builds.
 - No state transfer on quiesce: work from epoch 0 is lost at migration. CRIU is the
   production path for a stronger transparent checkpoint/restore cut.
 - The Lambda replacement can re-run phase-1 collectives after the VM survivor has moved on.
