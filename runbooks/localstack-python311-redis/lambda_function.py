@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import fmi
 
@@ -14,6 +15,7 @@ def lambda_handler(event, context):
         worker_id = event["worker_id"]
         placement = event["placement"]
         n = int(event.get("n", 2))
+        gap_s = float(event.get("gap_s", 5.0))
 
         comm = fmi.Communicator(
             peer_id,
@@ -33,6 +35,7 @@ def lambda_handler(event, context):
                 fmi.types(fmi.datatypes.double),
             )
 
+        time.sleep(gap_s)
         comm.barrier()
 
         for _ in range(n):
