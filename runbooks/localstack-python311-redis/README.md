@@ -7,9 +7,12 @@ the migrated replacement in epoch 1 is a **LocalStack Lambda invocation** (ephem
 serverless).  The migration therefore crosses two distinct execution models, observable via
 `docker ps`.
 
-LocalStack Community EC2 is a non-executing mock, so a plain Docker container is the
-correct VM stand-in; no Pro license is required.  Note that state is not transferred on
-migration (work from epoch 0 is lost on quiesce); CRIU is the path to a true stateful cut.
+The VM ranks are launched here as plain `docker run` containers on the host Docker daemon
+(not through any AWS API).  Note that LocalStack *can* emulate EC2 instances as real Docker
+containers via its Docker VM Manager (`EC2_VM_MANAGER=docker`, the default, available on the
+free tier) — running them through `RunInstances` against a custom AMI is a possible future
+upgrade so the "VM" side also goes through emulated AWS.  Note that state is not transferred
+on migration (work from epoch 0 is lost on quiesce); CRIU is the path to a true stateful cut.
 
 ## Architecture
 
