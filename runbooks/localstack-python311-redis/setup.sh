@@ -43,7 +43,7 @@ mkdir -p "$RUNBOOK_DIR/build"
 
 STAGING_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGING_DIR"' EXIT
-cp lambda_function.py fmi-worker.json "$STAGING_DIR/"
+cp lambda_function.py worker_core.py fmi-worker.json "$STAGING_DIR/"
 cp "$BUNDLE_DIR/fmi.so" "$STAGING_DIR/"
 mkdir -p "$STAGING_DIR/lib"
 if compgen -G "$BUNDLE_DIR/lib/*" >/dev/null; then
