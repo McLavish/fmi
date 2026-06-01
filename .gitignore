@@ -10,3 +10,4 @@ build*
 extern*
 __pycache__/
 .codex/
+.env
