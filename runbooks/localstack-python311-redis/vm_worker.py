@@ -25,7 +25,7 @@ def main():
     result = run_worker(peer_id, num_peers, comm_name, worker_id, placement, n, gap_s)
     print(result, flush=True)
     status = result.get("status", "")
-    if status != "ok" and not status.startswith("partial"):
+    if status != "ok":
         sys.exit(1)
 
 
