@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import subprocess
 import sys
 import time
 import uuid
@@ -20,6 +21,8 @@ FUNCTION_NAME = "fmi-migration-worker"
 HOST_CONFIG = RUNBOOK_DIR / "fmi-host.json"
 NUM_PEERS = 2
 ENDPOINT_URL = "http://localhost:4566"
+BUILD_IMAGE_TAG = "fmi-localstack-build:redis-gcc10"
+BUNDLE_DIR = RUNBOOK_DIR / "build" / "bundle"
 
 
 def lambda_client():
@@ -46,6 +49,41 @@ def invoke_worker(endpoint_url, payload):
 
     if status_code not in (202, 204):
         raise RuntimeError(f"unexpected invoke status for {payload}: {status_code}")
+
+
+def launch_vm_rank(peer_id, worker_id, comm_name, num_peers, n, gap_s):
+    """Launch a detached Docker container as a long-lived VM rank.
+
+    The container reuses the GCC10 build image and bind-mounts the repo root
+    so that the already-built bundle/fmi.so is available without a separate
+    image.  It joins fmi-net so that fmi-redis resolves identically to Lambda.
+    """
+    container_name = f"fmi-vm-rank{peer_id}"
+    cmd = [
+        "docker", "run", "-d", "--rm",
+        "--name", container_name,
+        "--network", "fmi-net",
+        "-e", f"PEER_ID={peer_id}",
+        "-e", f"NUM_PEERS={num_peers}",
+        "-e", f"COMM_NAME={comm_name}",
+        "-e", f"WORKER_ID={worker_id}",
+        "-e", "PLACEMENT=vm",
+        "-e", f"N={n}",
+        "-e", f"GAP_S={gap_s}",
+        "-v", f"{REPO_ROOT}:/opt/fmi",
+        "-e", "PYTHONPATH=/opt/fmi/runbooks/localstack-python311-redis/build/bundle"
+              ":/opt/fmi/runbooks/localstack-python311-redis",
+        "-e", "LD_LIBRARY_PATH=/opt/fmi/runbooks/localstack-python311-redis/build/bundle/lib",
+        BUILD_IMAGE_TAG,
+        "/var/lang/bin/python3.11",
+        "/opt/fmi/runbooks/localstack-python311-redis/vm_worker.py",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"docker run failed for rank {peer_id}: {result.stderr.strip()}"
+        )
+    print(f"[orchestrator] started VM container {container_name} ({result.stdout.strip()})", flush=True)
 
 
 def snapshot_by_rank(coordinator, epoch):
@@ -99,28 +137,9 @@ def run(comm_name, n):
     rank1_vm_wid = f"rank1-vm-{uuid.uuid4().hex[:8]}"
     rank0_sl_wid = f"rank0-serverless-{uuid.uuid4().hex[:8]}"
 
-    invoke_worker(
-        client,
-        {
-            "peer_id": 0,
-            "num_peers": NUM_PEERS,
-            "comm_name": comm_name,
-            "worker_id": rank0_vm_wid,
-            "placement": "vm",
-            "n": n,
-        },
-    )
-    invoke_worker(
-        client,
-        {
-            "peer_id": 1,
-            "num_peers": NUM_PEERS,
-            "comm_name": comm_name,
-            "worker_id": rank1_vm_wid,
-            "placement": "vm",
-            "n": n,
-        },
-    )
+    # Epoch 0: launch both ranks as genuine long-lived Docker containers.
+    launch_vm_rank(0, rank0_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
+    launch_vm_rank(1, rank1_vm_wid, comm_name, NUM_PEERS, n, gap_s=5.0)
 
     epoch0 = wait_for_snapshot(
         coordinator,
@@ -141,6 +160,7 @@ def run(comm_name, n):
         timeout_s=30,
     )
 
+    # Epoch 1: replacement rank comes in as a Lambda (serverless substrate).
     invoke_worker(
         client,
         {
@@ -214,6 +234,11 @@ def run(comm_name, n):
 
 def cleanup(comm_name):
     fmi.FTCoordinator(str(HOST_CONFIG), comm_name, NUM_PEERS).clear_job_state()
+    for rank in (0, 1):
+        subprocess.run(
+            ["docker", "rm", "-f", f"fmi-vm-rank{rank}"],
+            capture_output=True,
+        )
     print(f"cleaned up {comm_name}")
 
 
