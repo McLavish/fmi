@@ -1,0 +1,26 @@
+services:
+  localstack:
+    image: localstack/localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: lambda
+      LAMBDA_DOCKER_NETWORK: fmi-net
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - fmi-net
+
+  redis:
+    image: redis:7
+    container_name: fmi-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - fmi-net
+
+networks:
+  fmi-net:
+    name: fmi-net
+    driver: bridge
