@@ -9,3 +9,4 @@ samconfig.toml
 build*
 extern*
 __pycache__/
+.codex/
