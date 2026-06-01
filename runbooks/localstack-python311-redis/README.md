@@ -6,12 +6,8 @@ FMI data plane and the FT control plane.
 
 ## Prerequisites
 
-From the repository root, build the Python 3.11 Lambda layer artifacts:
-
-```bash
-docker build -t fmi-build-python311 -f runbooks/aws-python311-s3/Dockerfile.python3.11 .
-(cd python/aws/python311 && sam build)
-```
+Docker must be available. The setup script builds a demo-local Lambda-compatible image
+tagged `fmi-localstack-build:redis-gcc10`, then builds a Redis-only `fmi.so` bundle from it.
 
 The host orchestrator imports the native debug module from `python/build-native-debug/fmi.so`.
 Build that first if it is not already present.
@@ -32,9 +28,11 @@ This starts LocalStack on `localhost:4566` and Redis as `fmi-redis` on the Docke
 ./setup.sh
 ```
 
-`setup.sh` waits for LocalStack health, publishes the SAM-built FMI layer, and creates or
-updates the `fmi-migration-worker` function. The script uses the AWS CLI with
-`--endpoint-url=http://localhost:4566`; it does not require `awslocal`.
+`setup.sh` waits for LocalStack health, builds the GCC 10 Redis-only function bundle, and
+creates or updates the `fmi-migration-worker` function. The function zip contains
+`lambda_function.py`, `fmi-worker.json`, `fmi.so`, and `lib/`; `LD_LIBRARY_PATH` is set to
+`/var/task/lib`. The script uses the AWS CLI with `--endpoint-url=http://localhost:4566`;
+it does not require `awslocal`.
 
 ## Run the Demo
 

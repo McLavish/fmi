@@ -1,0 +1,37 @@
+FROM public.ecr.aws/sam/build-python3.11:latest
+
+ENV LANG=en_US.UTF-8
+ENV PATH=/var/lang/bin:/usr/local/bin:/usr/bin:/bin:/opt/bin
+ENV LD_LIBRARY_PATH=/var/lang/lib:/lib64:/usr/lib64:/var/runtime:/var/runtime/lib:/var/task:/var/task/lib
+ENV LAMBDA_TASK_ROOT=/var/task
+ENV LAMBDA_RUNTIME_DIR=/var/runtime
+
+RUN yum -y groupinstall "Development Tools" \
+    && yum -y install gcc10 gcc10-c++ curl which git tar gzip xz unzip zlib-devel openssl11-devel \
+    && yum clean all
+
+RUN curl -LO https://cmake.org/files/v3.28/cmake-3.28.6-linux-x86_64.tar.gz \
+    && tar -C /usr/local --strip-components=1 -xzf cmake-3.28.6-linux-x86_64.tar.gz \
+    && rm -f cmake-3.28.6-linux-x86_64.tar.gz
+
+RUN curl -LO https://archives.boost.io/release/1.84.0/source/boost_1_84_0.tar.gz \
+    && tar -xzf boost_1_84_0.tar.gz \
+    && cd boost_1_84_0 \
+    && printf 'using gcc : 10 : /usr/bin/gcc10-g++ ;\n' > /root/user-config.jam \
+    && ./bootstrap.sh --with-python=/var/lang/bin/python3.11 --with-python-root=/var/lang \
+    && ./b2 -j"$(nproc)" \
+        --user-config=/root/user-config.jam \
+        toolset=gcc-10 \
+        cxxflags="-fPIC -std=c++17" \
+        link=static \
+        threading=multi \
+        runtime-link=shared \
+        install \
+    && cd .. \
+    && rm -rf boost_1_84_0 boost_1_84_0.tar.gz /root/user-config.jam
+
+RUN git clone --depth=1 https://github.com/redis/hiredis.git \
+    && cd hiredis \
+    && make CC=/usr/bin/gcc10-gcc static install \
+    && cd .. \
+    && rm -rf hiredis

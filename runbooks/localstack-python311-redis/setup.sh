@@ -3,17 +3,16 @@ set -euo pipefail
 
 RUNBOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$RUNBOOK_DIR/../.." && pwd)"
-LAYER_BUILD_DIR="$REPO_ROOT/python/aws/python311/.aws-sam/build"
 ENDPOINT_URL="http://localhost:4566"
+BUILD_IMAGE_TAG="${BUILD_IMAGE_TAG:-fmi-localstack-build:redis-gcc10}"
+BUNDLE_DIR="$RUNBOOK_DIR/build/bundle"
+FUNCTION_ZIP="$RUNBOOK_DIR/build/function.zip"
+FUNCTION_CONFIG_JSON='{"FunctionName":"fmi-migration-worker","Environment":{"Variables":{"LD_LIBRARY_PATH":"/var/task/lib"}},"Layers":[]}'
 
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export AWS_EC2_METADATA_DISABLED=true
-
-echo "Prerequisites: build the FMI Python 3.11 image and SAM layer first:"
-echo "  docker build -t fmi-build-python311 -f runbooks/aws-python311-s3/Dockerfile.python3.11 ."
-echo "  (cd python/aws/python311 && sam build)"
 
 cd "$RUNBOOK_DIR"
 
@@ -30,28 +29,27 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 
-LAYER_DIR="$(find "$LAYER_BUILD_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-if [ -z "$LAYER_DIR" ]; then
-  echo "No SAM layer build directory found under $LAYER_BUILD_DIR" >&2
-  exit 1
-fi
+echo "Building Redis-only FMI Lambda bundle with $BUILD_IMAGE_TAG"
+docker build -t "$BUILD_IMAGE_TAG" -f "$RUNBOOK_DIR/Dockerfile.build" "$REPO_ROOT"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp \
+  --mount type=bind,source="$REPO_ROOT",target=/opt/fmi \
+  "$BUILD_IMAGE_TAG" \
+  /opt/fmi/runbooks/localstack-python311-redis/make-fmi-bundle.sh
 
-rm -f layer.zip function.zip
-(cd "$LAYER_DIR" && zip -qr "$RUNBOOK_DIR/layer.zip" .)
-
-LAYER_JSON="$(aws --endpoint-url="$ENDPOINT_URL" lambda publish-layer-version \
-  --layer-name fmi-layer \
-  --zip-file fileb://layer.zip \
-  --compatible-runtimes python3.11)"
-LAYER_ARN="$(printf '%s' "$LAYER_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["LayerVersionArn"])')"
+rm -f "$FUNCTION_ZIP"
+mkdir -p "$RUNBOOK_DIR/build"
 
 STAGING_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 cp lambda_function.py fmi-worker.json "$STAGING_DIR/"
-cp "$LAYER_DIR/python/fmi.so" "$STAGING_DIR/"
+cp "$BUNDLE_DIR/fmi.so" "$STAGING_DIR/"
 mkdir -p "$STAGING_DIR/lib"
-cp -L "$LAYER_DIR"/lib/* "$STAGING_DIR/lib/"
-(cd "$STAGING_DIR" && zip -qr "$RUNBOOK_DIR/function.zip" .)
+if compgen -G "$BUNDLE_DIR/lib/*" >/dev/null; then
+  cp -L "$BUNDLE_DIR"/lib/* "$STAGING_DIR/lib/"
+fi
+(cd "$STAGING_DIR" && zip -qr "$FUNCTION_ZIP" .)
 
 if ! aws --endpoint-url="$ENDPOINT_URL" lambda create-function \
   --function-name fmi-migration-worker \
@@ -60,16 +58,13 @@ if ! aws --endpoint-url="$ENDPOINT_URL" lambda create-function \
   --timeout 120 \
   --memory-size 1024 \
   --role arn:aws:iam::000000000000:role/lambda-role \
-  --zip-file fileb://function.zip \
-  --environment Variables={LD_LIBRARY_PATH=/var/task/lib:/opt/lib} \
-  --layers "$LAYER_ARN"; then
+  --zip-file "fileb://$FUNCTION_ZIP" \
+  --environment Variables={LD_LIBRARY_PATH=/var/task/lib}; then
   aws --endpoint-url="$ENDPOINT_URL" lambda update-function-code \
     --function-name fmi-migration-worker \
-    --zip-file fileb://function.zip
+    --zip-file "fileb://$FUNCTION_ZIP"
   aws --endpoint-url="$ENDPOINT_URL" lambda update-function-configuration \
-    --function-name fmi-migration-worker \
-    --environment Variables={LD_LIBRARY_PATH=/var/task/lib:/opt/lib} \
-    --layers "$LAYER_ARN" >/dev/null
+    --cli-input-json "$FUNCTION_CONFIG_JSON" >/dev/null
 fi
 
 for attempt in $(seq 1 30); do
@@ -87,4 +82,4 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 
-echo "Deployed fmi-migration-worker with layer $LAYER_ARN and fat function zip"
+echo "Deployed fmi-migration-worker with Redis-only fat function zip"
