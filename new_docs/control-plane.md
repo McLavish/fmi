@@ -13,11 +13,11 @@ The coordinator owns one persistent `redisContext` per `Coordinator::Impl`.
 Commands are sent with `redisCommandArgv`, so communicator names, worker IDs,
 and placement strings are always command arguments rather than printf-format
 strings. On a broken connection, the client reconnects and retries the command
-once.
+once. Access to the hiredis context is serialized inside the coordinator so
+CRIU runtime helper threads can share the same control client.
 
-The current threading assumption is one operation at a time per communicator.
-The shared coordinator connection is not designed for concurrent command calls
-from multiple application threads.
+The higher-level communicator and channel runtime still assumes one FMI
+operation at a time per communicator.
 
 ## Transparent Migration Keys
 

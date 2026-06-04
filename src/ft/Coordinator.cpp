@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <initializer_list>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -138,6 +139,7 @@ struct FMI::FT::Coordinator::Impl {
     Utils::peer_num num_peers;
 #if FMI_ENABLE_REDIS
     redisContext* context = nullptr;
+    std::mutex command_mutex;
 #endif
 
     explicit Impl(Utils::FaultToleranceConfig config, std::string comm_name, Utils::peer_num num_peers) :
@@ -170,6 +172,7 @@ struct FMI::FT::Coordinator::Impl {
     }
 
     ReplyPtr command(const std::vector<std::string>& args) {
+        std::lock_guard<std::mutex> lock(command_mutex);
         if (args.empty()) {
             throw std::runtime_error("Redis command called with no arguments");
         }

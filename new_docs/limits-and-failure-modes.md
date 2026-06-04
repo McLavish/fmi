@@ -10,10 +10,9 @@ are deliberate v1 design boundaries.
 - FT metadata is scoped by base `comm_name`; concurrent unrelated jobs must use
   distinct communicator names.
 - Coordinator commands use one persistent Redis connection per coordinator and
-  argv-form command calls.
+  argv-form command calls. Access to that connection is serialized.
 - The current threading assumption is one operation at a time per
-  communicator; the coordinator connection is not a multi-threaded command
-  channel.
+  communicator at the channel/runtime level.
 - World-size mismatches are rejected if existing Redis metadata records a
   different `world_size`.
 
