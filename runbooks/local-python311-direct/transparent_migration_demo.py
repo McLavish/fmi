@@ -96,6 +96,9 @@ def run_orchestrator(comm_name, iterations):
         proc0.wait(); proc1.wait()
         sys.exit(1)
 
+    print("[orchestrator] promoting migration epoch", flush=True)
+    coordinator.promote_epoch()
+
     print(f"[orchestrator] rank 0 quiesced — launching replacement (placement=serverless)", flush=True)
     proc_replacement = spawn(0, wid_replacement, "serverless")
 

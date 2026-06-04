@@ -260,6 +260,9 @@ def run(comm_name, n):
         timeout_s=30,
     )
 
+    print("[orchestrator] promoting migration epoch", flush=True)
+    coordinator.promote_epoch()
+
     # Epoch 1: replacement rank comes in as a Lambda (serverless substrate).
     # Invoke synchronously so we can inspect the return value and assert the
     # post-migration allreduce result.  resume=True tells worker_core to skip

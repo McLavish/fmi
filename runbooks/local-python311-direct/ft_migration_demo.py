@@ -121,6 +121,7 @@ def run_replacement_peer(peer_id, num_peers, config_path, comm_name, worker_id, 
 def run_migration_request(rank, num_peers, config_path, comm_name):
     coordinator = fmi.FTCoordinator(str(config_path), comm_name, num_peers)
     coordinator.request_migration(rank)
+    coordinator.promote_epoch()
     emit({
         "event": "migration_requested",
         "rank": rank,
