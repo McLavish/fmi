@@ -59,50 +59,27 @@ namespace FMI {
             auto coordinator = std::make_shared<FMI::FT::Coordinator>(config_path, comm_name, num_peers);
             std::uint64_t current_epoch = coordinator->epoch();
 
-            // Detect replacement: pending for this rank AND a different worker already holds it
-            std::string existing_worker = coordinator->worker_for_rank(current_epoch, peer_id);
-            bool is_replacement = coordinator->is_rank_pending(peer_id) &&
-                                  !existing_worker.empty() &&
-                                  existing_worker != resolved_worker_id;
-
-            std::uint64_t active_epoch;
-            if (is_replacement) {
-                // Join the next epoch and block until it is promoted
-                active_epoch = current_epoch + 1;
+            if (coordinator->is_rank_pending(peer_id)) {
+                // A replacement rank waits for the orchestrator to promote and clear pending.
                 auto start = std::chrono::steady_clock::now();
                 while (true) {
-                    auto observed = coordinator->epoch();
-                    if (observed > current_epoch) {
-                        active_epoch = observed;
-                        coordinator->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Active);
-                        if (!placement.empty()) {
-                            coordinator->set_placement(active_epoch, peer_id, placement);
-                        }
-                        coordinator->refresh_lease(active_epoch, peer_id, resolved_worker_id);
+                    if (!coordinator->is_rank_pending(peer_id)) {
+                        current_epoch = coordinator->epoch();
                         break;
-                    }
-                    coordinator->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Replaced);
-                    if (!placement.empty()) {
-                        coordinator->set_placement(active_epoch, peer_id, placement);
-                    }
-                    coordinator->refresh_lease(active_epoch, peer_id, resolved_worker_id);
-                    if (coordinator->live_member_count(active_epoch) >= num_peers) {
-                        coordinator->promote_epoch(active_epoch);
                     }
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - start).count();
-                    if (static_cast<unsigned int>(elapsed) >= coordinator->lease_ms()) {
+                    if (static_cast<unsigned int>(elapsed) >= ft_config.reconfigure_timeout_ms) {
                         throw FMI::Utils::Timeout();
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(coordinator->heartbeat_ms()));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(ft_config.poll_interval_ms));
                 }
-            } else {
-                active_epoch = current_epoch;
-                coordinator->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Active);
-                if (!placement.empty()) {
-                    coordinator->set_placement(active_epoch, peer_id, placement);
-                }
-                coordinator->refresh_lease(active_epoch, peer_id, resolved_worker_id);
+            }
+
+            std::uint64_t active_epoch = current_epoch;
+            coordinator->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Active);
+            if (!placement.empty()) {
+                coordinator->set_placement(active_epoch, peer_id, placement);
             }
 
             this->comm_name = epoch_comm_name(comm_name, active_epoch);
@@ -115,7 +92,7 @@ namespace FMI {
                     channels, num_peers, faas_price, channel_hint, preferred));
 
             operation_runtime = std::make_shared<FMI::FT::TransparentMigrationRuntime>(
-                    peer_id, num_peers, resolved_worker_id, placement, active_epoch,
+                    peer_id, resolved_worker_id, placement, active_epoch,
                     ft_config, coordinator, comm_name,
                     [this](const std::string& new_name) { reconfigure_to_epoch(new_name); });
         } else {

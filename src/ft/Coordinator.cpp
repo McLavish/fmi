@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <initializer_list>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #if FMI_ENABLE_REDIS
 #include <hiredis/hiredis.h>
@@ -31,21 +33,6 @@ namespace {
             throw std::runtime_error(error);
         }
         return context;
-    }
-
-    ReplyPtr run_command(const FMI::Utils::FaultToleranceConfig& config, const std::string& command) {
-        redisContext* context = connect_redis(config);
-        auto* raw_reply = reinterpret_cast<redisReply*>(redisCommand(context, command.c_str()));
-        redisFree(context);
-        if (raw_reply == nullptr) {
-            throw std::runtime_error("Redis command failed: " + command);
-        }
-        ReplyPtr reply(raw_reply, &freeReplyObject);
-        if (reply->type == REDIS_REPLY_ERROR) {
-            std::string error = reply->str == nullptr ? "unknown Redis error" : reply->str;
-            throw std::runtime_error("Redis error for command '" + command + "': " + error);
-        }
-        return reply;
     }
 
     std::uint64_t current_time_millis() {
@@ -149,11 +136,75 @@ struct FMI::FT::Coordinator::Impl {
     Utils::FaultToleranceConfig config;
     std::string comm_name;
     Utils::peer_num num_peers;
+#if FMI_ENABLE_REDIS
+    redisContext* context = nullptr;
+#endif
 
     explicit Impl(Utils::FaultToleranceConfig config, std::string comm_name, Utils::peer_num num_peers) :
             config(std::move(config)),
             comm_name(std::move(comm_name)),
-            num_peers(num_peers) {}
+            num_peers(num_peers) {
+#if FMI_ENABLE_REDIS
+        connect();
+#endif
+    }
+
+    ~Impl() {
+#if FMI_ENABLE_REDIS
+        if (context != nullptr) {
+            redisFree(context);
+        }
+#endif
+    }
+
+#if FMI_ENABLE_REDIS
+    void connect() {
+        if (context != nullptr) {
+            redisFree(context);
+        }
+        context = connect_redis(config);
+    }
+
+    ReplyPtr command(std::initializer_list<std::string> args) {
+        return command(std::vector<std::string>(args));
+    }
+
+    ReplyPtr command(const std::vector<std::string>& args) {
+        if (args.empty()) {
+            throw std::runtime_error("Redis command called with no arguments");
+        }
+        if (context == nullptr || context->err) {
+            connect();
+        }
+
+        std::vector<const char*> argv;
+        std::vector<std::size_t> argvlen;
+        argv.reserve(args.size());
+        argvlen.reserve(args.size());
+        for (const auto& arg : args) {
+            argv.push_back(arg.data());
+            argvlen.push_back(arg.size());
+        }
+
+        auto* raw_reply = reinterpret_cast<redisReply*>(redisCommandArgv(
+                context, static_cast<int>(argv.size()), argv.data(), argvlen.data()));
+        if (raw_reply == nullptr) {
+            connect();
+            raw_reply = reinterpret_cast<redisReply*>(redisCommandArgv(
+                    context, static_cast<int>(argv.size()), argv.data(), argvlen.data()));
+        }
+        if (raw_reply == nullptr) {
+            throw std::runtime_error("Redis command failed");
+        }
+
+        ReplyPtr reply(raw_reply, &freeReplyObject);
+        if (reply->type == REDIS_REPLY_ERROR) {
+            std::string error = reply->str == nullptr ? "unknown Redis error" : reply->str;
+            throw std::runtime_error("Redis error: " + error);
+        }
+        return reply;
+    }
+#endif
 
     [[nodiscard]] std::string prefix() const {
         return "fmi:ft:" + comm_name + ":";
@@ -177,10 +228,6 @@ struct FMI::FT::Coordinator::Impl {
 
     [[nodiscard]] std::string placement_key(std::uint64_t epoch) const {
         return prefix() + "epoch:" + std::to_string(epoch) + ":placement";
-    }
-
-    [[nodiscard]] std::string lease_key(std::uint64_t epoch, Utils::peer_num rank) const {
-        return prefix() + "epoch:" + std::to_string(epoch) + ":lease:" + std::to_string(rank);
     }
 
     [[nodiscard]] std::string criu_prefix() const {
@@ -217,23 +264,22 @@ FMI::FT::Coordinator::~Coordinator() = default;
 
 void FMI::FT::Coordinator::ensure_job() const {
 #if FMI_ENABLE_REDIS
-    auto exists = run_command(impl->config, "EXISTS " + impl->meta_key());
+    auto exists = impl->command({"EXISTS", impl->meta_key()});
     if (exists->integer == 0) {
-        run_command(impl->config, "HSET " + impl->meta_key() + " world_size " + std::to_string(impl->num_peers) +
-                                  " current_epoch 0");
+        impl->command({"HSET", impl->meta_key(), "world_size", std::to_string(impl->num_peers), "current_epoch", "0"});
         return;
     }
 
-    auto world_size = run_command(impl->config, "HGET " + impl->meta_key() + " world_size");
+    auto world_size = impl->command({"HGET", impl->meta_key(), "world_size"});
     if (world_size->type == REDIS_REPLY_NIL) {
-        run_command(impl->config, "HSET " + impl->meta_key() + " world_size " + std::to_string(impl->num_peers));
+        impl->command({"HSET", impl->meta_key(), "world_size", std::to_string(impl->num_peers)});
     } else if (std::stoul(world_size->str) != impl->num_peers) {
         throw std::runtime_error("Fault-tolerance world size does not match the stored communicator metadata");
     }
 
-    auto current_epoch = run_command(impl->config, "HEXISTS " + impl->meta_key() + " current_epoch");
+    auto current_epoch = impl->command({"HEXISTS", impl->meta_key(), "current_epoch"});
     if (current_epoch->integer == 0) {
-        run_command(impl->config, "HSET " + impl->meta_key() + " current_epoch 0");
+        impl->command({"HSET", impl->meta_key(), "current_epoch", "0"});
     }
 #else
     throw std::runtime_error("Fault tolerance requires FMI to be built with Redis support");
@@ -243,7 +289,7 @@ void FMI::FT::Coordinator::ensure_job() const {
 std::uint64_t FMI::FT::Coordinator::epoch() const {
 #if FMI_ENABLE_REDIS
     ensure_job();
-    auto reply = run_command(impl->config, "HGET " + impl->meta_key() + " current_epoch");
+    auto reply = impl->command({"HGET", impl->meta_key(), "current_epoch"});
     if (reply->type == REDIS_REPLY_NIL || reply->str == nullptr) {
         return 0;
     }
@@ -257,20 +303,20 @@ void FMI::FT::Coordinator::request_migration(FMI::Utils::peer_num rank) {
 #if FMI_ENABLE_REDIS
     ensure_job();
     auto current_epoch = epoch();
-    run_command(impl->config, "SADD " + impl->pending_key() + " " + std::to_string(rank));
+    impl->command({"SADD", impl->pending_key(), std::to_string(rank)});
     set_rank_state(current_epoch, rank, RankState::MigrationPending);
 #endif
 }
 
 void FMI::FT::Coordinator::set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config, "HSET " + impl->placement_key(epoch) + " " + std::to_string(rank) + " " + placement);
+    impl->command({"HSET", impl->placement_key(epoch), std::to_string(rank), placement});
 #endif
 }
 
 std::string FMI::FT::Coordinator::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
 #if FMI_ENABLE_REDIS
-    auto reply = run_command(impl->config, "HGET " + impl->placement_key(epoch) + " " + std::to_string(rank));
+    auto reply = impl->command({"HGET", impl->placement_key(epoch), std::to_string(rank)});
     if (reply->type == REDIS_REPLY_NIL || reply->str == nullptr) {
         return "";
     }
@@ -283,7 +329,7 @@ std::string FMI::FT::Coordinator::placement_for_rank(std::uint64_t epoch, FMI::U
 std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::Coordinator::directory_snapshot(std::uint64_t epoch) const {
 #if FMI_ENABLE_REDIS
     std::vector<FMI::FT::RankDirectoryEntry> ranks;
-    auto reply = run_command(impl->config, "HKEYS " + impl->members_key(epoch));
+    auto reply = impl->command({"HKEYS", impl->members_key(epoch)});
     if (reply->type != REDIS_REPLY_ARRAY) {
         return ranks;
     }
@@ -296,15 +342,15 @@ std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::Coordinator::directory_snapsho
         FMI::FT::RankDirectoryEntry info;
         info.rank = rank_id;
 
-        auto worker = run_command(impl->config, "HGET " + impl->members_key(epoch) + " " + std::to_string(rank_id));
+        auto worker = impl->command({"HGET", impl->members_key(epoch), std::to_string(rank_id)});
         if (worker->type != REDIS_REPLY_NIL && worker->str != nullptr) {
             info.worker_id = worker->str;
         }
-        auto state = run_command(impl->config, "HGET " + impl->states_key(epoch) + " " + std::to_string(rank_id));
+        auto state = impl->command({"HGET", impl->states_key(epoch), std::to_string(rank_id)});
         if (state->type != REDIS_REPLY_NIL && state->str != nullptr) {
             info.state = rank_state_from_string(state->str);
         }
-        auto placement = run_command(impl->config, "HGET " + impl->placement_key(epoch) + " " + std::to_string(rank_id));
+        auto placement = impl->command({"HGET", impl->placement_key(epoch), std::to_string(rank_id)});
         if (placement->type != REDIS_REPLY_NIL && placement->str != nullptr) {
             info.placement = placement->str;
         }
@@ -322,16 +368,16 @@ std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::Coordinator::directory_snapsho
 
 void FMI::FT::Coordinator::clear_job_state() {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config, "DEL " + impl->meta_key());
-    run_command(impl->config, "DEL " + impl->pending_key());
-    auto reply = run_command(impl->config, "KEYS " + impl->prefix() + "epoch:*");
+    impl->command({"DEL", impl->meta_key()});
+    impl->command({"DEL", impl->pending_key()});
+    auto reply = impl->command({"KEYS", impl->prefix() + "epoch:*"});
     if (reply->type != REDIS_REPLY_ARRAY) {
         return;
     }
     for (std::size_t i = 0; i < reply->elements; i++) {
         auto* key = reply->element[i];
         if (key != nullptr && key->str != nullptr) {
-            run_command(impl->config, "DEL " + std::string(key->str));
+            impl->command({"DEL", std::string(key->str)});
         }
     }
 #endif
@@ -339,14 +385,14 @@ void FMI::FT::Coordinator::clear_job_state() {
 
 void FMI::FT::Coordinator::clear_criu_job_state() {
 #if FMI_ENABLE_REDIS
-    auto reply = run_command(impl->config, "KEYS " + impl->criu_prefix() + "*");
+    auto reply = impl->command({"KEYS", impl->criu_prefix() + "*"});
     if (reply->type != REDIS_REPLY_ARRAY) {
         return;
     }
     for (std::size_t i = 0; i < reply->elements; i++) {
         auto* key = reply->element[i];
         if (key != nullptr && key->str != nullptr) {
-            run_command(impl->config, "DEL " + std::string(key->str));
+            impl->command({"DEL", std::string(key->str)});
         }
     }
 #endif
@@ -354,7 +400,7 @@ void FMI::FT::Coordinator::clear_criu_job_state() {
 
 bool FMI::FT::Coordinator::has_pending_migration() const {
 #if FMI_ENABLE_REDIS
-    auto reply = run_command(impl->config, "SCARD " + impl->pending_key());
+    auto reply = impl->command({"SCARD", impl->pending_key()});
     return reply->integer > 0;
 #else
     return false;
@@ -363,7 +409,7 @@ bool FMI::FT::Coordinator::has_pending_migration() const {
 
 bool FMI::FT::Coordinator::is_rank_pending(FMI::Utils::peer_num rank) const {
 #if FMI_ENABLE_REDIS
-    auto reply = run_command(impl->config, "SISMEMBER " + impl->pending_key() + " " + std::to_string(rank));
+    auto reply = impl->command({"SISMEMBER", impl->pending_key(), std::to_string(rank)});
     return reply->integer == 1;
 #else
     return false;
@@ -373,20 +419,20 @@ bool FMI::FT::Coordinator::is_rank_pending(FMI::Utils::peer_num rank) const {
 void FMI::FT::Coordinator::register_rank(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id,
                                          FMI::FT::RankState state) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config, "HSET " + impl->members_key(epoch) + " " + std::to_string(rank) + " " + worker_id);
-    run_command(impl->config, "HSET " + impl->states_key(epoch) + " " + std::to_string(rank) + " " + state_to_string(state));
+    impl->command({"HSET", impl->members_key(epoch), std::to_string(rank), worker_id});
+    impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), state_to_string(state)});
 #endif
 }
 
 void FMI::FT::Coordinator::set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, FMI::FT::RankState state) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config, "HSET " + impl->states_key(epoch) + " " + std::to_string(rank) + " " + state_to_string(state));
+    impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), state_to_string(state)});
 #endif
 }
 
 std::string FMI::FT::Coordinator::worker_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
 #if FMI_ENABLE_REDIS
-    auto reply = run_command(impl->config, "HGET " + impl->members_key(epoch) + " " + std::to_string(rank));
+    auto reply = impl->command({"HGET", impl->members_key(epoch), std::to_string(rank)});
     if (reply->type == REDIS_REPLY_NIL || reply->str == nullptr) {
         return "";
     }
@@ -396,52 +442,19 @@ std::string FMI::FT::Coordinator::worker_for_rank(std::uint64_t epoch, FMI::Util
 #endif
 }
 
-void FMI::FT::Coordinator::refresh_lease(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id) const {
-#if FMI_ENABLE_REDIS
-    run_command(impl->config,
-                "PSETEX " + impl->lease_key(epoch, rank) + " " + std::to_string(impl->config.lease_ms) + " " + worker_id);
-#endif
-}
-
-std::size_t FMI::FT::Coordinator::live_member_count(std::uint64_t epoch) const {
-#if FMI_ENABLE_REDIS
-    auto members = run_command(impl->config, "HKEYS " + impl->members_key(epoch));
-    if (members->type != REDIS_REPLY_ARRAY) {
-        return 0;
-    }
-
-    std::size_t count = 0;
-    for (std::size_t i = 0; i < members->elements; i++) {
-        auto* rank = members->element[i];
-        if (rank == nullptr || rank->str == nullptr) {
-            continue;
-        }
-        auto exists = run_command(
-                impl->config,
-                "EXISTS " + impl->lease_key(epoch, static_cast<Utils::peer_num>(std::stoul(rank->str))));
-        if (exists->integer == 1) {
-            count++;
-        }
-    }
-    return count;
-#else
-    return 0;
-#endif
-}
-
 void FMI::FT::Coordinator::promote_epoch(std::uint64_t next_epoch) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config, "HSET " + impl->meta_key() + " current_epoch " + std::to_string(next_epoch));
-    run_command(impl->config, "DEL " + impl->pending_key());
+    static const std::string script =
+            "local current = redis.call('HGET', KEYS[1], 'current_epoch') "
+            "if not current then current = '0' end "
+            "if tonumber(ARGV[1]) > tonumber(current) then "
+            "redis.call('HSET', KEYS[1], 'current_epoch', ARGV[1]) "
+            "redis.call('DEL', KEYS[2]) "
+            "return 1 "
+            "end "
+            "return 0";
+    impl->command({"EVAL", script, "2", impl->meta_key(), impl->pending_key(), std::to_string(next_epoch)});
 #endif
-}
-
-unsigned int FMI::FT::Coordinator::heartbeat_ms() const {
-    return impl->config.heartbeat_ms;
-}
-
-unsigned int FMI::FT::Coordinator::lease_ms() const {
-    return impl->config.lease_ms;
 }
 
 void FMI::FT::Coordinator::criu_register_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
@@ -449,15 +462,14 @@ void FMI::FT::Coordinator::criu_register_rank(FMI::Utils::peer_num rank, int pid
 #if FMI_ENABLE_REDIS
     (void) criu_job_info();
     auto now_ms = current_time_millis();
-    run_command(impl->config, "SADD " + impl->criu_ranks_key() + " " + std::to_string(rank));
-    run_command(impl->config,
-                "HSET " + impl->criu_rank_key(rank) +
-                        " pid " + std::to_string(pid) +
-                        " host_id " + host_id +
-                        " backend " + backend +
-                        " state " + state_to_string(CriuRankState::Running) +
-                        " quiesced_generation 0" +
-                        " last_heartbeat_ms " + std::to_string(now_ms));
+    impl->command({"SADD", impl->criu_ranks_key(), std::to_string(rank)});
+    impl->command({"HSET", impl->criu_rank_key(rank),
+                   "pid", std::to_string(pid),
+                   "host_id", host_id,
+                   "backend", backend,
+                   "state", state_to_string(CriuRankState::Running),
+                   "quiesced_generation", "0",
+                   "last_heartbeat_ms", std::to_string(now_ms)});
 #endif
 }
 
@@ -466,13 +478,12 @@ void FMI::FT::Coordinator::criu_mark_rank_running(FMI::Utils::peer_num rank, int
 #if FMI_ENABLE_REDIS
     (void) criu_job_info();
     auto now_ms = current_time_millis();
-    run_command(impl->config,
-                "HSET " + impl->criu_rank_key(rank) +
-                        " pid " + std::to_string(pid) +
-                        " host_id " + host_id +
-                        " backend " + backend +
-                        " state " + state_to_string(CriuRankState::Running) +
-                        " last_heartbeat_ms " + std::to_string(now_ms));
+    impl->command({"HSET", impl->criu_rank_key(rank),
+                   "pid", std::to_string(pid),
+                   "host_id", host_id,
+                   "backend", backend,
+                   "state", state_to_string(CriuRankState::Running),
+                   "last_heartbeat_ms", std::to_string(now_ms)});
 #endif
 }
 
@@ -481,14 +492,13 @@ void FMI::FT::Coordinator::criu_mark_rank_quiesced(FMI::Utils::peer_num rank, in
 #if FMI_ENABLE_REDIS
     (void) criu_job_info();
     auto now_ms = current_time_millis();
-    run_command(impl->config,
-                "HSET " + impl->criu_rank_key(rank) +
-                        " pid " + std::to_string(pid) +
-                        " host_id " + host_id +
-                        " backend " + backend +
-                        " state " + state_to_string(CriuRankState::Quiesced) +
-                        " quiesced_generation " + std::to_string(generation) +
-                        " last_heartbeat_ms " + std::to_string(now_ms));
+    impl->command({"HSET", impl->criu_rank_key(rank),
+                   "pid", std::to_string(pid),
+                   "host_id", host_id,
+                   "backend", backend,
+                   "state", state_to_string(CriuRankState::Quiesced),
+                   "quiesced_generation", std::to_string(generation),
+                   "last_heartbeat_ms", std::to_string(now_ms)});
 #endif
 }
 
@@ -496,11 +506,10 @@ std::uint64_t FMI::FT::Coordinator::criu_request_checkpoint(const std::string& s
 #if FMI_ENABLE_REDIS
     auto info = criu_job_info();
     std::uint64_t next_generation = std::max(info.requested_generation, info.completed_generation) + 1;
-    run_command(impl->config,
-                "HSET " + impl->criu_meta_key() +
-                        " state " + state_to_string(CriuJobState::CheckpointRequested) +
-                        " requested_generation " + std::to_string(next_generation) +
-                        " supervisor " + supervisor_id);
+    impl->command({"HSET", impl->criu_meta_key(),
+                   "state", state_to_string(CriuJobState::CheckpointRequested),
+                   "requested_generation", std::to_string(next_generation),
+                   "supervisor", supervisor_id});
     return next_generation;
 #else
     return 0;
@@ -528,31 +537,28 @@ bool FMI::FT::Coordinator::criu_all_ranks_quiesced(std::uint64_t generation, con
 
 void FMI::FT::Coordinator::criu_mark_job_quiesced(std::uint64_t generation, const std::string& supervisor_id) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config,
-                "HSET " + impl->criu_meta_key() +
-                        " state " + state_to_string(CriuJobState::Quiesced) +
-                        " requested_generation " + std::to_string(generation) +
-                        " supervisor " + supervisor_id);
+    impl->command({"HSET", impl->criu_meta_key(),
+                   "state", state_to_string(CriuJobState::Quiesced),
+                   "requested_generation", std::to_string(generation),
+                   "supervisor", supervisor_id});
 #endif
 }
 
 void FMI::FT::Coordinator::criu_mark_checkpoint_complete(std::uint64_t generation, const std::string& supervisor_id) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config,
-                "HSET " + impl->criu_meta_key() +
-                        " state " + state_to_string(CriuJobState::CheckpointComplete) +
-                        " completed_generation " + std::to_string(generation) +
-                        " supervisor " + supervisor_id);
+    impl->command({"HSET", impl->criu_meta_key(),
+                   "state", state_to_string(CriuJobState::CheckpointComplete),
+                   "completed_generation", std::to_string(generation),
+                   "supervisor", supervisor_id});
 #endif
 }
 
 std::uint64_t FMI::FT::Coordinator::criu_request_restore(std::uint64_t generation, const std::string& supervisor_id) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config,
-                "HSET " + impl->criu_meta_key() +
-                        " state " + state_to_string(CriuJobState::RestoreRequested) +
-                        " restore_generation " + std::to_string(generation) +
-                        " supervisor " + supervisor_id);
+    impl->command({"HSET", impl->criu_meta_key(),
+                   "state", state_to_string(CriuJobState::RestoreRequested),
+                   "restore_generation", std::to_string(generation),
+                   "supervisor", supervisor_id});
     return generation;
 #else
     return 0;
@@ -561,11 +567,10 @@ std::uint64_t FMI::FT::Coordinator::criu_request_restore(std::uint64_t generatio
 
 void FMI::FT::Coordinator::criu_mark_job_restored(std::uint64_t generation, const std::string& supervisor_id) const {
 #if FMI_ENABLE_REDIS
-    run_command(impl->config,
-                "HSET " + impl->criu_meta_key() +
-                        " state " + state_to_string(CriuJobState::Restored) +
-                        " restore_generation " + std::to_string(generation) +
-                        " supervisor " + supervisor_id);
+    impl->command({"HSET", impl->criu_meta_key(),
+                   "state", state_to_string(CriuJobState::Restored),
+                   "restore_generation", std::to_string(generation),
+                   "supervisor", supervisor_id});
 #endif
 }
 
@@ -583,42 +588,44 @@ std::uint64_t FMI::FT::Coordinator::criu_restore_generation() const {
 
 FMI::FT::CriuJobInfo FMI::FT::Coordinator::criu_job_info() const {
 #if FMI_ENABLE_REDIS
-    auto exists = run_command(impl->config, "EXISTS " + impl->criu_meta_key());
+    auto exists = impl->command({"EXISTS", impl->criu_meta_key()});
     if (exists->integer == 0) {
-        run_command(impl->config,
-                    "HSET " + impl->criu_meta_key() +
-                            " world_size " + std::to_string(impl->num_peers) +
-                            " state " + state_to_string(CriuJobState::Running) +
-                            " requested_generation 0 completed_generation 0 restore_generation 0 supervisor none");
+        impl->command({"HSET", impl->criu_meta_key(),
+                       "world_size", std::to_string(impl->num_peers),
+                       "state", state_to_string(CriuJobState::Running),
+                       "requested_generation", "0",
+                       "completed_generation", "0",
+                       "restore_generation", "0",
+                       "supervisor", "none"});
     } else {
-        auto world_size = run_command(impl->config, "HGET " + impl->criu_meta_key() + " world_size");
+        auto world_size = impl->command({"HGET", impl->criu_meta_key(), "world_size"});
         if (world_size->type == REDIS_REPLY_NIL) {
-            run_command(impl->config, "HSET " + impl->criu_meta_key() + " world_size " + std::to_string(impl->num_peers));
+            impl->command({"HSET", impl->criu_meta_key(), "world_size", std::to_string(impl->num_peers)});
         } else if (std::stoul(world_size->str) != impl->num_peers) {
             throw std::runtime_error("CRIU FT world size does not match the stored communicator metadata");
         }
     }
 
     FMI::FT::CriuJobInfo info;
-    auto state = run_command(impl->config, "HGET " + impl->criu_meta_key() + " state");
+    auto state = impl->command({"HGET", impl->criu_meta_key(), "state"});
     if (state->type == REDIS_REPLY_NIL || state->str == nullptr) {
         info.state = CriuJobState::Running;
     } else {
         info.state = criu_job_state_from_string(state->str);
     }
-    auto requested = run_command(impl->config, "HGET " + impl->criu_meta_key() + " requested_generation");
+    auto requested = impl->command({"HGET", impl->criu_meta_key(), "requested_generation"});
     if (requested->type != REDIS_REPLY_NIL && requested->str != nullptr) {
         info.requested_generation = std::stoull(requested->str);
     }
-    auto completed = run_command(impl->config, "HGET " + impl->criu_meta_key() + " completed_generation");
+    auto completed = impl->command({"HGET", impl->criu_meta_key(), "completed_generation"});
     if (completed->type != REDIS_REPLY_NIL && completed->str != nullptr) {
         info.completed_generation = std::stoull(completed->str);
     }
-    auto restore = run_command(impl->config, "HGET " + impl->criu_meta_key() + " restore_generation");
+    auto restore = impl->command({"HGET", impl->criu_meta_key(), "restore_generation"});
     if (restore->type != REDIS_REPLY_NIL && restore->str != nullptr) {
         info.restore_generation = std::stoull(restore->str);
     }
-    auto supervisor = run_command(impl->config, "HGET " + impl->criu_meta_key() + " supervisor");
+    auto supervisor = impl->command({"HGET", impl->criu_meta_key(), "supervisor"});
     if (supervisor->type != REDIS_REPLY_NIL && supervisor->str != nullptr) {
         info.supervisor = supervisor->str;
     }
@@ -631,7 +638,7 @@ FMI::FT::CriuJobInfo FMI::FT::Coordinator::criu_job_info() const {
 std::vector<FMI::FT::CriuRankInfo> FMI::FT::Coordinator::criu_rank_info() const {
 #if FMI_ENABLE_REDIS
     std::vector<FMI::FT::CriuRankInfo> ranks;
-    auto reply = run_command(impl->config, "SMEMBERS " + impl->criu_ranks_key());
+    auto reply = impl->command({"SMEMBERS", impl->criu_ranks_key()});
     if (reply->type != REDIS_REPLY_ARRAY) {
         return ranks;
     }
@@ -644,27 +651,27 @@ std::vector<FMI::FT::CriuRankInfo> FMI::FT::Coordinator::criu_rank_info() const 
         FMI::FT::CriuRankInfo info;
         info.rank = rank_id;
 
-        auto pid = run_command(impl->config, "HGET " + impl->criu_rank_key(rank_id) + " pid");
+        auto pid = impl->command({"HGET", impl->criu_rank_key(rank_id), "pid"});
         if (pid->type != REDIS_REPLY_NIL && pid->str != nullptr) {
             info.pid = std::stoi(pid->str);
         }
-        auto host = run_command(impl->config, "HGET " + impl->criu_rank_key(rank_id) + " host_id");
+        auto host = impl->command({"HGET", impl->criu_rank_key(rank_id), "host_id"});
         if (host->type != REDIS_REPLY_NIL && host->str != nullptr) {
             info.host_id = host->str;
         }
-        auto backend = run_command(impl->config, "HGET " + impl->criu_rank_key(rank_id) + " backend");
+        auto backend = impl->command({"HGET", impl->criu_rank_key(rank_id), "backend"});
         if (backend->type != REDIS_REPLY_NIL && backend->str != nullptr) {
             info.backend = backend->str;
         }
-        auto state = run_command(impl->config, "HGET " + impl->criu_rank_key(rank_id) + " state");
+        auto state = impl->command({"HGET", impl->criu_rank_key(rank_id), "state"});
         if (state->type != REDIS_REPLY_NIL && state->str != nullptr) {
             info.state = criu_rank_state_from_string(state->str);
         }
-        auto quiesced = run_command(impl->config, "HGET " + impl->criu_rank_key(rank_id) + " quiesced_generation");
+        auto quiesced = impl->command({"HGET", impl->criu_rank_key(rank_id), "quiesced_generation"});
         if (quiesced->type != REDIS_REPLY_NIL && quiesced->str != nullptr) {
             info.quiesced_generation = std::stoull(quiesced->str);
         }
-        auto heartbeat = run_command(impl->config, "HGET " + impl->criu_rank_key(rank_id) + " last_heartbeat_ms");
+        auto heartbeat = impl->command({"HGET", impl->criu_rank_key(rank_id), "last_heartbeat_ms"});
         if (heartbeat->type != REDIS_REPLY_NIL && heartbeat->str != nullptr) {
             info.last_heartbeat_ms = std::stoull(heartbeat->str);
         }

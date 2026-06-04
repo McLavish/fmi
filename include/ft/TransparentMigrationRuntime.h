@@ -16,7 +16,6 @@ namespace FMI::FT {
     public:
         TransparentMigrationRuntime(
             FMI::Utils::peer_num peer_id,
-            FMI::Utils::peer_num num_peers,
             std::string worker_id,
             std::string placement,
             std::uint64_t active_epoch,
@@ -30,7 +29,6 @@ namespace FMI::FT {
 
     private:
         FMI::Utils::peer_num peer_id;
-        FMI::Utils::peer_num num_peers;
         std::string worker_id;
         std::string placement;
         std::uint64_t active_epoch;
@@ -39,7 +37,7 @@ namespace FMI::FT {
         std::string base_comm_name;
         std::function<void(const std::string&)> reconfigure_callback;
 
-        void promote_and_reconfigure();
+        void wait_for_promotion_and_reconfigure();
     };
 }
 

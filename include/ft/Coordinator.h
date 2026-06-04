@@ -36,10 +36,7 @@ namespace FMI::FT {
         //! Remove all FT metadata associated with this communicator name.
         void clear_job_state();
 
-        //! Return the number of members with a live lease in the given epoch.
-        [[nodiscard]] std::size_t live_member_count(std::uint64_t epoch) const;
-
-        //! Promote the epoch to next_epoch (idempotent).
+        //! Promote the epoch to next_epoch if it advances the current epoch.
         void promote_epoch(std::uint64_t next_epoch) const;
 
         //! Write placement for a rank in a given epoch.
@@ -80,9 +77,6 @@ namespace FMI::FT {
         void register_rank(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id, RankState state) const;
         void set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, RankState state) const;
         [[nodiscard]] std::string worker_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
-        void refresh_lease(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id) const;
-        [[nodiscard]] unsigned int heartbeat_ms() const;
-        [[nodiscard]] unsigned int lease_ms() const;
     };
 }
 

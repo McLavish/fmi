@@ -14,9 +14,8 @@ namespace FMI::Utils {
         std::string control_backend = "Redis";
         std::string control_host = "127.0.0.1";
         unsigned int control_port = 6379;
-        unsigned int heartbeat_ms = 1000;
-        unsigned int lease_ms = 10000;
-        bool safe_point_only = true;
+        unsigned int poll_interval_ms = 1000;
+        unsigned int reconfigure_timeout_ms = 10000;
         std::string preferred_data_backend;
         std::string images_dir = "/tmp/fmi-criu-images";
         unsigned int poll_ms = 100;

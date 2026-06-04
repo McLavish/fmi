@@ -66,9 +66,8 @@ namespace FMI::Utils {
         config.control_backend = ft_tree.get("control_backend", config.control_backend);
         config.control_host = ft_tree.get("control_host", config.control_host);
         config.control_port = ft_tree.get("control_port", config.control_port);
-        config.heartbeat_ms = ft_tree.get("heartbeat_ms", config.heartbeat_ms);
-        config.lease_ms = ft_tree.get("lease_ms", config.lease_ms);
-        config.safe_point_only = ft_tree.get("safe_point_only", config.safe_point_only);
+        config.poll_interval_ms = ft_tree.get("poll_interval_ms", config.poll_interval_ms);
+        config.reconfigure_timeout_ms = ft_tree.get("reconfigure_timeout_ms", config.reconfigure_timeout_ms);
         config.preferred_data_backend = ft_tree.get("preferred_data_backend", config.preferred_data_backend);
         config.images_dir = ft_tree.get("images_dir", config.images_dir);
         config.poll_ms = ft_tree.get("poll_ms", config.poll_ms);
