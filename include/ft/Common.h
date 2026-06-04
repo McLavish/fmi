@@ -8,11 +8,6 @@
 #include <vector>
 
 namespace FMI::FT {
-    enum class Mode : std::uint8_t {
-        TransparentMigration,
-        CriuCoordinated
-    };
-
     enum class Event : std::uint8_t {
         None,
         MigrateSelf,
@@ -33,6 +28,7 @@ namespace FMI::FT {
         RankState state = RankState::Active;
     };
 
+#ifdef FMI_ENABLE_CRIU
     enum class CriuJobState : std::uint8_t {
         Running,
         CheckpointRequested,
@@ -69,6 +65,7 @@ namespace FMI::FT {
         CriuJobInfo job;
         std::vector<CriuRankInfo> ranks;
     };
+#endif
 }
 
 #endif //FMI_FT_COMMON_H

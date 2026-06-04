@@ -1,5 +1,5 @@
-#include "../../include/ft/CriuRuntime.h"
-#include "../../include/ft/HostId.h"
+#include "../../../include/ft/experimental/CriuRuntime.h"
+#include "../../../include/ft/experimental/HostId.h"
 
 #include <chrono>
 #include <stdexcept>
@@ -17,8 +17,11 @@ FMI::FT::CriuRuntime::CriuRuntime(FMI::Utils::peer_num peer_id, FMI::Utils::peer
         prepare_for_checkpoint(std::move(prepare_for_checkpoint)) {
     FMI::Utils::Configuration configuration(this->config_path);
     config = configuration.get_fault_tolerance_config();
-    if (!config.enabled || config.mode != FMI::FT::Mode::CriuCoordinated) {
-        throw std::runtime_error("CRIU runtime requires fault_tolerance.mode = criu_coordinated");
+    if (!config.enabled) {
+        throw std::runtime_error("CRIU runtime requires fault tolerance to be enabled");
+    }
+    if (config.control_backend != "Redis") {
+        throw std::runtime_error("CRIU runtime requires Redis as the control backend");
     }
     host_id = FMI::FT::resolve_host_id(config);
     coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);

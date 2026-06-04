@@ -1,5 +1,5 @@
-#include "../../include/ft/CriuSupervisor.h"
-#include "../../include/ft/HostId.h"
+#include "../../../include/ft/experimental/CriuSupervisor.h"
+#include "../../../include/ft/experimental/HostId.h"
 
 #include <algorithm>
 #include <chrono>
@@ -98,8 +98,8 @@ std::vector<FMI::FT::CriuRankInfo> FMI::FT::CriuSupervisor::local_ranks() const 
 }
 
 void FMI::FT::CriuSupervisor::ensure_criu_mode() const {
-    if (!config.enabled || config.mode != FMI::FT::Mode::CriuCoordinated) {
-        throw std::runtime_error("CRIU supervisor requires fault_tolerance.mode = criu_coordinated");
+    if (!config.enabled) {
+        throw std::runtime_error("CRIU supervisor requires fault tolerance to be enabled");
     }
     if (config.control_backend != "Redis") {
         throw std::runtime_error("CRIU supervisor requires Redis as the control backend");

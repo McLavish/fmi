@@ -10,13 +10,15 @@
 namespace FMI::Utils {
     struct FaultToleranceConfig {
         bool enabled = false;
-        FMI::FT::Mode mode = FMI::FT::Mode::TransparentMigration;
         std::string control_backend = "Redis";
         std::string control_host = "127.0.0.1";
         unsigned int control_port = 6379;
         unsigned int poll_interval_ms = 1000;
         unsigned int reconfigure_timeout_ms = 10000;
         std::string preferred_data_backend;
+
+        // Experimental CRIU settings. Parsed for the opt-in CRIU code path only; transparent
+        // migration currently does not checkpoint or restore application state.
         std::string images_dir = "/tmp/fmi-criu-images";
         unsigned int poll_ms = 100;
         unsigned int quiesce_timeout_ms = 10000;

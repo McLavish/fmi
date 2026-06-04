@@ -1,7 +1,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "../include/fmi.h"
-#include "../include/ft/CriuRuntime.h"
+#include "../include/ft/experimental/CriuRuntime.h"
 
 #include <atomic>
 #include <chrono>
@@ -120,7 +120,6 @@ namespace {
                "  },\n"
                "  \"fault_tolerance\": {\n"
                "    \"enabled\": true,\n"
-               "    \"mode\": \"criu_coordinated\",\n"
                "    \"control_backend\": \"Redis\",\n"
                "    \"control_host\": \"127.0.0.1\",\n"
                "    \"control_port\": 6379,\n"
@@ -200,33 +199,6 @@ namespace {
 }
 
 BOOST_AUTO_TEST_SUITE(CriuFaultTolerance);
-
-BOOST_AUTO_TEST_CASE(configuration_parses_criu_mode) {
-    FMI::Utils::Configuration config(criu_config_path);
-    auto ft = config.get_fault_tolerance_config();
-
-    BOOST_CHECK(ft.enabled);
-    BOOST_CHECK(ft.mode == FMI::FT::Mode::CriuCoordinated);
-    BOOST_CHECK_EQUAL(ft.control_backend, "Redis");
-    BOOST_CHECK_EQUAL(ft.preferred_data_backend, "Direct");
-    BOOST_CHECK_EQUAL(ft.images_dir, "/tmp/fmi-criu-images");
-    BOOST_CHECK_EQUAL(ft.poll_ms, 25U);
-    BOOST_CHECK_EQUAL(ft.quiesce_timeout_ms, 2000U);
-}
-
-BOOST_AUTO_TEST_CASE(criu_mode_requires_direct_only_backend) {
-    auto temp_dir = fs::temp_directory_path() / unique_comm_name("criu-config");
-    fs::create_directories(temp_dir);
-    auto host_id = current_host_id();
-
-    auto mixed_backends = write_criu_config(temp_dir / "mixed.json", temp_dir / "images-mixed", host_id, true, true);
-    auto missing_direct = write_criu_config(temp_dir / "missing-direct.json", temp_dir / "images-missing", host_id, false, false);
-
-    BOOST_CHECK_THROW(FMI::Communicator(0, 2, mixed_backends.string(), unique_comm_name("criu-mixed")), std::runtime_error);
-    BOOST_CHECK_THROW(FMI::Communicator(0, 2, missing_direct.string(), unique_comm_name("criu-missing")), std::runtime_error);
-
-    fs::remove_all(temp_dir);
-}
 
 BOOST_AUTO_TEST_CASE(coordinator_tracks_criu_checkpoint_and_restore_state) {
     std::string comm_name = unique_comm_name();

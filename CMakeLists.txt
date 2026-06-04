@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 option(FMI_ENABLE_S3 "Enable the S3 backend" ON)
 option(FMI_ENABLE_REDIS "Enable the Redis backend" ON)
-option(FMI_ENABLE_CRIU "Build CRIU coordinated fault-tolerance support" ON)
+option(FMI_ENABLE_CRIU "Build experimental CRIU checkpoint/restore support" OFF)
 option(FMI_USE_STATIC_BOOST "Prefer static Boost libraries" ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -64,8 +64,8 @@ endif()
 
 if(FMI_ENABLE_CRIU)
     list(APPEND FMI_SOURCES
-        src/ft/CriuRuntime.cpp
-        src/ft/CriuSupervisor.cpp
+        src/ft/experimental/CriuRuntime.cpp
+        src/ft/experimental/CriuSupervisor.cpp
     )
 endif()
 

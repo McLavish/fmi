@@ -1,7 +1,7 @@
 #ifndef FMI_FT_HOSTID_H
 #define FMI_FT_HOSTID_H
 
-#include "../utils/Configuration.h"
+#include "../../utils/Configuration.h"
 
 #include <stdexcept>
 #include <string>

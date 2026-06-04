@@ -1,7 +1,4 @@
 #include "../include/Communicator.h"
-#ifdef FMI_ENABLE_CRIU
-#include "../include/ft/CriuRuntime.h"
-#endif
 #include "../include/ft/TransparentMigrationRuntime.h"
 #include "../include/ft/Coordinator.h"
 
@@ -32,19 +29,6 @@ namespace FMI {
         this->config_path = config_path;
         this->faas_memory = faas_memory;
 
-        if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
-#ifndef FMI_ENABLE_CRIU
-            throw std::runtime_error("FMI built without CRIU support");
-#else
-            auto backends = config.get_active_channels();
-            if (backends.find("Direct") == backends.end()) {
-                throw std::runtime_error("CRIU-coordinated fault tolerance requires the Direct backend");
-            }
-            if (backends.size() != 1 || !ft_config.preferred_data_backend.empty() && ft_config.preferred_data_backend != "Direct") {
-                throw std::runtime_error("CRIU-coordinated fault tolerance only supports the Direct backend");
-            }
-#endif
-        }
         if (ft_config.enabled && !ft_config.preferred_data_backend.empty()) {
             auto backends = config.get_active_channels();
             if (backends.find(ft_config.preferred_data_backend) == backends.end()) {
@@ -52,7 +36,7 @@ namespace FMI {
             }
         }
 
-        if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::TransparentMigration) {
+        if (ft_config.enabled) {
             // Resolve worker_id (auto-generate if not provided)
             std::string resolved_worker_id = worker_id.empty() ? make_worker_id(peer_id) : std::move(worker_id);
 
@@ -78,6 +62,8 @@ namespace FMI {
 
             std::uint64_t active_epoch = current_epoch;
             coordinator->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Active);
+            // PLANS.md step 4 seam: a future CRIU-backed state restore for replacement ranks
+            // belongs here, after the rank joins epoch N+1 and before it resumes user work.
             if (!placement.empty()) {
                 coordinator->set_placement(active_epoch, peer_id, placement);
             }
@@ -96,29 +82,13 @@ namespace FMI {
                     ft_config, coordinator, comm_name,
                     [this](const std::string& new_name) { reconfigure_to_epoch(new_name); });
         } else {
-            // Non-FT or CriuCoordinated path
             this->comm_name = comm_name;
             build_channels(this->comm_name);
 
             double gib_second_price = config.get_faas_price();
             double faas_price = (double) faas_memory / 1024. * gib_second_price;
-            std::string preferred_backend;
-            if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
-                preferred_backend = ft_config.preferred_data_backend.empty() ? "Direct" : ft_config.preferred_data_backend;
-            } else if (ft_config.enabled) {
-                preferred_backend = ft_config.preferred_data_backend;
-            }
             set_channel_policy(std::make_shared<FMI::Utils::ChannelPolicy>(
-                    channels, faas_price, channel_hint, preferred_backend));
-
-            if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
-#ifdef FMI_ENABLE_CRIU
-                operation_runtime = std::make_shared<FMI::FT::CriuRuntime>(
-                        peer_id, num_peers, std::move(config_path), this->comm_name,
-                        "Direct",
-                        [this]() { prepare_channels_for_checkpoint(); });
-#endif
-            }
+                    channels, faas_price, channel_hint));
         }
     }
 
@@ -142,6 +112,8 @@ namespace FMI {
         channels.clear();
         this->comm_name = new_comm_name;
         build_channels(new_comm_name);
+        // PLANS.md step 4 seam: if CRIU state transfer is integrated into transparent
+        // migration, restored rank state must be available before rebuilt channels are used.
         // ChannelPolicy holds a reference to the channels map; it sees the rebuilt entries automatically
     }
 
@@ -183,6 +155,8 @@ namespace FMI {
     }
 
     void Communicator::prepare_channels_for_checkpoint() {
+        // Future CRIU integration point for transparent migration: release transport resources
+        // before checkpointing application state on the outgoing rank.
         for (const auto& [name, channel] : channels) {
             channel->prepare_for_checkpoint();
         }

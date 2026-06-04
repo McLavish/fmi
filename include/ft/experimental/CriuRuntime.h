@@ -1,10 +1,10 @@
 #ifndef FMI_FT_CRIURUNTIME_H
 #define FMI_FT_CRIURUNTIME_H
 
-#include "../utils/Common.h"
-#include "../utils/Configuration.h"
-#include "Coordinator.h"
-#include "OperationRuntime.h"
+#include "../../utils/Common.h"
+#include "../../utils/Configuration.h"
+#include "../Coordinator.h"
+#include "../OperationRuntime.h"
 
 #include <condition_variable>
 #include <cstdint>

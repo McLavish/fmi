@@ -1,9 +1,9 @@
 #ifndef FMI_FT_CRIUSUPERVISOR_H
 #define FMI_FT_CRIUSUPERVISOR_H
 
-#include "../utils/Common.h"
-#include "../utils/Configuration.h"
-#include "Coordinator.h"
+#include "../../utils/Common.h"
+#include "../../utils/Configuration.h"
+#include "../Coordinator.h"
 
 #include <cstdint>
 #include <memory>

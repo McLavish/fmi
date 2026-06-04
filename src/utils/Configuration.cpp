@@ -3,18 +3,6 @@
 #include <stdexcept>
 #include <utility>
 
-namespace {
-    FMI::FT::Mode parse_ft_mode(const std::string& mode) {
-        if (mode == "transparent_migration") {
-            return FMI::FT::Mode::TransparentMigration;
-        }
-        if (mode == "criu_coordinated") {
-            return FMI::FT::Mode::CriuCoordinated;
-        }
-        throw std::runtime_error("Unknown fault tolerance mode: " + mode);
-    }
-}
-
 namespace FMI::Utils {
 
     Configuration::Configuration(const std::string& config_path) {
@@ -61,7 +49,6 @@ namespace FMI::Utils {
 
         auto ft_tree = root.get_child("fault_tolerance");
         config.enabled = ft_tree.get("enabled", false);
-        config.mode = parse_ft_mode(ft_tree.get("mode", std::string("transparent_migration")));
         config.control_backend = ft_tree.get("control_backend", config.control_backend);
         config.control_host = ft_tree.get("control_host", config.control_host);
         config.control_port = ft_tree.get("control_port", config.control_port);

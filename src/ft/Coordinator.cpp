@@ -72,6 +72,7 @@ namespace {
         throw std::runtime_error("Unknown rank state string: " + state);
     }
 
+#ifdef FMI_ENABLE_CRIU
     std::string state_to_string(FMI::FT::CriuJobState state) {
         switch (state) {
             case FMI::FT::CriuJobState::Running:
@@ -131,6 +132,7 @@ namespace {
         }
         throw std::runtime_error("Unknown CRIU rank state string: " + state);
     }
+#endif
 #endif
 }
 
@@ -253,6 +255,7 @@ struct FMI::FT::Coordinator::Impl {
         return prefix() + "epoch:" + std::to_string(epoch) + ":placement";
     }
 
+#ifdef FMI_ENABLE_CRIU
     [[nodiscard]] std::string criu_prefix() const {
         return prefix() + "criu:";
     }
@@ -268,6 +271,7 @@ struct FMI::FT::Coordinator::Impl {
     [[nodiscard]] std::string criu_rank_key(Utils::peer_num rank) const {
         return criu_prefix() + "rank:" + std::to_string(rank);
     }
+#endif
 };
 
 FMI::FT::Coordinator::Coordinator(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers) {
@@ -404,6 +408,7 @@ void FMI::FT::Coordinator::clear_job_state() {
 #endif
 }
 
+#ifdef FMI_ENABLE_CRIU
 void FMI::FT::Coordinator::clear_criu_job_state() {
 #if FMI_ENABLE_REDIS
     auto reply = impl->command({"KEYS", impl->criu_prefix() + "*"});
@@ -418,6 +423,7 @@ void FMI::FT::Coordinator::clear_criu_job_state() {
     }
 #endif
 }
+#endif
 
 bool FMI::FT::Coordinator::has_pending_migration() const {
 #if FMI_ENABLE_REDIS
@@ -466,6 +472,7 @@ void FMI::FT::Coordinator::promote_epoch(std::uint64_t next_epoch) const {
 #endif
 }
 
+#ifdef FMI_ENABLE_CRIU
 void FMI::FT::Coordinator::ensure_criu_job() const {
 #if FMI_ENABLE_REDIS
     auto exists = impl->command({"EXISTS", impl->criu_meta_key()});
@@ -645,3 +652,4 @@ std::vector<FMI::FT::CriuRankInfo> FMI::FT::Coordinator::criu_rank_info() const 
     return {};
 #endif
 }
+#endif

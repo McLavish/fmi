@@ -52,7 +52,6 @@
   },
   "fault_tolerance": {
     "enabled": true,
-    "mode": "criu_coordinated",
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,

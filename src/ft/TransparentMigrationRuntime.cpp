@@ -37,6 +37,8 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     if (coordinator->is_rank_pending(peer_id)) {
         // This rank is the migration target: quiesce and let the orchestrator relaunch
         coordinator->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
+        // PLANS.md step 4 seam: a future CRIU-backed implementation checkpoints this
+        // rank's application state here before the outgoing process exits.
         std::exit(0);
     }
 
@@ -59,6 +61,8 @@ void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure() 
             if (!placement.empty()) {
                 coordinator->set_placement(active_epoch, peer_id, placement);
             }
+            // PLANS.md step 4 seam: restored application state must be installed before
+            // control returns to user code after the epoch-N+1 channel rebuild.
             reconfigure_callback(base_comm_name + "@epoch=" + std::to_string(active_epoch));
             return;
         }
