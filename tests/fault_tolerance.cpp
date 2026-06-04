@@ -87,7 +87,7 @@ BOOST_AUTO_TEST_CASE(transparent_migration_placement_in_directory) {
     coordinator.clear_job_state();
 }
 
-// Replacement rank constructor detects worker_id mismatch and joins epoch N+1
+// Replacement rank constructor waits while its rank is pending, then joins the externally promoted epoch.
 BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
     std::string comm_name = unique_comm_name();
     if (!redis_available(comm_name)) {
@@ -105,16 +105,14 @@ BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
     // Trigger migration for rank 1
     coordinator.request_migration(1);
 
-    // Launch replacement in a thread (its constructor will block until epoch 1 is promoted)
+    // Launch replacement in a thread; if it observes pending, its constructor blocks until promotion clears it.
     std::future<std::string> replacement_comm_name = std::async(std::launch::async, [&]() {
-        // Different worker_id → detected as replacement candidate → joins epoch 1
         FMI::Communicator replacement(1, 2, ft_config_path, comm_name, 128, "worker-c", "serverless");
         return replacement.get_comm_name();
     });
 
     // Give the replacement thread a moment to enter its constructor spin loop,
-    // then promote epoch 1 externally (simulating what a survivor's enter_operation
-    // would do after calling a collective — not possible here without tcpunchd).
+    // then promote epoch 1 externally as the centralized orchestrator.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     coordinator.promote_epoch(1);
 
