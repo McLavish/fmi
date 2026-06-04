@@ -63,6 +63,19 @@ def run_worker(peer_id, num_peers, comm_name, worker_id, placement, n, gap_s, re
                 fmi.types(fmi.datatypes.double),
             )
 
+        # Self-verify the post-migration result so BOTH substrates fail loudly on
+        # a wrong collective — the surviving VM and the replacement Lambda, not
+        # just the orchestrator-inspected return value.  Each rank p contributes
+        # (p + 1), so a sum-allreduce over n peers must equal n*(n+1)/2.
+        expected = num_peers * (num_peers + 1) / 2.0
+        if result != expected:
+            return {
+                "peer_id": peer_id,
+                "placement": placement,
+                "status": f"wrong result: got {result}, expected {expected}",
+                "result": result,
+            }
+
     except Exception as e:
         return {"peer_id": peer_id, "placement": placement, "status": f"partial: {e}", "result": None}
 
