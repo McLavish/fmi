@@ -9,8 +9,8 @@ serverless/distributed applications an MPI-like API for point-to-point and colle
 communication. Its distinguishing feature is **model-driven channel selection**: the same
 logical operation can run over different transport backends (direct TCP, S3, Redis), and a
 cost/performance model picks the backend per operation based on message size and an
-optimization hint (`fast` vs `cheap`). It also adds two fault-tolerance modes on top of the
-base messaging layer.
+optimization hint (`fast` vs `cheap`). It also adds one Redis-coordinated transparent
+migration protocol on top of the base messaging layer.
 
 The canonical working tree on this machine is `/home/luca/fmi`. Note that some checked-in
 docs/runbooks (`docs/fault-tolerance.md`, `runbooks/*/README.md`) reference paths like
@@ -34,10 +34,11 @@ cmake --build build -j"$(nproc)"
 ```
 
 CMake options (defaults in `CMakeLists.txt`): `FMI_ENABLE_S3` (ON, pulls AWS SDK for C++),
-`FMI_ENABLE_REDIS` (ON, pulls hiredis), `FMI_USE_STATIC_BOOST` (ON), `FMI_BUILD_TESTS`
-(OFF), `FMI_BUILD_TOOLS` (ON when top-level, OFF when consumed via `add_subdirectory`).
-The library target is `FMI` (alias `FMI::FMI`), built STATIC, and publishes its public
-headers via `include/` (exported to a parent scope as `FMI_INCLUDE_DIRS`).
+`FMI_ENABLE_REDIS` (ON, pulls hiredis), `FMI_ENABLE_CRIU` (OFF, experimental CRIU
+checkpoint/restore raw material), `FMI_USE_STATIC_BOOST` (ON), `FMI_BUILD_TESTS` (OFF),
+`FMI_BUILD_TOOLS` (ON when top-level, OFF when consumed via `add_subdirectory`). The library
+target is `FMI` (alias `FMI::FMI`), built STATIC, and publishes its public headers via
+`include/` (exported to a parent scope as `FMI_INCLUDE_DIRS`).
 
 ### Local Direct-only debug build (no AWS/Redis)
 
@@ -87,15 +88,16 @@ test binary is `build/tests/Boost_Tests_run`.
 ```
 
 Suites (note the names differ from the file names): `Channels` (`channels.cpp`),
-`Communicator` (`communicator.cpp`), `FaultTolerance` (`fault_tolerance.cpp`),
-`CriuFaultTolerance` (`criu_fault_tolerance.cpp`). **Many tests need live infrastructure:** Redis-backed cases
-need a running Redis; `Direct` cases need a `tcpunchd` rendezvous server on port 10000
+`Communicator` (`communicator.cpp`), `FaultTolerance` (`fault_tolerance.cpp`), and, only
+with `FMI_ENABLE_CRIU=ON`, `CriuFaultTolerance` (`criu_fault_tolerance.cpp`). **Many tests
+need live infrastructure:** Redis-backed cases need a running Redis; `Direct` cases need a
+`tcpunchd` rendezvous server on port 10000
 (`./extern/TCPunch/server/build*/tcpunchd 10000`); S3 cases need AWS credentials + a bucket.
 The CRIU tests are designed to run against a *mock* `criu` binary because real
 checkpoint/restore needs kernel capabilities usually unavailable in dev environments.
 
-Standalone demos (also under `tests/`, built as separate executables): `ft_migration_demo`,
-`criu_checkpoint_demo`.
+Standalone demos (also under `tests/`, built as separate executables): `ft_migration_demo`.
+The experimental `criu_checkpoint_demo` is built only with `FMI_ENABLE_CRIU=ON`.
 
 ## Running things
 
@@ -105,8 +107,7 @@ Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id
 control + data plane), and the AWS Lambda + S3 flow is in `runbooks/aws-python311-s3/`; both
 READMEs are verified step-by-step runbooks. JSON config templates live in `config/`.
 
-The CRIU fault-tolerance mode is driven by the `fmi-criu-supervisor` CLI (built from
-`tools/`, on by default at top level):
+The experimental CRIU supervisor CLI is built only with `FMI_ENABLE_CRIU=ON`:
 
 ```text
 fmi-criu-supervisor {checkpoint|restore|status|cleanup} <comm_name> <num_peers> <config> [generation]
@@ -122,9 +123,10 @@ fault tolerance layered around the user API.
   `FMI::Comm::Data<T>`. It owns a map of named channels plus one `ChannelPolicy`. For each
   call it asks the policy for a channel name, then dispatches to that channel. Every
   operation is wrapped in an `OperationGuard` (RAII) that calls `enter_operation`/
-  `exit_operation` — this is the hook the CRIU runtime uses to quiesce at operation
+  `exit_operation` — this is the hook transparent migration uses to observe Redis
+  migration requests and reconfigure at operation
   boundaries. Most of the real logic is header-only templates; `src/Communicator.cpp` is
-  thin (construction, channel creation, CRIU wiring).
+  thin (construction, channel creation, FT runtime wiring).
 
 - **`FMI::Utils::ChannelPolicy`** (`include/utils/ChannelPolicy.h`) is the cost model — the
   paper's core idea. Given an operation descriptor `{op, size, left_to_right}`, the per-
@@ -148,26 +150,24 @@ fault tolerance layered around the user API.
 - **Configuration** (`include/utils/Configuration.h`, `src/utils/Configuration.cpp`): one
   JSON file parses into `Config { channels, models, fault_tolerance }`. The `backends` block
   enables/configures each channel; the `model` block holds cost-model parameters; the
-  `fault_tolerance` block maps to `FaultToleranceConfig`, whose `mode` string selects
-  `safe_point_restart` → `SafePointRestart` or `criu_coordinated` → `CriuCoordinated`.
+  `fault_tolerance` block maps to `FaultToleranceConfig`. If `fault_tolerance.enabled` is
+  true, `Communicator` uses transparent migration; there is no FT mode selector.
 
 - **Fault tolerance** (`include/ft/`, `src/ft/`, design in `PLANS.md`, usage in
-  `docs/fault-tolerance.md`): two modes, both using Redis as the control plane and `Direct`/
-  TCP as the preferred data plane.
-  - **`SafePointRestart`** — epoch-based migration that preserves logical rank IDs.
-    `FMI::FT::Session` wraps a `Communicator`; the app calls `safe_point()` between
-    communication phases and gets back `None` / `MigrateSelf` / `Reconfigured`
-    (`FMI::FT::Event`). On migration the session rebuilds the communicator for epoch N+1 and
-    a replacement worker rejoins with the same logical rank. `FMI::FT::Coordinator` tracks
-    epochs/membership/migration state in Redis; migration is triggered externally via
-    `request_migration()`. **The application owns checkpoint/restore of its own state** —
-    this mode only reconfigures communication.
-  - **`CriuCoordinated`** — transparent at the API layer (app keeps using a plain
-    `Communicator`). `FMI::FT::CriuRuntime` (per rank) counts in-flight operations, stops
-    admitting new ones after a checkpoint request, drains, releases `Direct` sockets, and
-    blocks on Redis until restore. `FMI::FT::CriuSupervisor` (and the
-    `fmi-criu-supervisor` CLI) run `criu dump`/`restore`. v1 is same-host only, `Direct`-only,
-    and has no Python binding.
+  `docs/fault-tolerance.md`): transparent migration is the single FT protocol. It uses Redis
+  as the control plane and `Direct`/TCP as the preferred data plane. `FMI::FT::Coordinator`
+  tracks epochs, membership, placement, and migration state in Redis; migration is triggered
+  externally via `request_migration()`. `TransparentMigrationRuntime` checks for migration at
+  `OperationGuard` boundaries. The targeted rank marks itself `QUIESCED` and exits, a
+  replacement rejoins with the same logical rank at epoch N+1, and surviving ranks rebuild
+  channels under the new epoch-qualified communicator name. **Application-state continuity is
+  not implemented yet**; the outgoing channel-release hook and the replacement/reconfigure
+  points are the documented seam for future CRIU-backed checkpoint/restore.
+  - **Experimental CRIU** — `FMI_ENABLE_CRIU=ON` builds `include/ft/experimental/` and
+    `src/ft/experimental/` plus the `fmi-criu-supervisor` CLI, CRIU tests, and
+    `criu_checkpoint_demo`. This code is quarantined WIP raw material for future state
+    transfer, not a second FT mode. It still contains reusable dump/restore and Redis
+    generation-tracking code.
   - **Epoch fencing invariant** (`PLANS.md`): under FT, every backend-visible name —
     `Direct` pairing names, `Redis`/`S3` object names, per-instance operation counters — is
     epoch-qualified, so stale messages/objects from an old epoch can never be consumed after
@@ -175,8 +175,8 @@ fault tolerance layered around the user API.
 
 - **Python bindings** (`python/`): a Boost.Python module. `fmi_python.cpp` is the module
   entry point; `PythonCommunicator.cpp` exposes `Communicator`; `PythonFT.cpp` exposes the
-  FT surface (`FTSession`, `FTCoordinator`, `ft_events`) plus the type/op helpers (`hints`,
-  `func`, `op`, `datatypes`, `types`). Because Python is dynamically typed, collective calls
+  FT coordinator surface (`FTCoordinator`) plus the type/op helpers (`hints`, `func`, `op`,
+  `datatypes`, `types`). Because Python is dynamically typed, collective calls
   take an explicit `fmi.types(...)` descriptor and return results directly rather than
   filling a receive buffer.
 

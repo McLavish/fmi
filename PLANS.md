@@ -8,9 +8,9 @@ Chosen semantics:
 
 - logical rank IDs are preserved across migration
 - migration is triggered externally
-- cutover happens only at explicit safe points
+- cutover happens at FMI operation boundaries via `Communicator`'s `OperationGuard`
 - in-flight collectives are not preserved
-- applications recover from explicit checkpoints
+- application-state continuity is not implemented yet; CRIU is the planned future mechanism
 - `Redis` is used for FT membership, epochs, leases, and migration state
 - `Direct` is the preferred/default FMI transport for rank-to-rank communication
 - `Redis` remains available as an alternate data backend, but not the default
@@ -26,29 +26,18 @@ Keep FMI data transport and FT coordination separate.
 
 This avoids trying to build a distributed membership service on top of ad hoc TCP connections in v1.
 
-### 2. Add an FT session wrapper
+### 2. Use transparent migration at operation boundaries
 
-Introduce `FMI::FT::Session` above `Communicator`.
+Fault tolerance is a single protocol: transparent migration. Applications keep using plain
+`FMI::Communicator`. Every FMI operation is wrapped in `OperationGuard`, which calls the
+configured `OperationRuntime` before and after the operation.
 
-Public interface:
+Current behavior:
 
-- `Communicator& comm()`
-- `Event safe_point()`
-- `std::uint64_t epoch() const`
-
-New event type:
-
-- `None`
-- `MigrateSelf`
-- `Reconfigured`
-
-Behavior:
-
-- application code uses `Session::comm()` for all FMI calls
-- application calls `safe_point()` at checkpoint boundaries
-- if the current logical rank is marked for migration, `safe_point()` returns `MigrateSelf`
-- the replacement worker restores app state, rejoins with the same logical rank, and the session rebuilds the communicator for epoch `N+1`
-- other ranks observe `Reconfigured` once and continue with the rebuilt communicator
+- `TransparentMigrationRuntime` observes Redis migration requests at operation boundaries
+- the targeted rank marks itself `QUIESCED` and exits so an external orchestrator can launch a replacement
+- surviving ranks wait for the orchestrator to promote epoch `N+1`, then rebuild channels in place
+- the replacement rank rejoins with the same logical rank ID under the new epoch-qualified communicator name
 
 ### 3. Make TCP the preferred data backend
 
@@ -60,9 +49,6 @@ Config additions:
 - `fault_tolerance.control_backend = "Redis"`
 - `fault_tolerance.control_host`
 - `fault_tolerance.control_port`
-- `fault_tolerance.heartbeat_ms`
-- `fault_tolerance.lease_ms`
-- `fault_tolerance.safe_point_only = true`
 - `fault_tolerance.preferred_data_backend = "Direct"`
 
 Policy changes:
@@ -93,6 +79,13 @@ On epoch change:
 
 This is required to prevent stale messages or objects from leaking across migration.
 
+Application state continuity today: none. Transparent migration only fences and rebuilds
+communication. The outgoing rank's channel-release hook (`prepare_channels_for_checkpoint`)
+and the replacement/reconfigure points are the documented seam for future CRIU-backed state
+transfer: checkpoint before the outgoing rank exits, then restore before epoch `N+1` user
+work resumes. No `CheckpointStrategy` abstraction exists yet because there is no integrated
+state-transfer implementation.
+
 ### 5. Define the migration state machine
 
 Use Redis to manage these states per logical rank:
@@ -105,20 +98,20 @@ Use Redis to manage these states per logical rank:
 Flow:
 
 1. external daemon marks logical rank `r` as `MIGRATION_PENDING`
-2. all ranks reach `safe_point()` before starting the next communication phase
-3. rank `r` checkpoints application state, unregisters its old worker instance, and exits
-4. replacement worker starts with the same logical rank `r`, restores checkpointed state, and registers into epoch `N+1`
-5. once all logical ranks are present for epoch `N+1`, all sessions rebuild their communicator and resume
+2. ranks observe the request at the next FMI operation boundary
+3. rank `r` marks itself `QUIESCED` and exits; future CRIU integration checkpoints application state before this exit
+4. replacement worker starts with the same logical rank `r`, registers into epoch `N+1`, and will eventually restore checkpointed state at this join point
+5. once the orchestrator promotes epoch `N+1`, surviving communicators rebuild channels and resume
 
-V1 defers any migration request that arrives while a rank is inside an FMI operation until the next safe point.
+V1 defers any migration request that arrives while a rank is inside an FMI operation until the next operation boundary.
 
 ## Test Plan
 
 ### Unit and component tests
 
 - Redis control-plane membership registration, heartbeat, lease expiry, and epoch advancement
-- `safe_point()` returns `MigrateSelf` only for the targeted logical rank
-- non-target ranks receive `Reconfigured` exactly once per epoch transition
+- targeted ranks quiesce only at operation boundaries
+- non-target ranks reconfigure exactly once per epoch transition
 - `preferred_data_backend = Direct` is honored when FT is enabled
 - communicator rebuild produces fresh epoch-qualified names for `Direct`, `Redis`, and `S3`
 
