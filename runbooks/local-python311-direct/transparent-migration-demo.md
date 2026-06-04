@@ -24,15 +24,16 @@ Epoch 0:
 
 At the next enter_operation() boundary:
   rank0: sees is_rank_pending(0) → marks Quiesced → exits
-  rank1: sees pending → joins epoch 1, waits for full membership
+  rank1: sees pending → parks until the orchestrator promotes
 
 orchestrator: detects rank0 Quiesced → relaunches as replacement (placement=serverless)
-  replacement rank0: constructor reads epoch=1, builds @epoch=1 channels, registers
+  replacement rank0: constructor sees pending and parks
 
 Epoch promotion:
-  once both ranks are registered in epoch 1 → promote_epoch(1)
+  orchestrator calls promote_epoch()
   rank1: reconfigure_to_epoch(@epoch=1) → channels rebuilt → loop resumes
-  replacement rank0: begins loop (iteration 0; pre-migration results not preserved)
+  replacement rank0: constructor reads epoch=1, builds @epoch=1 channels, registers
+  replacement rank0: runs the same number of remaining allreduces as rank1
 
 Post-migration directory (epoch 1):
   rank0: new worker_id, placement=serverless
@@ -45,14 +46,10 @@ Post-migration directory (epoch 1):
    between collectives; no protocol enforces it. Resolved in production by CRIU's
    coordinated cut.
 
-2. **Fixed-count loop tail** — with a `range(N)` loop and a stateless restart,
-   the replacement runs all N iterations on epoch 1 while the survivor only runs
-   `N - k` (where `k` iterations completed before migration). The survivor exits
-   after N total; the replacement's last `k` allreduces run without a partner and
-   return stale/partial values (the Direct backend logs `Broken pipe` but does not
-   raise). This does not affect the rank-directory assertion; the migration
-   mechanism is demonstrated correctly. A barrier-terminated loop (where the stop
-   condition is itself an allreduce) eliminates the mismatch.
+2. **Application-owned step alignment** — the orchestrator starts the replacement
+   at the same logical loop tail as the survivor. FMI does not infer this; real
+   applications must checkpoint/restore their own progress or use a higher-level
+   protocol.
 
 ---
 
@@ -108,7 +105,8 @@ Expected output (abbreviated):
 ...
 [orchestrator] requesting migration of rank 0
 [orchestrator] waiting for rank 0 to quiesce ...
-[orchestrator] rank 0 quiesced — launching replacement (placement=serverless)
+[orchestrator] rank 0 quiesced — launching replacement for ... remaining iterations
+[orchestrator] promoting migration epoch
 [rank 0] starting worker_id=rank0-serverless-... placement=serverless
 [rank 0] iter 0: allreduce=3.0
 ...
@@ -121,7 +119,7 @@ Expected output (abbreviated):
   rank 0: worker_id=rank0-serverless-... placement=serverless state=ACTIVE
   rank 1: worker_id=rank1-vm-...         placement=vm         state=ACTIVE
 
-PASSED: rank directory flip verified
+PASSED: rank directory flip verified AND allreduce result == 3.0
 ```
 
 ---

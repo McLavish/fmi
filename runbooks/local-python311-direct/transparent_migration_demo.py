@@ -14,6 +14,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -29,13 +30,36 @@ CONFIG = os.path.join(_SCRIPT_DIR, "fmi-transparent-migration.json")
 NUM_PEERS = 2
 MIGRATION_RANK = 0  # rank that will be migrated
 ITERATIONS = 10
+POST_OP_SLEEP_S = 0.2
 
 
 # ---------------------------------------------------------------------------
 # Worker: plain Communicator loop — byte-identical to a non-migration program
 # ---------------------------------------------------------------------------
 
-def run_worker(peer_id, num_peers, config, comm_name, worker_id, placement, iterations):
+def record_progress(progress_dir, peer_id, iteration, result):
+    if not progress_dir:
+        return
+    path = os.path.join(progress_dir, f"rank-{peer_id}.txt")
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        handle.write(f"{iteration} {result}\n")
+    os.replace(tmp_path, path)
+
+
+def read_progress(progress_dir):
+    progress = {}
+    for rank in range(NUM_PEERS):
+        path = os.path.join(progress_dir, f"rank-{rank}.txt")
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                progress[rank] = int(handle.read().split()[0])
+        except (FileNotFoundError, IndexError, ValueError):
+            pass
+    return progress
+
+
+def run_worker(peer_id, num_peers, config, comm_name, worker_id, placement, iterations, progress_dir):
     print(f"[rank {peer_id}] starting worker_id={worker_id} placement={placement}", flush=True)
     comm = fmi.Communicator(peer_id, num_peers, config, comm_name, 128, worker_id, placement)
     comm.hint(fmi.hints.fast)
@@ -44,7 +68,10 @@ def run_worker(peer_id, num_peers, config, comm_name, worker_id, placement, iter
         val = float(peer_id + 1)
         result = comm.allreduce(val, fmi.func(fmi.op.sum), fmi.types(fmi.datatypes.double))
         print(f"[rank {peer_id}] iter {i}: allreduce={result}", flush=True)
-        time.sleep(0.1)
+        record_progress(progress_dir, peer_id, i, result)
+        if result != 3.0:
+            raise RuntimeError(f"rank {peer_id} expected allreduce 3.0, got {result}")
+        time.sleep(POST_OP_SLEEP_S)
 
     print(f"[rank {peer_id}] done", flush=True)
 
@@ -54,6 +81,9 @@ def run_worker(peer_id, num_peers, config, comm_name, worker_id, placement, iter
 # ---------------------------------------------------------------------------
 
 def run_orchestrator(comm_name, iterations):
+    if iterations < 2:
+        raise RuntimeError("transparent migration demo requires at least 2 iterations")
+
     coordinator = fmi.FTCoordinator(CONFIG, comm_name, NUM_PEERS)
     coordinator.clear_job_state()
 
@@ -61,8 +91,9 @@ def run_orchestrator(comm_name, iterations):
     wid_rank0 = f"rank0-vm-{uuid.uuid4().hex[:8]}"
     wid_rank1 = f"rank1-vm-{uuid.uuid4().hex[:8]}"
     wid_replacement = f"rank0-serverless-{uuid.uuid4().hex[:8]}"
+    progress_dir = tempfile.mkdtemp(prefix=f"fmi-{comm_name}-")
 
-    def spawn(peer_id, worker_id, placement):
+    def spawn(peer_id, worker_id, placement, worker_iterations):
         return subprocess.Popen([
             sys.executable, __file__, "worker",
             "--peer-id", str(peer_id),
@@ -70,15 +101,27 @@ def run_orchestrator(comm_name, iterations):
             "--comm-name", comm_name,
             "--worker-id", worker_id,
             "--placement", placement,
-            "--iterations", str(iterations),
+            "--iterations", str(worker_iterations),
+            "--progress-dir", progress_dir,
         ])
 
     # Start both initial workers (both labelled "vm")
-    proc0 = spawn(0, wid_rank0, "vm")
-    proc1 = spawn(1, wid_rank1, "vm")
+    proc0 = spawn(0, wid_rank0, "vm", iterations)
+    proc1 = spawn(1, wid_rank1, "vm", iterations)
 
-    # Wait a couple of iterations, then trigger migration of rank 0
-    time.sleep(0.5)
+    split_iteration = max(0, min(iterations - 2, iterations // 2 - 1))
+    print(f"[orchestrator] waiting through iteration {split_iteration} before migration", flush=True)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        progress = read_progress(progress_dir)
+        if progress.get(0, -1) >= split_iteration and progress.get(1, -1) >= split_iteration:
+            break
+        time.sleep(0.02)
+    else:
+        print("[orchestrator] ERROR: ranks did not reach the migration split in time", flush=True)
+        proc0.wait(); proc1.wait()
+        sys.exit(1)
+
     print(f"[orchestrator] requesting migration of rank {MIGRATION_RANK}", flush=True)
     coordinator.request_migration(MIGRATION_RANK)
 
@@ -96,16 +139,20 @@ def run_orchestrator(comm_name, iterations):
         proc0.wait(); proc1.wait()
         sys.exit(1)
 
+    remaining_iterations = iterations - split_iteration - 1
+    print(f"[orchestrator] rank 0 quiesced — launching replacement for {remaining_iterations} remaining iterations", flush=True)
+    proc_replacement = spawn(0, wid_replacement, "serverless", remaining_iterations)
+
     print("[orchestrator] promoting migration epoch", flush=True)
     coordinator.promote_epoch()
 
-    print(f"[orchestrator] rank 0 quiesced — launching replacement (placement=serverless)", flush=True)
-    proc_replacement = spawn(0, wid_replacement, "serverless")
-
     # Wait for both workers to finish
     proc0.wait()
-    proc_replacement.wait()
-    proc1.wait()
+    replacement_status = proc_replacement.wait()
+    survivor_status = proc1.wait()
+    if replacement_status != 0 or survivor_status != 0:
+        print("[orchestrator] ERROR: survivor or replacement exited non-zero", flush=True)
+        sys.exit(1)
 
     # Verify the rank directory
     dir0 = coordinator.directory_snapshot(0)
@@ -137,7 +184,7 @@ def run_orchestrator(comm_name, iterations):
     if epoch1_by_rank.get(1) and epoch1_by_rank[1].placement != "vm":
         failures.append(f"epoch1 rank1 placement expected 'vm', got '{epoch1_by_rank[1].placement}'")
     if epoch1_by_rank.get(0) and epoch1_by_rank[0].worker_id == wid_rank0:
-        failures.append("epoch1 rank0 still has original worker_id — replacement not detected")
+        failures.append("epoch1 rank0 still has original worker_id — replacement did not take over")
     if epoch1_by_rank.get(1) and epoch1_by_rank[1].worker_id != wid_rank1:
         failures.append(f"epoch1 rank1 worker_id changed (survivor should stay): {epoch1_by_rank[1].worker_id}")
 
@@ -147,7 +194,7 @@ def run_orchestrator(comm_name, iterations):
             print(f"  - {f}")
         sys.exit(1)
 
-    print("\nPASSED: rank directory flip verified")
+    print("\nPASSED: rank directory flip verified AND allreduce result == 3.0")
     coordinator.clear_job_state()
 
 
@@ -170,6 +217,7 @@ def main():
     worker_p.add_argument("--worker-id", required=True)
     worker_p.add_argument("--placement", required=True)
     worker_p.add_argument("--iterations", type=int, default=ITERATIONS)
+    worker_p.add_argument("--progress-dir", default="")
 
     cleanup_p = sub.add_parser("cleanup")
     cleanup_p.add_argument("--comm-name", required=True)
@@ -180,7 +228,7 @@ def main():
         run_orchestrator(args.comm_name, args.iterations)
     elif args.cmd == "worker":
         run_worker(args.peer_id, args.num_peers, CONFIG, args.comm_name,
-                   args.worker_id, args.placement, args.iterations)
+                   args.worker_id, args.placement, args.iterations, args.progress_dir)
     elif args.cmd == "cleanup":
         fmi.FTCoordinator(CONFIG, args.comm_name, NUM_PEERS).clear_job_state()
         print("cleaned up")

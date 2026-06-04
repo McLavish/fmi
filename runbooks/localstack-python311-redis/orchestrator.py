@@ -260,28 +260,26 @@ def run(comm_name, n):
         timeout_s=30,
     )
 
-    print("[orchestrator] promoting migration epoch", flush=True)
-    coordinator.promote_epoch()
-
     # Epoch 1: replacement rank comes in as a Lambda (serverless substrate).
     # Invoke synchronously so we can inspect the return value and assert the
     # post-migration allreduce result.  resume=True tells worker_core to skip
     # phase-1 (already done by the original rank0) and start at the barrier,
     # aligning its epoch-1 op sequence with the survivor (rank1).
     print("[orchestrator] invoking replacement Lambda (synchronous, resume=True)", flush=True)
-    lambda_response = invoke_worker_sync(
-        client,
-        {
-            "peer_id": 0,
-            "num_peers": NUM_PEERS,
-            "comm_name": comm_name,
-            "worker_id": rank0_sl_wid,
-            "placement": "serverless",
-            "n": n,
-            "resume": True,
-        },
-        timeout=120,
-    )
+    replacement_payload = {
+        "peer_id": 0,
+        "num_peers": NUM_PEERS,
+        "comm_name": comm_name,
+        "worker_id": rank0_sl_wid,
+        "placement": "serverless",
+        "n": n,
+        "resume": True,
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        replacement = pool.submit(invoke_worker_sync, client, replacement_payload, 120)
+        print("[orchestrator] promoting migration epoch", flush=True)
+        coordinator.promote_epoch()
+        lambda_response = replacement.result(timeout=180)
     print(f"[orchestrator] Lambda response: {lambda_response}", flush=True)
 
     epoch1 = wait_for_snapshot(

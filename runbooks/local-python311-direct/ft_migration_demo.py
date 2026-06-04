@@ -121,10 +121,19 @@ def run_replacement_peer(peer_id, num_peers, config_path, comm_name, worker_id, 
 def run_migration_request(rank, num_peers, config_path, comm_name):
     coordinator = fmi.FTCoordinator(str(config_path), comm_name, num_peers)
     coordinator.request_migration(rank)
-    coordinator.promote_epoch()
     emit({
         "event": "migration_requested",
         "rank": rank,
+        "epoch": coordinator.epoch(),
+    })
+    return 0
+
+
+def run_promotion(num_peers, config_path, comm_name):
+    coordinator = fmi.FTCoordinator(str(config_path), comm_name, num_peers)
+    coordinator.promote_epoch()
+    emit({
+        "event": "epoch_promoted",
         "epoch": coordinator.epoch(),
     })
     return 0
@@ -166,6 +175,11 @@ def parse_args():
     migrate_parser.add_argument("--comm-name", required=True)
     migrate_parser.add_argument("--config", default=str(DEFAULT_CONFIG))
 
+    promote_parser = subparsers.add_parser("promote")
+    promote_parser.add_argument("--num-peers", type=int, required=True)
+    promote_parser.add_argument("--comm-name", required=True)
+    promote_parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+
     cleanup_parser = subparsers.add_parser("cleanup")
     cleanup_parser.add_argument("--num-peers", type=int, required=True)
     cleanup_parser.add_argument("--comm-name", required=True)
@@ -189,6 +203,9 @@ def main():
 
         if args.mode == "migrate":
             return run_migration_request(args.rank, args.num_peers, config_path, args.comm_name)
+
+        if args.mode == "promote":
+            return run_promotion(args.num_peers, config_path, args.comm_name)
 
         if args.mode == "cleanup":
             return run_cleanup(args.num_peers, config_path, args.comm_name, args.checkpoint_dir)

@@ -35,6 +35,7 @@ name. In `transparent_migration`, this includes the epoch suffix. In
 Transparent migration methods intended for external orchestration include:
 
 - `request_migration(rank)`
+- `promote_epoch(next_epoch)`
 - `epoch()`
 - `directory_snapshot(epoch)`
 - `placement_for_rank(epoch, rank)`
@@ -62,6 +63,7 @@ arguments.
 `fmi.FTCoordinator` exposes:
 
 - `request_migration(rank)`
+- `promote_epoch()`
 - `clear_job_state()`
 - `epoch()`
 - `placement_for_rank(epoch, rank)`
@@ -93,4 +95,3 @@ Implemented runtimes:
 
 This hook is the common point where both modes enforce operation-boundary
 coordination.
-
