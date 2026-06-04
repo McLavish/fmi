@@ -13,9 +13,8 @@ mode = transparent_migration
 control_backend = Redis
 control_host = 127.0.0.1
 control_port = 6379
-heartbeat_ms = 1000
-lease_ms = 10000
-safe_point_only = true
+poll_interval_ms = 1000
+reconfigure_timeout_ms = 10000
 preferred_data_backend = ""
 images_dir = /tmp/fmi-criu-images
 poll_ms = 100
@@ -41,17 +40,16 @@ accepted by the current parser.
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
-    "heartbeat_ms": 25,
-    "lease_ms": 250,
-    "safe_point_only": true,
+    "poll_interval_ms": 25,
+    "reconfigure_timeout_ms": 250,
     "preferred_data_backend": "Direct"
   }
 }
 ```
 
-`safe_point_only` is parsed but not currently used by
-`TransparentMigrationRuntime`. Operation-boundary checking happens through
-`OperationGuard` on every communicator call.
+`poll_interval_ms` controls how often a worker polls Redis while waiting for
+orchestrator promotion. `reconfigure_timeout_ms` is the wall-clock deadline for
+that wait.
 
 ## CRIU Example
 
@@ -87,4 +85,3 @@ For `criu_coordinated`, validation is stricter:
 
 Redis control-plane support is separate from the Redis data backend. A config
 can disable the `Redis` data backend and still use Redis for FT control.
-

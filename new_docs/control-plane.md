@@ -7,6 +7,18 @@ be disabled for normal FMI traffic; the control plane uses its own
 `FMI::FT::Coordinator` is the only in-tree control-plane client. It validates
 that FT is enabled and that `control_backend` is `Redis`.
 
+## Client Behavior
+
+The coordinator owns one persistent `redisContext` per `Coordinator::Impl`.
+Commands are sent with `redisCommandArgv`, so communicator names, worker IDs,
+and placement strings are always command arguments rather than printf-format
+strings. On a broken connection, the client reconnects and retries the command
+once.
+
+The current threading assumption is one operation at a time per communicator.
+The shared coordinator connection is not designed for concurrent command calls
+from multiple application threads.
+
 ## Transparent Migration Keys
 
 All keys for a communicator start with:
@@ -26,7 +38,6 @@ fmi:ft:<comm>:pending
 fmi:ft:<comm>:epoch:<N>:members
 fmi:ft:<comm>:epoch:<N>:states
 fmi:ft:<comm>:epoch:<N>:placement
-fmi:ft:<comm>:epoch:<N>:lease:<rank>
 ```
 
 `meta` is a Redis hash. It stores:
@@ -49,23 +60,6 @@ strings are:
 `epoch:<N>:placement` is a hash from logical rank to an optional placement
 string. FMI stores this string but does not interpret it.
 
-`epoch:<N>:lease:<rank>` is a TTL key containing the worker ID. It is refreshed
-with `PSETEX` and expires after `fault_tolerance.lease_ms`.
-
-## Leases And Liveness
-
-`live_member_count(epoch)` scans the ranks registered in
-`epoch:<N>:members` and counts only ranks whose lease key still exists.
-
-Transparent migration uses this count as the epoch-promotion condition:
-
-```text
-live_member_count(next_epoch) >= num_peers
-```
-
-That means membership hashes can retain stale entries, but stale entries do not
-advance an epoch unless their leases are also live.
-
 ## Migration Request
 
 `Coordinator::request_migration(rank)` does two things:
@@ -73,17 +67,24 @@ advance an epoch unless their leases are also live.
 - adds `rank` to the `pending` set
 - sets that rank's state in the current epoch to `MIGRATION_PENDING`
 
-There is no separate scheduler in the library. An external orchestrator is
-expected to request migration and launch the replacement worker.
+There is no scheduler or failure detector in the library. An external
+orchestrator is expected to request migration, arrange replacement execution,
+and promote the epoch.
 
 ## Epoch Promotion
 
-`Coordinator::promote_epoch(next_epoch)` writes `current_epoch = next_epoch`
-and deletes the `pending` set.
+`Coordinator::promote_epoch(next_epoch)` is the single writer path for
+`current_epoch`. Workers never call it.
 
-The write is intentionally simple and idempotent, but it is not a compare-and-
-set operation. The runtime assumes all participants are trying to promote the
-same `active_epoch + 1` value.
+Promotion runs as one Lua `EVAL` script:
+
+- read `meta[current_epoch]`
+- if `next_epoch > current_epoch`, write `current_epoch = next_epoch`
+- delete the `pending` set in the same script
+- otherwise leave Redis unchanged
+
+This prevents stale orchestrator calls from moving the epoch backward while
+still making repeated promotion requests harmless.
 
 ## CRIU Keys
 
@@ -124,9 +125,8 @@ CRIU job state strings are:
 - `quiesced_generation`
 - `last_heartbeat_ms`
 
-Unlike transparent migration leases, CRIU rank heartbeats are timestamps in a
-hash. The current supervisor logic does not expire old CRIU rank entries by
-timestamp.
+CRIU rank heartbeats are timestamps in a hash. The current supervisor logic
+does not expire old CRIU rank entries by timestamp.
 
 ## Cleanup
 
@@ -138,4 +138,3 @@ all `epoch:*` keys for the communicator.
 
 `CriuSupervisor::cleanup()` also removes
 `images_dir/<comm_name>/` before clearing CRIU Redis state.
-

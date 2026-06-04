@@ -47,40 +47,30 @@ constructor:
 
 1. creates a `Coordinator` for the base communicator name
 2. reads `current_epoch`
-3. determines whether this process is a replacement for its logical rank
-4. registers into either the current epoch or the next epoch
+3. if this rank is in the pending set, waits until the orchestrator promotes
+   and clears pending, then re-reads `current_epoch`
+4. registers as `ACTIVE` in the selected epoch
 5. builds channels with `<base>@epoch=<active_epoch>`
 
-Normal workers register in the current epoch as `ACTIVE`.
+Normal workers join the current epoch directly.
 
-Replacement workers register in `current_epoch + 1` as `REPLACED` while waiting
-for the new epoch to be promoted. Once promotion is observed, they re-register
-as `ACTIVE` in the promoted epoch and build channels for that epoch.
+Replacement workers are identified by the pending set, not by comparing worker
+IDs. They wait in the constructor until the orchestrator clears pending by
+promoting the epoch.
 
-## Replacement Detection
+## Promotion
 
-A process is treated as a replacement when all of these are true:
-
-- its rank is in the pending migration set
-- the current epoch already has a worker ID for the same logical rank
-- that existing worker ID differs from the new process's worker ID
-
-If no worker ID is supplied, FMI auto-generates one using rank, PID, and current
-time. For orchestrated migration, passing explicit worker IDs makes replacement
-detection predictable.
-
-## Promotion Loop
-
-Surviving ranks and replacement ranks both participate in promotion. They
-register themselves in `next_epoch`, refresh their leases, and check whether
-all logical ranks have live leases in `next_epoch`.
-
-The first process that sees enough live members calls `promote_epoch()`. Other
-participants observe that Redis `current_epoch` has advanced and then rebuild
+The orchestrator is the only promoter. Workers never call `promote_epoch()`;
+they only observe that Redis `current_epoch` has advanced and then rebuild
 their channels with the new epoch-qualified name.
 
-If promotion does not happen within `lease_ms`, the waiting process throws
-`FMI::Utils::Timeout`.
+Promotion uses a Redis Lua compare-and-set script. It advances
+`current_epoch` only when the requested next epoch is greater than the stored
+epoch, and it clears the pending set in the same script.
+
+If promotion is not observed within `reconfigure_timeout_ms`, the waiting
+process throws `FMI::Utils::Timeout`. Waiting workers poll Redis every
+`poll_interval_ms`.
 
 ## What Epochs Do Not Solve
 
@@ -88,7 +78,7 @@ Epochs fence backend-visible communication names. They do not:
 
 - serialize or restore application memory
 - preserve an FMI operation already in flight
-- guarantee atomic multi-key Redis state transitions
+- migrate a process blocked inside an operation before it reaches the next
+  operation boundary
 - recover from arbitrary crashes without an external replacement/orchestrator
 - delete every old data-plane object immediately
-

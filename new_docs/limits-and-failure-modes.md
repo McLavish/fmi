@@ -9,26 +9,33 @@ are deliberate v1 design boundaries.
 - `FMI_ENABLE_REDIS` must be enabled at build time for coordinator operations.
 - FT metadata is scoped by base `comm_name`; concurrent unrelated jobs must use
   distinct communicator names.
-- Redis commands are issued through short-lived connections and command strings.
-  There are no Redis transactions or Lua scripts around multi-key state
-  changes.
+- Coordinator commands use one persistent Redis connection per coordinator and
+  argv-form command calls.
+- The current threading assumption is one operation at a time per
+  communicator; the coordinator connection is not a multi-threaded command
+  channel.
 - World-size mismatches are rejected if existing Redis metadata records a
   different `world_size`.
 
 ## Transparent Migration
 
+- This mode is orchestrator-driven migration and communication
+  reconfiguration, not crash-recovery fault tolerance.
 - The application is not notified before the migrating process exits.
 - The migrating rank exits with `std::exit(0)` when it reaches an operation
   boundary and sees itself pending.
 - Application memory is not checkpointed or restored by this mode.
+- The application or orchestrator must realign operation steps after relaunch.
 - In-flight FMI operations are not migrated. Checks happen before operations
   start, not while a channel operation is running.
+- A rank blocked inside a channel receive or collective cannot migrate until it
+  returns to an operation boundary.
 - Replacement construction can block until epoch promotion.
-- Epoch promotion times out after `lease_ms`.
-- `promote_epoch()` is idempotent but not compare-and-set protected.
-- Old transport objects can remain in Redis/S3 until cleanup/finalize, but epoch
-  naming prevents new-epoch operations from matching them.
-- `safe_point_only` is parsed but does not currently change runtime behavior.
+- Promotion waiting times out after `reconfigure_timeout_ms`.
+- `promote_epoch()` is compare-and-set guarded and only advances the epoch.
+- There is no automatic failure detection or liveness-triggered recovery.
+- Old transport objects can remain in Redis/S3 until cleanup/finalize, but
+  epoch naming prevents new-epoch operations from matching them.
 
 ## CRIU-Coordinated
 
@@ -38,8 +45,8 @@ are deliberate v1 design boundaries.
 - Redis data backend may be disabled, but Redis control-plane service is still
   required.
 - CRIU rank metadata does not currently expire stale ranks by heartbeat time.
-- `CriuSupervisor::restore()` kills registered old PIDs greater than zero before
-  restoring.
+- `CriuSupervisor::restore()` kills registered old PIDs greater than zero
+  before restoring.
 - Successful checkpoint/restore requires a working `criu` executable and the
   kernel/container privileges CRIU needs. Tests use a mock `criu` binary for
   supervisor behavior.
@@ -48,8 +55,11 @@ are deliberate v1 design boundaries.
 
 - Use stable, unique `comm_name` values per job.
 - In transparent migration, pass explicit worker IDs from the orchestrator.
-- Keep `lease_ms` comfortably above expected Redis and scheduling jitter.
-- Clear Redis job state between manual test runs if reusing a communicator name.
-- For CRIU, set a stable `host_id` in config when hostname identity could change
-  across containers or supervisor processes.
-
+- Keep `reconfigure_timeout_ms` comfortably above expected Redis and
+  scheduling jitter.
+- Keep `poll_interval_ms` low enough for the desired migration responsiveness
+  without creating excessive control-plane traffic.
+- Clear Redis job state between manual test runs if reusing a communicator
+  name.
+- For CRIU, set a stable `host_id` in config when hostname identity could
+  change across containers or supervisor processes.
