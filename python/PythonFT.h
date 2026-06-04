@@ -20,6 +20,7 @@ namespace FMI::Utils {
         PythonFTCoordinator(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
 
         void request_migration(FMI::Utils::peer_num rank);
+        void promote_epoch();
         void clear_job_state();
         [[nodiscard]] std::uint64_t epoch() const;
         std::string placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank);

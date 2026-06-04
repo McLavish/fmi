@@ -22,6 +22,10 @@ void FMI::Utils::PythonFTCoordinator::request_migration(FMI::Utils::peer_num ran
     coordinator->request_migration(rank);
 }
 
+void FMI::Utils::PythonFTCoordinator::promote_epoch() {
+    coordinator->promote_epoch(coordinator->epoch() + 1);
+}
+
 void FMI::Utils::PythonFTCoordinator::clear_job_state() {
     coordinator->clear_job_state();
 }

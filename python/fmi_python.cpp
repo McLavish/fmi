@@ -34,6 +34,7 @@ BOOST_PYTHON_MODULE(fmi)
 
     class_<FMI::Utils::PythonFTCoordinator>("FTCoordinator", init<std::string, std::string, FMI::Utils::peer_num>())
         .def("request_migration", &FMI::Utils::PythonFTCoordinator::request_migration)
+        .def("promote_epoch", &FMI::Utils::PythonFTCoordinator::promote_epoch)
         .def("clear_job_state", &FMI::Utils::PythonFTCoordinator::clear_job_state)
         .def("epoch", &FMI::Utils::PythonFTCoordinator::epoch)
         .def("placement_for_rank", &FMI::Utils::PythonFTCoordinator::placement_for_rank)
