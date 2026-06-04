@@ -1,19 +1,17 @@
 #include "../../include/utils/ChannelPolicy.h"
 #include "../../include/comm/Channel.h"
 
-#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
-FMI::Utils::ChannelPolicy::ChannelPolicy(std::map<std::string, std::shared_ptr<FMI::Comm::Channel>>& channels, peer_num num_peers,
+FMI::Utils::ChannelPolicy::ChannelPolicy(std::map<std::string, std::shared_ptr<FMI::Comm::Channel>>& channels,
                                          double faas_price, Hint hint, std::string preferred_backend) :
         channels(channels),
-        num_peers(num_peers),
         faas_price(faas_price),
         hint(hint),
         preferred_backend(std::move(preferred_backend)) {}
 
-std::string FMI::Utils::ChannelPolicy::get_channel(OperationInfo op_info) {
+std::string FMI::Utils::ChannelPolicy::get_channel(const OperationInfo& op_info) {
     if (channels.empty()) {
         throw std::runtime_error("No channels are registered in the communicator");
     }
@@ -25,25 +23,21 @@ std::string FMI::Utils::ChannelPolicy::get_channel(OperationInfo op_info) {
         return preferred->first;
     }
 
-    std::map<std::string, double> times;
-    std::map<std::string, double> prices;
+    // Pick the channel minimizing the metric the hint cares about. For "fast" that is latency
+    // alone, so the (potentially non-trivial) price computation is skipped entirely.
+    const std::string* best_name = nullptr;
+    double best_metric = 0.0;
     for (const auto& [channel_name, channel] : channels) {
         double latency = channel->get_operation_latency(op_info);
-        double channel_price = channel->get_operation_price(op_info);
-        double faas_price = get_faas_price(latency);
-        double total_price = channel_price + faas_price;
-        times[channel_name] = latency;
-        prices[channel_name] = total_price;
+        double metric = (hint == fast)
+                ? latency
+                : channel->get_operation_price(op_info) + get_faas_price(latency);
+        if (best_name == nullptr || metric < best_metric) {
+            best_name = &channel_name;
+            best_metric = metric;
+        }
     }
-    if (hint == fast) {
-        auto ch = min_element(times.begin(), times.end(),
-                              [](const auto& l, const auto& r) { return l.second < r.second; });
-        return ch->first;
-    } else {
-        auto ch = min_element(prices.begin(), prices.end(),
-                              [](const auto& l, const auto& r) { return l.second < r.second; });
-        return ch->first;
-    }
+    return *best_name;
 }
 
 double FMI::Utils::ChannelPolicy::get_faas_price(double execution_time) {

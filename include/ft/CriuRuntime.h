@@ -19,9 +19,9 @@ namespace FMI::FT {
         CriuRuntime(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path, std::string comm_name,
                     std::string backend_name, std::function<void()> prepare_for_checkpoint);
 
-        void enter_operation();
-        void exit_operation();
-        void shutdown();
+        void enter_operation() override;
+        void exit_operation() override;
+        void shutdown() override;
 
     private:
         FMI::Utils::peer_num peer_id;
@@ -40,7 +40,6 @@ namespace FMI::FT {
         std::uint64_t last_completed_generation = 0;
 
         void quiesce(std::uint64_t generation);
-        [[nodiscard]] std::string resolve_host_id() const;
         [[nodiscard]] int current_pid() const;
     };
 }

@@ -29,7 +29,6 @@ namespace FMI::FT {
         std::string supervisor_id;
         std::shared_ptr<FMI::FT::Coordinator> coordinator;
 
-        [[nodiscard]] std::string resolve_host_id() const;
         [[nodiscard]] std::string generation_dir(std::uint64_t generation) const;
         [[nodiscard]] std::vector<CriuRankInfo> local_ranks() const;
         void ensure_criu_mode() const;

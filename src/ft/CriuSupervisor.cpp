@@ -1,4 +1,5 @@
 #include "../../include/ft/CriuSupervisor.h"
+#include "../../include/ft/HostId.h"
 
 #include <algorithm>
 #include <chrono>
@@ -19,7 +20,7 @@ FMI::FT::CriuSupervisor::CriuSupervisor(std::string config_path, std::string com
     FMI::Utils::Configuration configuration(this->config_path);
     config = configuration.get_fault_tolerance_config();
     ensure_criu_mode();
-    host_id = resolve_host_id();
+    host_id = FMI::FT::resolve_host_id(config);
     supervisor_id = host_id + ":" + std::to_string(getpid());
     coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);
 }
@@ -76,18 +77,6 @@ void FMI::FT::CriuSupervisor::cleanup() {
         fs::remove_all(images_path);
     }
     coordinator->clear_criu_job_state();
-}
-
-std::string FMI::FT::CriuSupervisor::resolve_host_id() const {
-    if (!config.host_id.empty()) {
-        return config.host_id;
-    }
-
-    char hostname[256] = {0};
-    if (gethostname(hostname, sizeof(hostname)) != 0) {
-        throw std::runtime_error("Could not determine host_id for CRIU supervisor");
-    }
-    return hostname;
 }
 
 std::string FMI::FT::CriuSupervisor::generation_dir(std::uint64_t generation) const {

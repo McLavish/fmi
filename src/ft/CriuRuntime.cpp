@@ -1,4 +1,5 @@
 #include "../../include/ft/CriuRuntime.h"
+#include "../../include/ft/HostId.h"
 
 #include <chrono>
 #include <stdexcept>
@@ -19,7 +20,7 @@ FMI::FT::CriuRuntime::CriuRuntime(FMI::Utils::peer_num peer_id, FMI::Utils::peer
     if (!config.enabled || config.mode != FMI::FT::Mode::CriuCoordinated) {
         throw std::runtime_error("CRIU runtime requires fault_tolerance.mode = criu_coordinated");
     }
-    host_id = resolve_host_id();
+    host_id = FMI::FT::resolve_host_id(config);
     coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);
     coordinator->criu_register_rank(peer_id, current_pid(), host_id, this->backend_name);
 }
@@ -95,18 +96,6 @@ void FMI::FT::CriuRuntime::quiesce(std::uint64_t generation) {
         quiescing = false;
     }
     state_cv.notify_all();
-}
-
-std::string FMI::FT::CriuRuntime::resolve_host_id() const {
-    if (!config.host_id.empty()) {
-        return config.host_id;
-    }
-
-    char hostname[256] = {0};
-    if (gethostname(hostname, sizeof(hostname)) != 0) {
-        throw std::runtime_error("Could not determine host_id for CRIU runtime");
-    }
-    return hostname;
 }
 
 int FMI::FT::CriuRuntime::current_pid() const {

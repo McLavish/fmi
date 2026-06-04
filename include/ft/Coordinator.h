@@ -59,7 +59,6 @@ namespace FMI::FT {
         [[nodiscard]] std::uint64_t criu_request_restore(std::uint64_t generation, const std::string& supervisor_id) const;
         void criu_mark_job_restored(std::uint64_t generation, const std::string& supervisor_id) const;
         [[nodiscard]] std::uint64_t criu_requested_generation() const;
-        [[nodiscard]] std::uint64_t criu_completed_generation() const;
         [[nodiscard]] std::uint64_t criu_restore_generation() const;
         [[nodiscard]] CriuJobInfo criu_job_info() const;
         [[nodiscard]] std::vector<CriuRankInfo> criu_rank_info() const;
@@ -76,7 +75,13 @@ namespace FMI::FT {
         [[nodiscard]] bool is_rank_pending(FMI::Utils::peer_num rank) const;
         void register_rank(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id, RankState state) const;
         void set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, RankState state) const;
-        [[nodiscard]] std::string worker_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
+
+        void check_world_size(const std::string& meta_key, const char* error_message) const;
+        void ensure_criu_job() const;
+        void criu_write_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id, const std::string& backend,
+                             CriuRankState state, bool write_generation, std::uint64_t generation) const;
+        void set_criu_job_state(CriuJobState state, const char* generation_field, std::uint64_t generation,
+                                const std::string& supervisor_id) const;
     };
 }
 

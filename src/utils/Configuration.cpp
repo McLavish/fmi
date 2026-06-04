@@ -1,6 +1,5 @@
 #include "../../include/utils/Configuration.h"
 #include <boost/property_tree/json_parser.hpp>
-#include <iostream>
 #include <stdexcept>
 #include <utility>
 

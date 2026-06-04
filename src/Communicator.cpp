@@ -89,7 +89,7 @@ namespace FMI {
             double faas_price = (double) faas_memory / 1024. * gib_second_price;
             std::string preferred = ft_config.preferred_data_backend;
             set_channel_policy(std::make_shared<FMI::Utils::ChannelPolicy>(
-                    channels, num_peers, faas_price, channel_hint, preferred));
+                    channels, faas_price, channel_hint, preferred));
 
             operation_runtime = std::make_shared<FMI::FT::TransparentMigrationRuntime>(
                     peer_id, resolved_worker_id, placement, active_epoch,
@@ -109,7 +109,7 @@ namespace FMI {
                 preferred_backend = ft_config.preferred_data_backend;
             }
             set_channel_policy(std::make_shared<FMI::Utils::ChannelPolicy>(
-                    channels, num_peers, faas_price, channel_hint, preferred_backend));
+                    channels, faas_price, channel_hint, preferred_backend));
 
             if (ft_config.enabled && ft_config.mode == FMI::FT::Mode::CriuCoordinated) {
 #ifdef FMI_ENABLE_CRIU
