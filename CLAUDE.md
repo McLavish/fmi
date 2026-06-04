@@ -100,10 +100,10 @@ Standalone demos (also under `tests/`, built as separate executables): `ft_migra
 ## Running things
 
 Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id` is in
-`[0, num_peers)`. The end-to-end local two-peer flow is in
-`runbooks/local-python311-direct/` (Direct backend) and the AWS Lambda + S3 flow is in
-`runbooks/aws-python311-s3/`; both READMEs are verified step-by-step runbooks. JSON config
-templates live in `config/`.
+`[0, num_peers)`. The end-to-end `transparent_migration` flow is in
+`runbooks/localstack-python311-redis/` (heterogeneous LocalStack EC2 → Lambda ranks, Redis
+control + data plane), and the AWS Lambda + S3 flow is in `runbooks/aws-python311-s3/`; both
+READMEs are verified step-by-step runbooks. JSON config templates live in `config/`.
 
 The CRIU fault-tolerance mode is driven by the `fmi-criu-supervisor` CLI (built from
 `tools/`, on by default at top level):
