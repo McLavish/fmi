@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fmi-orchestrator
+  namespace: fmi
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: fmi-orchestrator
+    spec:
+      serviceAccountName: fmi-orchestrator
+      restartPolicy: Never
+      containers:
+        - name: orchestrator
+          image: 323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
+          imagePullPolicy: Always
+          command: ["python3.11", "-u", "/var/task/orchestrator.py", "run"]
+          env:
+            - name: FMI_IMAGE
+              value: 323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
+            - name: FMI_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SERVERLESS_URL
+              value: http://fmi-serverless-rank.fmi.svc.cluster.local/invoke
+            - name: GAP_S
+              value: "5.0"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

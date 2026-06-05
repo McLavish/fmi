@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fmi-redis
+  namespace: fmi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fmi-redis
+  template:
+    metadata:
+      labels:
+        app: fmi-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fmi-redis
+  namespace: fmi
+spec:
+  selector:
+    app: fmi-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
