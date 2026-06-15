@@ -14,12 +14,12 @@ nodes pull over the cluster network.
 Assumptions:
 
 - You are SSH'd into the **control plane** node.
-- `kubectl`, `kn`, and `docker` are already installed and `kubectl` targets this
-  cluster.
+- `kubectl`, `kn`, and `podman` are installed and `kubectl` targets this cluster
+  (on RHEL: `sudo dnf install -y podman`).
 - The cluster is multi-node, **x86_64/amd64**.
 - Nodes can pull public images (`registry:2`, the Knative images). Only the
   control plane needs to pull the build base image.
-- The FMI repo is at `/home/luca/fmi`.
+- The FMI repo is checked out at `$REPO` (set in §1; examples assume `$HOME/fmi`).
 
 No external LoadBalancer is needed: the orchestrator reaches the serverless rank
 over the in-cluster address `http://fmi-serverless-rank.fmi.svc.cluster.local/invoke`,
@@ -38,9 +38,10 @@ export REGISTRY="$(hostname -I | awk '{print $1}'):30500"
 export TAG=v1
 export FMI_IMAGE="${REGISTRY}/fmi-knative-migration:${TAG}"
 export IMAGE_PULL_POLICY=IfNotPresent
-echo "FMI_IMAGE=$FMI_IMAGE"
+export REPO="$HOME/fmi"          # adjust to your checkout location
+echo "FMI_IMAGE=$FMI_IMAGE  REPO=$REPO"
 
-cd /home/luca/fmi/runbooks/localstack-python311-redis
+cd "$REPO/runbooks/localstack-python311-redis"
 
 kubectl get nodes -o wide
 ```
@@ -55,42 +56,6 @@ kubectl -n fmi rollout status deploy/fmi-registry --timeout=180s
 
 The registry is ephemeral: if its pod restarts, re-push the image (§6) before
 deploying.
-
-## 4. Trust The Registry (One-Time, Insecure HTTP)
-
-The registry serves plain HTTP, so the build host's Docker daemon and every
-node's containerd must be told to trust it. This is the one unavoidable
-node-level step. (For production, front the registry with TLS and distribute the
-CA instead.)
-
-**Control plane — Docker daemon** (`/etc/docker/daemon.json`), then restart:
-
-```json
-{ "insecure-registries": ["REGISTRY_ADDR"] }
-```
-
-```bash
-sudo systemctl restart docker
-```
-
-**Every node — containerd** (apply on all 5 nodes via SSH or your config
-manager). Ensure `config_path = "/etc/containerd/certs.d"` is set under
-`[plugins."io.containerd.grpc.v1.cri".registry]` in `/etc/containerd/config.toml`,
-then create `/etc/containerd/certs.d/REGISTRY_ADDR/hosts.toml`:
-
-```toml
-server = "http://REGISTRY_ADDR"
-
-[host."http://REGISTRY_ADDR"]
-  capabilities = ["pull", "resolve"]
-  skip_verify = true
-```
-
-```bash
-sudo systemctl restart containerd
-```
-
-Replace `REGISTRY_ADDR` with the value of `$REGISTRY` (e.g. `10.0.0.10:30500`).
 
 ## 5. Tell Knative To Skip Tag Resolution For This Registry
 
@@ -109,22 +74,32 @@ If your Knative version uses a different key, check
 
 ## 6. Build The FMI Bundle And Image, Then Push
 
-The bundle build is identical to `setup.md` §4 (amd64).
+The bundle build mirrors `setup.md` §4 (amd64), using `podman`. Run podman as
+**root** (`sudo`): on HPC/LDAP hosts your user usually lacks the `/etc/subuid`
+ranges rootless podman needs, and rootful matches the original Docker behavior.
+Use `sudo` consistently so `build` and `run` share one image store.
 
 ```bash
-cd /home/luca/fmi/runbooks/localstack-python311-redis
+cd "$REPO/runbooks/localstack-python311-redis"
 
-docker build -t fmi-localstack-build:redis-gcc10 -f Dockerfile.build /home/luca/fmi
+# The Direct backend builds from the TCPunch submodule; initialize it on the host
+# (the bind mount below exposes it to the build container). TCPunch's URL is SSH;
+# with no GitHub SSH key, rewrite GitHub SSH -> HTTPS first (reversible):
+#   git config --global url."https://github.com/".insteadOf "git@github.com:"
+git -C "$REPO" submodule update --init --recursive
 
-docker run --rm \
+sudo podman build -t fmi-localstack-build:redis-gcc10 -f Dockerfile.build "$REPO"
+
+# --user expands in your shell before sudo, so the bundle stays owned by you
+sudo podman run --rm \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \
-  --mount type=bind,source=/home/luca/fmi,target=/opt/fmi \
+  --mount type=bind,source="$REPO",target=/opt/fmi \
   fmi-localstack-build:redis-gcc10 \
   /opt/fmi/runbooks/localstack-python311-redis/make-fmi-bundle.sh
 
-docker build -f knative-migration/Dockerfile -t "${REGISTRY}/fmi-knative-migration:${TAG}" .
-docker push "${REGISTRY}/fmi-knative-migration:${TAG}"
+sudo podman build -f knative-migration/Dockerfile -t "$FMI_IMAGE" .
+sudo podman push --tls-verify=false "$FMI_IMAGE"   # --tls-verify=false: plain-HTTP registry
 ```
 
 The Dockerfile runs the import smoke test during build:
@@ -139,7 +114,7 @@ The shared manifests are rendered with `envsubst` (`FMI_IMAGE`/`IMAGE_PULL_POLIC
 from §1).
 
 ```bash
-cd /home/luca/fmi/runbooks/localstack-python311-redis
+cd "$REPO/runbooks/localstack-python311-redis"
 
 kubectl apply -f knative-migration/k8s/redis.yaml
 kubectl -n fmi rollout status deploy/fmi-redis --timeout=180s
@@ -160,7 +135,7 @@ Expected:
 ## 8. Run The Migration Test
 
 ```bash
-cd /home/luca/fmi/runbooks/localstack-python311-redis
+cd "$REPO/runbooks/localstack-python311-redis"
 
 kubectl -n fmi delete job fmi-orchestrator --ignore-not-found=true
 envsubst '${FMI_IMAGE} ${IMAGE_PULL_POLICY}' < knative-migration/k8s/orchestrator-job.yaml | kubectl apply -f -
@@ -206,7 +181,7 @@ Validate locally, then push a **new tag** so Knative makes a fresh revision and
 nodes re-pull (this is cleaner than reusing a tag with `IfNotPresent`):
 
 ```bash
-cd /home/luca/fmi/runbooks/localstack-python311-redis
+cd "$REPO/runbooks/localstack-python311-redis"
 
 python3 -m unittest discover -s knative-migration/tests -p 'test_*.py'
 python3 -m py_compile \
@@ -216,8 +191,8 @@ python3 -m py_compile \
 
 export TAG=v2   # bump on every rebuild
 export FMI_IMAGE="${REGISTRY}/fmi-knative-migration:${TAG}"
-docker build -f knative-migration/Dockerfile -t "$FMI_IMAGE" .
-docker push "$FMI_IMAGE"
+sudo podman build -f knative-migration/Dockerfile -t "$FMI_IMAGE" .
+sudo podman push --tls-verify=false "$FMI_IMAGE"
 
 envsubst '${FMI_IMAGE} ${IMAGE_PULL_POLICY}' < knative-migration/k8s/knative-service.yaml | kubectl apply -f -
 kubectl -n fmi wait ksvc/fmi-serverless-rank --for=condition=Ready --timeout=300s
