@@ -91,7 +91,8 @@ class KubernetesJobClient:
             raise RuntimeError(f"{method} {path} returned HTTP {exc.code}: {raw}") from exc
 
 
-def build_vm_rank_job_manifest(name, image, peer_id, worker_id, comm_name, num_peers, n, gap_s):
+def build_vm_rank_job_manifest(name, image, peer_id, worker_id, comm_name, num_peers, n, gap_s,
+                               image_pull_policy="Always"):
     env = {
         "PEER_ID": peer_id,
         "NUM_PEERS": num_peers,
@@ -117,7 +118,7 @@ def build_vm_rank_job_manifest(name, image, peer_id, worker_id, comm_name, num_p
                         {
                             "name": "rank",
                             "image": image,
-                            "imagePullPolicy": "Always",
+                            "imagePullPolicy": image_pull_policy,
                             "command": ["python3.11", "-u", "/var/task/vm_worker.py"],
                             "env": [{"name": key, "value": str(value)} for key, value in env.items()],
                             "resources": {
@@ -253,6 +254,10 @@ def run(comm_name, n, gap_s, image, serverless_url):
     coordinator.clear_job_state()
     kube = KubernetesJobClient()
 
+    # "Always" suits a real registry (ECR); local clusters load the image into
+    # the node and must use "IfNotPresent" so the kubelet does not try to pull.
+    pull_policy = os.environ.get("IMAGE_PULL_POLICY", "Always")
+
     suffix = uuid.uuid4().hex[:8]
     rank0_job = f"fmi-vm-rank0-{suffix}"
     rank1_job = f"fmi-vm-rank1-{suffix}"
@@ -266,11 +271,13 @@ def run(comm_name, n, gap_s, image, serverless_url):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             f0 = pool.submit(
                 kube.create_job,
-                build_vm_rank_job_manifest(rank0_job, image, 0, rank0_vm_wid, comm_name, NUM_PEERS, n, gap_s),
+                build_vm_rank_job_manifest(rank0_job, image, 0, rank0_vm_wid, comm_name, NUM_PEERS, n, gap_s,
+                                           image_pull_policy=pull_policy),
             )
             f1 = pool.submit(
                 kube.create_job,
-                build_vm_rank_job_manifest(rank1_job, image, 1, rank1_vm_wid, comm_name, NUM_PEERS, n, gap_s),
+                build_vm_rank_job_manifest(rank1_job, image, 1, rank1_vm_wid, comm_name, NUM_PEERS, n, gap_s,
+                                           image_pull_policy=pull_policy),
             )
             f0.result()
             f1.result()

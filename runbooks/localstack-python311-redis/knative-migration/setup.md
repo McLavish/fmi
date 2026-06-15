@@ -208,8 +208,14 @@ If that fails, rebuild the FMI bundle for the container base before continuing.
 
 ## 6. Deploy Redis, RBAC, And Knative Service
 
+The `knative-service.yaml` and `orchestrator-job.yaml` manifests are shared with
+the private-cluster runbook and rendered with `envsubst`; on AWS the image is the
+ECR tag and the pull policy is `Always`.
+
 ```bash
 export KUBECONFIG=/home/luca/knativecluster/eksknative.yaml
+export FMI_IMAGE=323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
+export IMAGE_PULL_POLICY=Always
 cd /home/luca/fmi/runbooks/localstack-python311-redis
 
 kubectl apply -f knative-migration/k8s/namespace.yaml
@@ -217,7 +223,7 @@ kubectl apply -f knative-migration/k8s/redis.yaml
 kubectl -n fmi rollout status deploy/fmi-redis --timeout=180s
 
 kubectl apply -f knative-migration/k8s/rbac.yaml
-kubectl apply -f knative-migration/k8s/knative-service.yaml
+envsubst '${FMI_IMAGE} ${IMAGE_PULL_POLICY}' < knative-migration/k8s/knative-service.yaml | kubectl apply -f -
 kubectl -n fmi wait ksvc/fmi-serverless-rank --for=condition=Ready --timeout=300s
 ```
 
@@ -239,10 +245,12 @@ Start a fresh orchestrator Job:
 
 ```bash
 export KUBECONFIG=/home/luca/knativecluster/eksknative.yaml
+export FMI_IMAGE=323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
+export IMAGE_PULL_POLICY=Always
 cd /home/luca/fmi/runbooks/localstack-python311-redis
 
 kubectl -n fmi delete job fmi-orchestrator --ignore-not-found=true
-kubectl apply -f knative-migration/k8s/orchestrator-job.yaml
+envsubst '${FMI_IMAGE} ${IMAGE_PULL_POLICY}' < knative-migration/k8s/orchestrator-job.yaml | kubectl apply -f -
 kubectl -n fmi logs -f job/fmi-orchestrator
 ```
 
@@ -329,6 +337,8 @@ eksctl scale nodegroup \
 After changing Python code or manifests:
 
 ```bash
+export FMI_IMAGE=323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
+export IMAGE_PULL_POLICY=Always
 cd /home/luca/fmi/runbooks/localstack-python311-redis
 
 python3 -m unittest discover -s knative-migration/tests -p 'test_*.py'
@@ -342,15 +352,15 @@ python3 -m py_compile \
 docker buildx build \
   --platform linux/amd64 \
   -f knative-migration/Dockerfile \
-  -t 323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1 \
+  -t "$FMI_IMAGE" \
   --push \
   .
 
-kubectl apply -f knative-migration/k8s/knative-service.yaml
+envsubst '${FMI_IMAGE} ${IMAGE_PULL_POLICY}' < knative-migration/k8s/knative-service.yaml | kubectl apply -f -
 kubectl -n fmi wait ksvc/fmi-serverless-rank --for=condition=Ready --timeout=300s
 
 kubectl -n fmi delete job fmi-orchestrator --ignore-not-found=true
-kubectl apply -f knative-migration/k8s/orchestrator-job.yaml
+envsubst '${FMI_IMAGE} ${IMAGE_PULL_POLICY}' < knative-migration/k8s/orchestrator-job.yaml | kubectl apply -f -
 kubectl -n fmi logs -f job/fmi-orchestrator
 ```
 
@@ -369,6 +379,44 @@ aws ecr delete-repository \
 ```
 
 Delete the whole EKS cluster:
+
+```bash
+eksctl delete cluster --region eu-central-1 --name knative --wait
+```
+
+If deletion hangs while waiting for `eksctl-knative-nodegroup-knodes-small`,
+the backing EKS managed-nodegroup ASG may be stuck in the termination lifecycle
+hook. Check and release stuck instances:
+
+```bash
+ASG="$(aws eks describe-nodegroup \
+  --region eu-central-1 \
+  --cluster-name knative \
+  --nodegroup-name knodes-small \
+  --query 'nodegroup.resources.autoScalingGroups[0].name' \
+  --output text)"
+
+aws autoscaling describe-auto-scaling-groups \
+  --region eu-central-1 \
+  --auto-scaling-group-names "$ASG" \
+  --query 'AutoScalingGroups[0].Instances[].{Id:InstanceId,State:LifecycleState}' \
+  --output table
+
+for id in $(aws autoscaling describe-auto-scaling-groups \
+  --region eu-central-1 \
+  --auto-scaling-group-names "$ASG" \
+  --query 'AutoScalingGroups[0].Instances[?LifecycleState==`Terminating:Wait`].InstanceId' \
+  --output text); do
+  aws autoscaling complete-lifecycle-action \
+    --region eu-central-1 \
+    --auto-scaling-group-name "$ASG" \
+    --lifecycle-hook-name Terminate-LC-Hook \
+    --lifecycle-action-result CONTINUE \
+    --instance-id "$id"
+done
+```
+
+Then rerun:
 
 ```bash
 eksctl delete cluster --region eu-central-1 --name knative --wait

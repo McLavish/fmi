@@ -1,3 +1,7 @@
+# Rendered through envsubst with:
+#   FMI_IMAGE          full image ref (ECR tag on AWS, registry NodePort on a
+#                      private cluster)
+#   IMAGE_PULL_POLICY  Always (registry) or IfNotPresent (in-cluster registry)
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
@@ -13,8 +17,8 @@ spec:
       containerConcurrency: 1
       timeoutSeconds: 300
       containers:
-        - image: 323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
-          imagePullPolicy: Always
+        - image: ${FMI_IMAGE}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
           ports:
             - containerPort: 8080
           resources:

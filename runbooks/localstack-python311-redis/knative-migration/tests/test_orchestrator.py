@@ -44,11 +44,30 @@ class OrchestratorTests(unittest.TestCase):
             "123456789012.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1",
         )
         self.assertEqual(container["command"], ["python3.11", "-u", "/var/task/vm_worker.py"])
+        self.assertEqual(container["imagePullPolicy"], "Always")
         env = {item["name"]: item["value"] for item in container["env"]}
         self.assertEqual(env["PEER_ID"], "0")
         self.assertEqual(env["WORKER_ID"], "rank0-vm-deadbeef")
         self.assertEqual(env["PLACEMENT"], "vm")
         self.assertEqual(env["GAP_S"], "5.0")
+
+    def test_vm_rank_job_manifest_honors_image_pull_policy(self):
+        orchestrator = load_orchestrator()
+
+        manifest = orchestrator.build_vm_rank_job_manifest(
+            name="fmi-vm-rank0-deadbeef",
+            image="fmi-knative-migration:local",
+            peer_id=0,
+            worker_id="rank0-vm-deadbeef",
+            comm_name="demo",
+            num_peers=2,
+            n=2,
+            gap_s=5.0,
+            image_pull_policy="IfNotPresent",
+        )
+
+        container = manifest["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(container["imagePullPolicy"], "IfNotPresent")
 
 
     def test_verify_migration_accepts_directory_flip_and_result(self):

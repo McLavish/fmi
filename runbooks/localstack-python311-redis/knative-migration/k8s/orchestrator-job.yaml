@@ -1,3 +1,8 @@
+# Rendered through envsubst with:
+#   FMI_IMAGE          full image ref; also stamped onto the VM-rank Jobs the
+#                      orchestrator creates (via the FMI_IMAGE env)
+#   IMAGE_PULL_POLICY  Always (registry) or IfNotPresent (in-cluster registry);
+#                      inherited by the VM-rank Jobs via the IMAGE_PULL_POLICY env
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -14,12 +19,14 @@ spec:
       restartPolicy: Never
       containers:
         - name: orchestrator
-          image: 323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
-          imagePullPolicy: Always
+          image: ${FMI_IMAGE}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
           command: ["python3.11", "-u", "/var/task/orchestrator.py", "run"]
           env:
             - name: FMI_IMAGE
-              value: 323756936843.dkr.ecr.eu-central-1.amazonaws.com/fmi-knative-migration:v1
+              value: ${FMI_IMAGE}
+            - name: IMAGE_PULL_POLICY
+              value: ${IMAGE_PULL_POLICY}
             - name: FMI_NAMESPACE
               valueFrom:
                 fieldRef:
