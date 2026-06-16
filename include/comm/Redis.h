@@ -20,8 +20,6 @@ namespace FMI::Comm {
 
         void delete_object(std::string name) override;
 
-        std::vector<std::string> get_object_names() override;
-
         double get_latency(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;
 
         double get_price(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;

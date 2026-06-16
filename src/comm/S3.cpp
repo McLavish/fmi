@@ -4,7 +4,6 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
-#include <aws/s3/model/ListObjectsRequest.h>
 #include <cmath>
 
 char TAG[] = "S3Client";
@@ -68,22 +67,6 @@ void FMI::Comm::S3::delete_object(std::string name) {
     if (!outcome.IsSuccess()) {
         BOOST_LOG_TRIVIAL(error) << "Error when deleting from S3: " << outcome.GetError();
     }
-}
-
-std::vector<std::string> FMI::Comm::S3::get_object_names() {
-    std::vector<std::string> object_names;
-    Aws::S3::Model::ListObjectsRequest request;
-    request.WithBucket(bucket_name);
-    auto outcome = client->ListObjects(request);
-    if (outcome.IsSuccess()) {
-        auto objects = outcome.GetResult().GetContents();
-        for (auto& object : objects) {
-            object_names.push_back(object.GetKey());
-        }
-    } else {
-        BOOST_LOG_TRIVIAL(error) << "Error when listing objects from S3: " << outcome.GetError();
-    }
-    return object_names;
 }
 
 double FMI::Comm::S3::get_latency(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) {

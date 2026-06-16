@@ -59,16 +59,6 @@ void FMI::Comm::Redis::delete_object(std::string name) {
     freeReplyObject(reply);
 }
 
-std::vector<std::string> FMI::Comm::Redis::get_object_names() {
-    std::vector<std::string> keys;
-    std::string command = "KEYS *";
-    auto* reply = (redisReply*) redisCommand(context, command.c_str());
-    for (int i = 0; i < reply->elements; i++) {
-        keys.emplace_back(reply->element[i]->str);
-    }
-    return keys;
-}
-
 double FMI::Comm::Redis::get_latency(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) {
     double agg_bandwidth = std::min(producer * consumer * bandwidth_single, bandwidth_multiple);
     double trans_time = producer * consumer * ((double) size_in_bytes / 1000000.) / agg_bandwidth;

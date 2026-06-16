@@ -44,9 +44,6 @@ namespace FMI::Comm {
         //! Uploads objects and keeps track of them.
         virtual void upload(channel_data buf, std::string name);
 
-        //! List all the currently existing objects, needs to be implemented by channels. Needed by some collectives that check for the existence of files, but do not care about their content.
-        virtual std::vector<std::string> get_object_names() = 0;
-
         //! Delete the object with the given name, needs to be implemented by channels.
         virtual void delete_object(std::string name) = 0;
 

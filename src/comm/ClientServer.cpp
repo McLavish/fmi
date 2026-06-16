@@ -50,11 +50,16 @@ void FMI::Comm::ClientServer::barrier() {
     upload({&b, sizeof(b)}, file_name);
     unsigned int elapsed_time = 0;
     while (elapsed_time < max_timeout) {
-        auto objects = get_object_names();
-        auto has_barrier_suffix = [barrier_suffix] (const std::string& s){return s.size() > barrier_suffix.size() &&
-                                                    s.compare(s.size() - barrier_suffix.size(), barrier_suffix.size(), barrier_suffix) == 0 ;};
-        auto num_arrived = std::count_if(objects.begin(), objects.end(), has_barrier_suffix);
-        if (num_arrived >= num_peers) {
+        bool all_arrived = true;
+        for (int i = 0; i < num_peers; i++) {
+            char arrived = 0;
+            std::string expected_name = comm_name + std::to_string(i) + barrier_suffix;
+            if (!download_object({&arrived, sizeof(arrived)}, expected_name)) {
+                all_arrived = false;
+                break;
+            }
+        }
+        if (all_arrived) {
             return;
         } else {
             elapsed_time += timeout;
