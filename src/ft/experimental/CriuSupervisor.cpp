@@ -3,11 +3,9 @@
 #include "../../../include/ft/experimental/HostId.h"
 
 #include <algorithm>
-#include <chrono>
 #include <csignal>
 #include <filesystem>
 #include <stdexcept>
-#include <thread>
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -122,18 +120,11 @@ void FMI::FT::CriuSupervisor::ensure_same_host_scope(const std::vector<CriuRankI
 }
 
 void FMI::FT::CriuSupervisor::wait_for_quiesce(std::uint64_t generation) const {
-    auto start = std::chrono::steady_clock::now();
-    while (true) {
-        if (coordinator->criu_all_ranks_quiesced(generation, host_id)) {
-            return;
-        }
-
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-        if (elapsed >= config.quiesce_timeout_ms) {
-            throw FMI::Utils::Timeout();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(config.poll_ms));
+    bool quiesced = FMI::Utils::poll_until(
+            [&]() { return coordinator->criu_all_ranks_quiesced(generation, host_id); },
+            config.quiesce_timeout_ms, config.poll_ms);
+    if (!quiesced) {
+        throw FMI::Utils::Timeout();
     }
 }
 

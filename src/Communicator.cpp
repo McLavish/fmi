@@ -3,7 +3,6 @@
 #include "../include/ft/Coordinator.h"
 
 #include <chrono>
-#include <thread>
 #include <utility>
 
 namespace {
@@ -45,19 +44,13 @@ namespace FMI {
 
             if (coordinator->is_rank_pending(peer_id)) {
                 // A replacement rank waits for the orchestrator to promote and clear pending.
-                auto start = std::chrono::steady_clock::now();
-                while (true) {
-                    if (!coordinator->is_rank_pending(peer_id)) {
-                        current_epoch = coordinator->epoch();
-                        break;
-                    }
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - start).count();
-                    if (static_cast<unsigned int>(elapsed) >= ft_config.reconfigure_timeout_ms) {
-                        throw FMI::Utils::Timeout();
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(ft_config.poll_interval_ms));
+                bool cleared = FMI::Utils::poll_until(
+                        [&]() { return !coordinator->is_rank_pending(peer_id); },
+                        ft_config.reconfigure_timeout_ms, ft_config.poll_interval_ms);
+                if (!cleared) {
+                    throw FMI::Utils::Timeout();
                 }
+                current_epoch = coordinator->epoch();
             }
 
             std::uint64_t active_epoch = current_epoch;
