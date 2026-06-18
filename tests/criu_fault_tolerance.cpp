@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -180,12 +181,38 @@ namespace {
         std::string old_value;
     };
 
+    // RAII setter for an environment variable, restored (or unset) on scope exit so a failing
+    // assertion cannot leak the value into later test cases in the shared process.
+    struct ScopedEnv {
+        ScopedEnv(std::string name, const char* value) : name(std::move(name)) {
+            const char* current = std::getenv(this->name.c_str());
+            had_old = current != nullptr;
+            if (had_old) {
+                old_value = current;
+            }
+            setenv(this->name.c_str(), value, 1);
+        }
+
+        ~ScopedEnv() {
+            if (had_old) {
+                setenv(name.c_str(), old_value.c_str(), 1);
+            } else {
+                unsetenv(name.c_str());
+            }
+        }
+
+        std::string name;
+        std::string old_value;
+        bool had_old;
+    };
+
     fs::path write_mock_criu(const fs::path& bin_dir) {
         fs::create_directories(bin_dir);
         auto script_path = bin_dir / "criu";
         std::ofstream out(script_path);
         out << "#!/usr/bin/env bash\n"
                "set -euo pipefail\n"
+               "all_args=\"$*\"\n"
                "mode=\"$1\"\n"
                "shift\n"
                "dir=\"\"\n"
@@ -218,6 +245,7 @@ namespace {
                "fi\n"
                "mkdir -p \"$dir\"\n"
                "echo \"$mode\" > \"$dir/$mode.marker\"\n"
+               "printf '%s\\n' \"$all_args\" > \"$dir/$mode.args\"\n"
                "if [ -n \"$log\" ]; then\n"
                "  echo \"$mode\" > \"$dir/$log\"\n"
                "fi\n";
@@ -793,6 +821,50 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_cleanup_removes_images_and_state) {
 
     BOOST_CHECK(!fs::exists(comm_images));
     BOOST_CHECK(coordinator.criu_rank_info().empty());
+
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(criu_extra_args_reach_the_whole_job_supervisor) {
+    // FMI_CRIU_EXTRA_ARGS must reach every criu invocation, not just the migration path. Drive
+    // the whole-job CriuSupervisor (which previously could not see the flag — its dump/restore
+    // built criu args without it) and assert the operator flag lands on the criu command line.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("extra-args");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("extra-args-job");
+    if (!redis_available(config_path.string(), comm_name, 1)) {
+        BOOST_TEST_MESSAGE("Skipping criu extra-args test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    ScopedEnv extra_args("FMI_CRIU_EXTRA_ARGS", "--unprivileged");
+
+    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 1);
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+    auto host_id = current_host_id();
+    coordinator.criu_register_rank(0, 0, host_id, "Direct");
+
+    FMI::FT::CriuSupervisor supervisor(config_path.string(), comm_name, 1);
+    auto checkpoint_future = std::async(std::launch::async, [&supervisor]() { return supervisor.checkpoint(); });
+    wait_until([&coordinator]() { return coordinator.criu_requested_generation() == 1; });
+    coordinator.criu_mark_rank_quiesced(0, 0, host_id, "Direct", 1);
+    BOOST_REQUIRE(checkpoint_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    (void) checkpoint_future.get();
+
+    auto args_file = images_dir / comm_name / "generation-1" / "rank-0" / "dump.args";
+    BOOST_REQUIRE(fs::exists(args_file));
+    std::ifstream in(args_file);
+    std::string recorded((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    BOOST_CHECK(recorded.find("--unprivileged") != std::string::npos);
 
     coordinator.clear_criu_job_state();
     coordinator.clear_job_state();

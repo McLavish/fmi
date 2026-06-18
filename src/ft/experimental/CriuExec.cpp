@@ -1,16 +1,32 @@
 #include "../../../include/ft/experimental/CriuExec.h"
 
 #include <cerrno>
+#include <cstdlib>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <sys/wait.h>
 #include <unistd.h>
 
 void FMI::FT::run_criu(const std::vector<std::string>& args) {
+    // Append operator-supplied criu flags (whitespace-split, no shell quoting) from
+    // FMI_CRIU_EXTRA_ARGS here, at the single point every criu invocation passes through, so
+    // both supervisors and every dump/restore honour per-deployment flags (e.g. --unprivileged
+    // for rootless criu) — no call site can forget to wire it in.
+    std::vector<std::string> full_args = args;
+    if (const char* extra = std::getenv("FMI_CRIU_EXTRA_ARGS")) {
+        std::istringstream stream(extra);
+        std::string token;
+        while (stream >> token) {
+            full_args.push_back(token);
+        }
+    }
+
     std::vector<char*> argv;
-    argv.reserve(args.size() + 1);
-    for (const auto& arg : args) {
+    argv.reserve(full_args.size() + 1);
+    for (const auto& arg : full_args) {
         argv.push_back(const_cast<char*>(arg.c_str()));
     }
     argv.push_back(nullptr);

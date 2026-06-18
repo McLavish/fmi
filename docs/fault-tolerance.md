@@ -173,4 +173,5 @@ A separate, experimental whole-job checkpoint/rollback path also exists under
 `FMI_ENABLE_CRIU=ON` (`FMI::FT::CriuRuntime`, `fmi-criu-supervisor`,
 `tests/criu_checkpoint_demo.cpp`). It dumps and restores *all* ranks together to the same
 generation (no epoch change, no single-rank relocation) and is quarantined WIP raw material —
-not part of the transparent-migration protocol described above.
+not part of the transparent-migration protocol described above. `FMI_CRIU_EXTRA_ARGS` applies
+here too: it is honoured by every criu invocation (both supervisors share one criu launcher).

@@ -1,29 +1,10 @@
 #include "../../../include/ft/experimental/MigrationSupervisor.h"
 #include "../../../include/ft/experimental/CriuExec.h"
 
-#include <cstdlib>
 #include <filesystem>
-#include <sstream>
 #include <stdexcept>
 
 namespace fs = std::filesystem;
-
-namespace {
-    // Append any operator-supplied criu flags (space-separated) from FMI_CRIU_EXTRA_ARGS.
-    // Lets a deployment pass environment-specific flags (e.g. --unprivileged for rootless
-    // criu, or --tcp-established) without recompiling. Empty/unset by default.
-    void append_extra_criu_args(std::vector<std::string>& args) {
-        const char* extra = std::getenv("FMI_CRIU_EXTRA_ARGS");
-        if (extra == nullptr) {
-            return;
-        }
-        std::istringstream stream(extra);
-        std::string token;
-        while (stream >> token) {
-            args.push_back(token);
-        }
-    }
-}
 
 FMI::FT::MigrationSupervisor::MigrationSupervisor(std::string config_path, std::string comm_name,
                                                  FMI::Utils::peer_num num_peers) :
@@ -128,30 +109,27 @@ void FMI::FT::MigrationSupervisor::dump_rank(int pid, const std::string& dir) co
     //   it on restore (the Coordinator reconnects lazily) instead of trying to repair it.
     // No --leave-stopped: criu ptrace-seizes, dumps, then kills and reaps the task, freeing the
     //   pid so the immediate restore can reclaim it.
-    std::vector<std::string> args = {
+    // Operator flags (FMI_CRIU_EXTRA_ARGS) are appended inside run_criu.
+    FMI::FT::run_criu({
             "criu", "dump",
             "-t", std::to_string(pid),
             "-D", dir,
             "-o", "dump.log",
             "--shell-job",
             "--tcp-close"
-    };
-    append_extra_criu_args(args);
-    FMI::FT::run_criu(args);
+    });
 }
 
 void FMI::FT::MigrationSupervisor::restore_rank(const std::string& dir) const {
     if (!fs::exists(dir)) {
         throw std::runtime_error("Missing CRIU image directory: " + dir);
     }
-    std::vector<std::string> args = {
+    FMI::FT::run_criu({
             "criu", "restore",
             "-D", dir,
             "-o", "restore.log",
             "--shell-job",
             "--tcp-close",
             "--restore-detached"
-    };
-    append_extra_criu_args(args);
-    FMI::FT::run_criu(args);
+    });
 }
