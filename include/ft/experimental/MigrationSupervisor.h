@@ -2,11 +2,10 @@
 #define FMI_FT_MIGRATIONSUPERVISOR_H
 
 #include "../../utils/Common.h"
-#include "../../utils/Configuration.h"
 #include "../Coordinator.h"
+#include "FmiFtSupervisor.h"
 
 #include <cstdint>
-#include <memory>
 #include <string>
 
 namespace FMI::FT {
@@ -19,7 +18,7 @@ namespace FMI::FT {
     //! memory), then promotes the communicator epoch so survivors and the restored rank
     //! reconfigure across the epoch cut. The targeted rank stays a plain FMI::Communicator
     //! application; it never invokes criu itself.
-    class MigrationSupervisor {
+    class MigrationSupervisor : public FmiFtSupervisor {
     public:
         MigrationSupervisor(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
 
@@ -34,14 +33,6 @@ namespace FMI::FT {
         std::uint64_t watch_once();
 
     private:
-        std::string config_path;
-        std::string comm_name;
-        FMI::Utils::peer_num num_peers;
-        FMI::Utils::FaultToleranceConfig config;
-        std::string host_id;
-        std::string supervisor_id;
-        std::shared_ptr<FMI::FT::Coordinator> coordinator;
-
         void ensure_migration_mode() const;
         [[nodiscard]] CriuRankInfo wait_for_ready_rank(FMI::Utils::peer_num rank, std::uint64_t target_epoch) const;
         [[nodiscard]] std::string rank_image_dir(std::uint64_t target_epoch, FMI::Utils::peer_num rank) const;

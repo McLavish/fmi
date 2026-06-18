@@ -1,13 +1,10 @@
 #include "../../../include/ft/experimental/MigrationSupervisor.h"
 #include "../../../include/ft/experimental/CriuExec.h"
-#include "../../../include/ft/experimental/HostId.h"
 
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
-
-#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -30,24 +27,13 @@ namespace {
 
 FMI::FT::MigrationSupervisor::MigrationSupervisor(std::string config_path, std::string comm_name,
                                                  FMI::Utils::peer_num num_peers) :
-        config_path(std::move(config_path)),
-        comm_name(std::move(comm_name)),
-        num_peers(num_peers) {
-    FMI::Utils::Configuration configuration(this->config_path);
-    config = configuration.get_fault_tolerance_config();
+        FmiFtSupervisor(std::move(config_path), std::move(comm_name), num_peers) {
     ensure_migration_mode();
-    host_id = FMI::FT::resolve_host_id(config);
-    supervisor_id = host_id + ":" + std::to_string(getpid());
-    coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);
+    connect();
 }
 
 void FMI::FT::MigrationSupervisor::ensure_migration_mode() const {
-    if (!config.enabled) {
-        throw std::runtime_error("Migration supervisor requires fault tolerance to be enabled");
-    }
-    if (config.control_backend != "Redis") {
-        throw std::runtime_error("Migration supervisor requires Redis as the control backend");
-    }
+    validate_base();
     if (config.state_transfer != "criu") {
         throw std::runtime_error("Migration supervisor requires fault_tolerance.state_transfer=\"criu\"");
     }

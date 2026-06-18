@@ -1,27 +1,17 @@
 #include "../../../include/ft/experimental/CriuSupervisor.h"
 #include "../../../include/ft/experimental/CriuExec.h"
-#include "../../../include/ft/experimental/HostId.h"
 
 #include <algorithm>
 #include <csignal>
 #include <filesystem>
 #include <stdexcept>
 
-#include <sys/wait.h>
-#include <unistd.h>
-
 namespace fs = std::filesystem;
 
 FMI::FT::CriuSupervisor::CriuSupervisor(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers) :
-        config_path(std::move(config_path)),
-        comm_name(std::move(comm_name)),
-        num_peers(num_peers) {
-    FMI::Utils::Configuration configuration(this->config_path);
-    config = configuration.get_fault_tolerance_config();
-    ensure_criu_mode();
-    host_id = FMI::FT::resolve_host_id(config);
-    supervisor_id = host_id + ":" + std::to_string(getpid());
-    coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);
+        FmiFtSupervisor(std::move(config_path), std::move(comm_name), num_peers) {
+    validate_base();
+    connect();
 }
 
 std::uint64_t FMI::FT::CriuSupervisor::checkpoint() {
@@ -70,14 +60,6 @@ FMI::FT::CriuStatus FMI::FT::CriuSupervisor::status() const {
     return {coordinator->criu_job_info(), coordinator->criu_rank_info()};
 }
 
-void FMI::FT::CriuSupervisor::cleanup() {
-    auto images_path = fs::path(config.images_dir) / comm_name;
-    if (fs::exists(images_path)) {
-        fs::remove_all(images_path);
-    }
-    coordinator->clear_criu_job_state();
-}
-
 std::string FMI::FT::CriuSupervisor::generation_dir(std::uint64_t generation) const {
     return (fs::path(config.images_dir) / comm_name / ("generation-" + std::to_string(generation))).string();
 }
@@ -94,15 +76,6 @@ std::vector<FMI::FT::CriuRankInfo> FMI::FT::CriuSupervisor::local_ranks() const 
         return left.rank < right.rank;
     });
     return local;
-}
-
-void FMI::FT::CriuSupervisor::ensure_criu_mode() const {
-    if (!config.enabled) {
-        throw std::runtime_error("CRIU supervisor requires fault tolerance to be enabled");
-    }
-    if (config.control_backend != "Redis") {
-        throw std::runtime_error("CRIU supervisor requires Redis as the control backend");
-    }
 }
 
 void FMI::FT::CriuSupervisor::ensure_same_host_scope(const std::vector<CriuRankInfo>& ranks) const {
