@@ -39,9 +39,8 @@ namespace FMI::FT {
         std::function<void(const std::string&)> reconfigure_callback;
         std::function<void()> prepare_for_checkpoint;
 
-        // Derived from config: how a migrated rank's state is handled (the data backend name and
-        // host identity used by the CRIU path are resolved locally in checkpoint_and_wait_for_restore).
-        std::string state_transfer;
+        // How a migrated rank's state is handled, the data backend name, and host identity used by
+        // the CRIU path are all read from `config` where needed (see checkpoint_and_wait_for_restore).
 
         //! Wait for the orchestrator to promote the epoch, then rebuild channels in place.
         //! timeout_ms == 0 disables the wall-clock deadline (used across a CRIU dump/restore,

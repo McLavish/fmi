@@ -1,9 +1,7 @@
 #include "../../include/ft/TransparentMigrationRuntime.h"
 
-#include <chrono>
 #include <cstdlib>
 #include <stdexcept>
-#include <thread>
 
 #include <unistd.h>
 #ifdef FMI_ENABLE_CRIU
@@ -29,15 +27,14 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         coordinator(std::move(coordinator)),
         base_comm_name(std::move(base_comm_name)),
         reconfigure_callback(std::move(reconfigure_callback)),
-        prepare_for_checkpoint(std::move(prepare_for_checkpoint)),
-        state_transfer(config.state_transfer) {
-    if (state_transfer == "criu") {
+        prepare_for_checkpoint(std::move(prepare_for_checkpoint)) {
+    if (config.state_transfer == "criu") {
 #ifndef FMI_ENABLE_CRIU
         throw std::runtime_error(
                 "fault_tolerance.state_transfer=\"criu\" requires a build with FMI_ENABLE_CRIU=ON");
 #endif
-    } else if (state_transfer != "none") {
-        throw std::runtime_error("Unknown fault_tolerance.state_transfer: " + state_transfer);
+    } else if (config.state_transfer != "none") {
+        throw std::runtime_error("Unknown fault_tolerance.state_transfer: " + config.state_transfer);
     }
 }
 
@@ -54,7 +51,7 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
 
     if (coordinator->is_rank_pending(peer_id)) {
         // This rank is the migration target.
-        if (state_transfer == "criu") {
+        if (config.state_transfer == "criu") {
             // Preserve application state: checkpoint this process and let the supervisor
             // restore it. Control resumes (in the restored image) at the epoch-N+1 rebuild.
             checkpoint_and_wait_for_restore();
@@ -107,29 +104,20 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
 }
 
 void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure(unsigned int timeout_ms) {
-    auto start = std::chrono::steady_clock::now();
-
-    while (true) {
-        auto observed = coordinator->epoch();
-        if (observed > active_epoch) {
-            active_epoch = observed;
-            coordinator->register_rank(active_epoch, peer_id, worker_id, FMI::FT::RankState::Active);
-            if (!placement.empty()) {
-                coordinator->set_placement(active_epoch, peer_id, placement);
-            }
-            // After a CRIU restore the rebuilt channels must be ready before control returns to
-            // user code; reconfigure installs the epoch-N+1 channel set in place.
-            reconfigure_callback(base_comm_name + "@epoch=" + std::to_string(active_epoch));
-            return;
-        }
-
-        if (timeout_ms != 0) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-            if (static_cast<unsigned int>(elapsed) >= timeout_ms) {
-                throw FMI::Utils::Timeout();
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(config.poll_interval_ms));
+    std::uint64_t observed = active_epoch;
+    bool promoted = FMI::Utils::poll_until(
+            [this, &observed]() { observed = coordinator->epoch(); return observed > active_epoch; },
+            timeout_ms, config.poll_interval_ms);
+    if (!promoted) {
+        throw FMI::Utils::Timeout();
     }
+
+    active_epoch = observed;
+    coordinator->register_rank(active_epoch, peer_id, worker_id, FMI::FT::RankState::Active);
+    if (!placement.empty()) {
+        coordinator->set_placement(active_epoch, peer_id, placement);
+    }
+    // After a CRIU restore the rebuilt channels must be ready before control returns to user
+    // code; reconfigure installs the epoch-N+1 channel set in place.
+    reconfigure_callback(base_comm_name + "@epoch=" + std::to_string(active_epoch));
 }

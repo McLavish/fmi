@@ -2,12 +2,10 @@
 #include "../../../include/ft/experimental/CriuExec.h"
 #include "../../../include/ft/experimental/HostId.h"
 
-#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
-#include <thread>
 
 #include <unistd.h>
 
@@ -83,44 +81,42 @@ std::uint64_t FMI::FT::MigrationSupervisor::migrate_rank(FMI::Utils::peer_num ra
 }
 
 std::uint64_t FMI::FT::MigrationSupervisor::watch_once() {
-    auto start = std::chrono::steady_clock::now();
-    while (true) {
-        auto epoch = coordinator->epoch();
-        for (const auto& entry : coordinator->directory_snapshot(epoch)) {
-            // request_migration marks the targeted rank MIGRATION_PENDING (and it stays so
-            // until it reaches its quiesce point and flips to QUIESCED). Either state means a
-            // migration of this rank is in progress at the current epoch.
+    // request_migration marks the targeted rank MIGRATION_PENDING (and it stays so until it
+    // reaches its quiesce point and flips to QUIESCED). Either state means a migration of this
+    // rank is in progress at the current epoch.
+    FMI::Utils::peer_num target = 0;
+    bool found = FMI::Utils::poll_until([this, &target]() {
+        for (const auto& entry : coordinator->directory_snapshot(coordinator->epoch())) {
             if (entry.state == RankState::MigrationPending || entry.state == RankState::Quiesced) {
-                return migrate_rank(entry.rank);
+                target = entry.rank;
+                return true;
             }
         }
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-        if (static_cast<unsigned int>(elapsed) >= config.quiesce_timeout_ms) {
-            return 0;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(config.poll_ms));
-    }
+        return false;
+    }, config.quiesce_timeout_ms, config.poll_ms);
+
+    return found ? migrate_rank(target) : 0;
 }
 
 FMI::FT::CriuRankInfo FMI::FT::MigrationSupervisor::wait_for_ready_rank(FMI::Utils::peer_num rank,
                                                                        std::uint64_t target_epoch) const {
-    auto start = std::chrono::steady_clock::now();
-    while (true) {
+    CriuRankInfo ready;
+    bool found = FMI::Utils::poll_until([this, rank, target_epoch, &ready]() {
         for (const auto& info : coordinator->criu_rank_info()) {
             if (info.rank == rank && info.host_id == host_id &&
                 info.state == CriuRankState::Quiesced && info.quiesced_generation == target_epoch &&
                 info.pid > 0) {
-                return info;
+                ready = info;
+                return true;
             }
         }
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-        if (static_cast<unsigned int>(elapsed) >= config.quiesce_timeout_ms) {
-            throw FMI::Utils::Timeout();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(config.poll_ms));
+        return false;
+    }, config.quiesce_timeout_ms, config.poll_ms);
+
+    if (!found) {
+        throw FMI::Utils::Timeout();
     }
+    return ready;
 }
 
 std::string FMI::FT::MigrationSupervisor::rank_image_dir(std::uint64_t target_epoch,

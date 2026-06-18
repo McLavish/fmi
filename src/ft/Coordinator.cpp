@@ -151,6 +151,11 @@ struct FMI::FT::Coordinator::Impl {
             comm_name(std::move(comm_name)),
             num_peers(num_peers) {
 #if FMI_ENABLE_REDIS
+        // Ignore SIGPIPE (process-global): a write to a dropped Redis connection — e.g. one
+        // closed by criu's --tcp-close across a checkpoint/restore — must surface as a send()
+        // error so command() can transparently reconnect, not silently kill the process via the
+        // default SIGPIPE disposition.
+        std::signal(SIGPIPE, SIG_IGN);
         connect();
 #endif
     }
@@ -165,11 +170,6 @@ struct FMI::FT::Coordinator::Impl {
 
 #if FMI_ENABLE_REDIS
     void connect() {
-        // Ignore SIGPIPE: a write to a dropped Redis connection (e.g. one closed by criu's
-        // --tcp-close after a checkpoint/restore) must surface as a send() error so command()
-        // can transparently reconnect, not silently kill the process via the default SIGPIPE
-        // disposition.
-        std::signal(SIGPIPE, SIG_IGN);
         if (context != nullptr) {
             redisFree(context);
         }
