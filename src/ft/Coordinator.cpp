@@ -151,11 +151,20 @@ struct FMI::FT::Coordinator::Impl {
             comm_name(std::move(comm_name)),
             num_peers(num_peers) {
 #if FMI_ENABLE_REDIS
-        // Ignore SIGPIPE (process-global): a write to a dropped Redis connection — e.g. one
-        // closed by criu's --tcp-close across a checkpoint/restore — must surface as a send()
-        // error so command() can transparently reconnect, not silently kill the process via the
-        // default SIGPIPE disposition.
-        std::signal(SIGPIPE, SIG_IGN);
+        // criu's --tcp-close drops the Redis control socket across a checkpoint/restore, so the
+        // restored process's next write would raise SIGPIPE and — under the default disposition —
+        // be killed before command() can reconnect. Ignore SIGPIPE so the write fails with EPIPE
+        // instead and command() reconnects transparently. This signal disposition is process-
+        // global, so keep the footprint minimal: arm it only on the criu state-transfer path that
+        // actually introduces the risk, and never overwrite a SIGPIPE handler the application
+        // already installed. (A narrower per-write MSG_NOSIGNAL is not reachable here because
+        // hiredis owns the socket writes and exposes no no-signal option.)
+        if (this->config.state_transfer == "criu") {
+            auto previous = std::signal(SIGPIPE, SIG_IGN);
+            if (previous != SIG_DFL && previous != SIG_ERR) {
+                std::signal(SIGPIPE, previous);
+            }
+        }
         connect();
 #endif
     }

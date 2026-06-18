@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -67,6 +68,17 @@ namespace {
 
     std::string bool_string(bool value) {
         return value ? "true" : "false";
+    }
+
+    // A distinguishable application SIGPIPE handler used to assert the Coordinator does not
+    // overwrite a disposition the application already installed.
+    void sigpipe_probe_handler(int) {}
+
+    // Read the current SIGPIPE disposition without leaving it changed (set, then restore).
+    void (*current_sigpipe_handler())(int) {
+        auto handler = std::signal(SIGPIPE, SIG_IGN);
+        std::signal(SIGPIPE, handler);
+        return handler;
     }
 
     fs::path write_criu_config(const fs::path& config_path,
@@ -434,6 +446,41 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_ran
 
     coordinator.clear_criu_job_state();
     coordinator.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(criu_coordinator_scopes_sigpipe_to_default_disposition) {
+    // The criu state-transfer path needs SIGPIPE ignored so a --tcp-close'd Redis socket
+    // surfaces EPIPE instead of killing the restored process. That disposition is process-
+    // global, so the Coordinator must only take it over when the application left SIGPIPE at
+    // its default — never clobbering a handler the application installed itself.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("sigpipe");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    std::string comm_name = unique_comm_name("sigpipe-job");
+    if (!redis_available(config_path.string(), comm_name, 1)) {
+        BOOST_TEST_MESSAGE("Skipping SIGPIPE scoping test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    auto original = current_sigpipe_handler();
+
+    // From the default disposition, a criu-mode Coordinator arms SIG_IGN.
+    std::signal(SIGPIPE, SIG_DFL);
+    {
+        FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 1);
+        BOOST_CHECK(current_sigpipe_handler() == SIG_IGN);
+    }
+
+    // An application-installed handler is left untouched.
+    std::signal(SIGPIPE, sigpipe_probe_handler);
+    {
+        FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 1);
+        BOOST_CHECK(current_sigpipe_handler() == sigpipe_probe_handler);
+    }
+
+    std::signal(SIGPIPE, original);
     fs::remove_all(temp_dir);
 }
 
