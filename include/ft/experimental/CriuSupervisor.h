@@ -25,7 +25,6 @@ namespace FMI::FT {
         void wait_for_quiesce(std::uint64_t generation) const;
         void dump_rank(const CriuRankInfo& rank, std::uint64_t generation) const;
         void restore_rank(const CriuRankInfo& rank, std::uint64_t generation) const;
-        static void run_criu(const std::vector<std::string>& args);
     };
 }
 

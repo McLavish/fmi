@@ -85,6 +85,7 @@ post-restore write is not fatal).
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
+    "poll_interval_ms": 50,
     "preferred_data_backend": "Direct",
     "state_transfer": "criu",
     "images_dir": "/tmp/fmi-criu-images",

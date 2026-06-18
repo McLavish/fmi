@@ -25,7 +25,7 @@ namespace FMI::FT {
         //! Migrate a single logical rank: wait for it to publish a checkpoint-ready image on
         //! this host, criu-dump it, criu-restore it, then promote the epoch. Returns the
         //! promoted epoch. Throws FMI::Utils::Timeout if the rank never becomes ready.
-        std::uint64_t migrate_rank(FMI::Utils::peer_num rank);
+        std::uint64_t migrate_rank(FMI::Utils::peer_num rank) const;
 
         //! Watch the migration request set and migrate the first pending rank that becomes
         //! ready on this host. Returns the promoted epoch, or 0 if no request appears within

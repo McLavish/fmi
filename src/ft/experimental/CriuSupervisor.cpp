@@ -104,7 +104,7 @@ void FMI::FT::CriuSupervisor::wait_for_quiesce(std::uint64_t generation) const {
 void FMI::FT::CriuSupervisor::dump_rank(const CriuRankInfo& rank, std::uint64_t generation) const {
     auto rank_dir = fs::path(generation_dir(generation)) / ("rank-" + std::to_string(rank.rank));
     fs::create_directories(rank_dir);
-    run_criu({
+    FMI::FT::run_criu({
             "criu",
             "dump",
             "-t", std::to_string(rank.pid),
@@ -120,7 +120,7 @@ void FMI::FT::CriuSupervisor::restore_rank(const CriuRankInfo& rank, std::uint64
     if (!fs::exists(rank_dir)) {
         throw std::runtime_error("Missing CRIU image directory: " + rank_dir.string());
     }
-    run_criu({
+    FMI::FT::run_criu({
             "criu",
             "restore",
             "-D", rank_dir.string(),
@@ -128,8 +128,4 @@ void FMI::FT::CriuSupervisor::restore_rank(const CriuRankInfo& rank, std::uint64
             "--shell-job",
             "--restore-detached"
     });
-}
-
-void FMI::FT::CriuSupervisor::run_criu(const std::vector<std::string>& args) {
-    FMI::FT::run_criu(args);
 }

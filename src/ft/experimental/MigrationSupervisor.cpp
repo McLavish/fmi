@@ -46,7 +46,7 @@ void FMI::FT::MigrationSupervisor::ensure_migration_mode() const {
     }
 }
 
-std::uint64_t FMI::FT::MigrationSupervisor::migrate_rank(FMI::Utils::peer_num rank) {
+std::uint64_t FMI::FT::MigrationSupervisor::migrate_rank(FMI::Utils::peer_num rank) const {
     std::uint64_t current_epoch = coordinator->epoch();
     std::uint64_t target_epoch = current_epoch + 1;
 
@@ -77,6 +77,11 @@ std::uint64_t FMI::FT::MigrationSupervisor::watch_once() {
     // request_migration marks the targeted rank MIGRATION_PENDING (and it stays so until it
     // reaches its quiesce point and flips to QUIESCED). Either state means a migration of this
     // rank is in progress at the current epoch.
+    //
+    // This relies on a criu-configured comm only ever writing QUIESCED for a migration target:
+    // survivors block in wait_for_promotion_and_reconfigure (no state write) and the exit-based
+    // "none" path is unreachable under state_transfer="criu". If a future feature marks a rank
+    // QUIESCED for another reason, this scan would need to disambiguate.
     FMI::Utils::peer_num target = 0;
     bool found = FMI::Utils::poll_until([this, &target]() {
         for (const auto& entry : coordinator->directory_snapshot(coordinator->epoch())) {
