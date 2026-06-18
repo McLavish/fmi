@@ -29,10 +29,7 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         reconfigure_callback(std::move(reconfigure_callback)),
         prepare_for_checkpoint(std::move(prepare_for_checkpoint)) {
     if (config.state_transfer == "criu") {
-#ifndef FMI_ENABLE_CRIU
-        throw std::runtime_error(
-                "fault_tolerance.state_transfer=\"criu\" requires a build with FMI_ENABLE_CRIU=ON");
-#endif
+#ifdef FMI_ENABLE_CRIU
         // CRIU freezes the whole process image, so every data-plane channel the policy might
         // select must release its sockets before the dump. Only Direct overrides
         // prepare_for_checkpoint(); Redis/S3 channels would be captured with live sockets and
@@ -44,6 +41,10 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
                     "fault_tolerance.state_transfer=\"criu\" requires preferred_data_backend=\"Direct\" "
                     "(the only checkpoint-safe data backend); got \"" + config.preferred_data_backend + "\"");
         }
+#else
+        throw std::runtime_error(
+                "fault_tolerance.state_transfer=\"criu\" requires a build with FMI_ENABLE_CRIU=ON");
+#endif
     } else if (config.state_transfer != "none") {
         throw std::runtime_error("Unknown fault_tolerance.state_transfer: " + config.state_transfer);
     }
