@@ -105,7 +105,8 @@ fmi-migration-supervisor watch   <comm_name> <num_peers> <config>
 
 `migrate` performs one migration of an explicit rank; `watch` migrates the first rank marked via
 `request_migration`. Per-deployment criu flags can be injected with the `FMI_CRIU_EXTRA_ARGS`
-environment variable (e.g. `--unprivileged` for rootless criu).
+environment variable (e.g. `--unprivileged` for rootless criu). It is split on whitespace with
+no shell quoting, so individual flags must not contain spaces.
 
 #### Demo and runbook
 
@@ -119,6 +120,13 @@ environment variable (e.g. `--unprivileged` for rootless criu).
 - `Direct` is the only supported data backend; Redis is the control plane
 - one targeted rank per migration; no in-flight-collective preservation
 - no Python binding for the CRIU path (the demo is C++)
+- the supervisor is the migration authority and must complete `migrate_rank` (dump → restore →
+  `promote_epoch`). v1 has no supervisor-failure recovery: if it dies between restore and epoch
+  promotion, survivors eventually hit `reconfigure_timeout_ms` and fail. Run the supervisor under
+  process supervision for planned migrations.
+- `reconfigure_timeout_ms` (the survivor wait) must comfortably exceed the dump + restore time;
+  size it for your largest process image (the runbook uses 60 s). The migrated rank itself waits
+  unbounded across the checkpoint, so only survivors are exposed to this deadline.
 
 ## Triggering a migration
 

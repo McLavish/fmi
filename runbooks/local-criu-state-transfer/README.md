@@ -109,3 +109,8 @@ docker run --rm -it --privileged --name fmi-criu \
 - One targeted rank per migration; in-flight collectives are not preserved (migration happens
   only at operation boundaries).
 - No Python binding for the CRIU path (the demo is C++).
+- No supervisor-failure recovery: the supervisor must complete dump → restore →
+  `promote_epoch`. If it dies mid-migration, survivor ranks hit `reconfigure_timeout_ms` and
+  fail. `reconfigure_timeout_ms` must exceed the dump + restore time (this runbook uses 60 s).
+- `FMI_CRIU_EXTRA_ARGS` is split on whitespace with no quoting; individual flags must not
+  contain spaces.
