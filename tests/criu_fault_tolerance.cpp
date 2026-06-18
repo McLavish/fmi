@@ -1,6 +1,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "../include/fmi.h"
+#include "../include/ft/TransparentMigrationRuntime.h"
 #include "../include/ft/experimental/CriuRuntime.h"
 #include "../include/ft/experimental/MigrationSupervisor.h"
 
@@ -434,6 +435,31 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_ran
     coordinator.clear_criu_job_state();
     coordinator.clear_job_state();
     fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_direct_data_backend) {
+    // CRIU freezes the whole process image, so the data plane must be Direct — the only backend
+    // that releases its sockets in prepare_for_checkpoint(). The runtime must fail fast at
+    // construction if the data plane is pinned to anything else, rather than later dumping a
+    // process with live Redis/S3 sockets. No Redis needed: the check runs before the coordinator
+    // is touched, so a null coordinator is fine.
+    FMI::Utils::FaultToleranceConfig config;
+    config.enabled = true;
+    config.control_backend = "Redis";
+    config.state_transfer = "criu";
+
+    config.preferred_data_backend = "Redis";
+    BOOST_CHECK_THROW(
+            FMI::FT::TransparentMigrationRuntime(
+                    0, "worker", "", 0, config, nullptr, "comm",
+                    [](const std::string&) {}, []() {}),
+            std::runtime_error);
+
+    config.preferred_data_backend = "Direct";
+    BOOST_CHECK_NO_THROW(
+            FMI::FT::TransparentMigrationRuntime(
+                    0, "worker", "", 0, config, nullptr, "comm",
+                    [](const std::string&) {}, []() {}));
 }
 
 BOOST_AUTO_TEST_SUITE_END();

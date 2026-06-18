@@ -33,6 +33,17 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         throw std::runtime_error(
                 "fault_tolerance.state_transfer=\"criu\" requires a build with FMI_ENABLE_CRIU=ON");
 #endif
+        // CRIU freezes the whole process image, so every data-plane channel the policy might
+        // select must release its sockets before the dump. Only Direct overrides
+        // prepare_for_checkpoint(); Redis/S3 channels would be captured with live sockets and
+        // the image registry would falsely record "Direct". Pin the data plane to Direct so
+        // channel selection can never pick an unsupported backend (mirrors the whole-job CRIU
+        // path's CriuSupervisor::ensure_same_host_scope invariant).
+        if (config.preferred_data_backend != "Direct") {
+            throw std::runtime_error(
+                    "fault_tolerance.state_transfer=\"criu\" requires preferred_data_backend=\"Direct\" "
+                    "(the only checkpoint-safe data backend); got \"" + config.preferred_data_backend + "\"");
+        }
     } else if (config.state_transfer != "none") {
         throw std::runtime_error("Unknown fault_tolerance.state_transfer: " + config.state_transfer);
     }
@@ -74,8 +85,9 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
 #ifdef FMI_ENABLE_CRIU
     std::uint64_t target_epoch = active_epoch + 1;
     // Data backend name recorded in the CRIU image registry, and this host's identity for
-    // same-host scoping. Resolved here so non-CRIU migration pays for neither.
-    std::string backend_name = config.preferred_data_backend.empty() ? "Direct" : config.preferred_data_backend;
+    // same-host scoping. Resolved here so non-CRIU migration pays for neither. The constructor
+    // guarantees preferred_data_backend == "Direct" on this path, so it is recorded truthfully.
+    std::string backend_name = config.preferred_data_backend;
     std::string host_id = FMI::FT::resolve_host_id(config);
 
     // Permit the host-local supervisor's (non-parent) criu to ptrace-seize this process under

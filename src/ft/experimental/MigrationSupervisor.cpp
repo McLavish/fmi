@@ -51,6 +51,13 @@ void FMI::FT::MigrationSupervisor::ensure_migration_mode() const {
     if (config.state_transfer != "criu") {
         throw std::runtime_error("Migration supervisor requires fault_tolerance.state_transfer=\"criu\"");
     }
+    // Same invariant the rank enforces: CRIU can only dump/restore a process whose data plane
+    // is Direct (the sole backend that releases sockets before checkpoint). Refuse to drive a
+    // migration against a comm configured for any other data backend.
+    if (config.preferred_data_backend != "Direct") {
+        throw std::runtime_error(
+                "Migration supervisor requires preferred_data_backend=\"Direct\" for CRIU state transfer");
+    }
 }
 
 std::uint64_t FMI::FT::MigrationSupervisor::migrate_rank(FMI::Utils::peer_num rank) {
