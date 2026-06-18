@@ -9,9 +9,11 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -481,6 +483,115 @@ BOOST_AUTO_TEST_CASE(criu_coordinator_scopes_sigpipe_to_default_disposition) {
     }
 
     std::signal(SIGPIPE, original);
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigures_on_promote) {
+    // Cover the rank-side checkpoint_and_wait_for_restore sequence end to end, with no real
+    // criu: drive a real TransparentMigrationRuntime on a pending rank and assert it releases
+    // transport, publishes a restorable image entry (registered + QUIESCED for epoch N+1),
+    // marks its epoch state QUIESCED, and — once the supervisor would promote — re-registers as
+    // ACTIVE at N+1 and reconfigures its channels. The runtime's wait is unbounded, so it runs
+    // on a worker thread while the test plays the supervisor's role (promote_epoch).
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("rankside");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    std::string comm_name = unique_comm_name("rankside-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping rank-side checkpoint test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    auto config = FMI::Utils::Configuration(config_path.string()).get_fault_tolerance_config();
+    auto coordinator = std::make_shared<FMI::FT::Coordinator>(config_path.string(), comm_name, 2);
+    coordinator->clear_criu_job_state();
+    coordinator->clear_job_state();
+    coordinator->request_migration(0);  // rank 0 becomes the migration target at epoch 0
+
+    std::atomic<bool> prepared{false};
+    std::atomic<bool> reconfigured{false};
+    std::mutex name_mutex;
+    std::string reconfigured_name;
+
+    FMI::FT::TransparentMigrationRuntime runtime(
+            0, "worker-0", "", 0, config, coordinator, comm_name,
+            [&](const std::string& new_name) {
+                {
+                    std::lock_guard<std::mutex> lock(name_mutex);
+                    reconfigured_name = new_name;
+                }
+                reconfigured = true;
+            },
+            [&]() { prepared = true; });
+
+    std::exception_ptr worker_error;
+    std::thread worker([&]() {
+        try {
+            runtime.enter_operation();
+        } catch (...) {
+            worker_error = std::current_exception();
+        }
+    });
+
+    auto poll = [](auto&& predicate) {
+        for (int i = 0; i < 300; ++i) {
+            if (predicate()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    };
+
+    // The rank publishes a checkpoint-ready image entry for epoch N+1 (= 1).
+    bool image_ready = poll([&]() {
+        for (const auto& info : coordinator->criu_rank_info()) {
+            if (info.rank == 0 && info.state == FMI::FT::CriuRankState::Quiesced &&
+                info.quiesced_generation == 1 && info.pid > 0) {
+                return true;
+            }
+        }
+        return false;
+    });
+    BOOST_CHECK(image_ready);
+    // Transport was released and the epoch-N state was marked QUIESCED before the wait.
+    BOOST_CHECK(prepared.load());
+    bool state_quiesced = false;
+    for (const auto& entry : coordinator->directory_snapshot(0)) {
+        if (entry.rank == 0 && entry.state == FMI::FT::RankState::Quiesced) {
+            state_quiesced = true;
+        }
+    }
+    BOOST_CHECK(state_quiesced);
+    // The rank does not advance the epoch itself; it blocks until the supervisor promotes.
+    BOOST_CHECK_EQUAL(coordinator->epoch(), 0U);
+    BOOST_CHECK(!reconfigured.load());
+
+    // Play the supervisor: promote to epoch 1. The restored rank resumes in its wait loop.
+    coordinator->promote_epoch(1);
+    bool did_reconfigure = poll([&]() { return reconfigured.load(); });
+    worker.join();
+
+    if (worker_error) {
+        std::rethrow_exception(worker_error);
+    }
+    BOOST_CHECK(did_reconfigure);
+    {
+        std::lock_guard<std::mutex> lock(name_mutex);
+        BOOST_CHECK_EQUAL(reconfigured_name, comm_name + "@epoch=1");
+    }
+    // The rank rejoined as ACTIVE under the new epoch.
+    bool active_at_epoch1 = false;
+    for (const auto& entry : coordinator->directory_snapshot(1)) {
+        if (entry.rank == 0 && entry.state == FMI::FT::RankState::Active) {
+            active_at_epoch1 = true;
+        }
+    }
+    BOOST_CHECK(active_at_epoch1);
+
+    coordinator->clear_criu_job_state();
+    coordinator->clear_job_state();
     fs::remove_all(temp_dir);
 }
 
