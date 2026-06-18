@@ -49,7 +49,8 @@ namespace {
             coordinator.clear_criu_job_state();
             coordinator.clear_job_state();
             return true;
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+            BOOST_TEST_MESSAGE(std::string("redis_available exception: ") + e.what());
             return false;
         }
     }
@@ -88,6 +89,10 @@ namespace {
                                const std::string& host_id,
                                bool enable_direct,
                                bool enable_data_redis) {
+        // ofstream does not create missing parent directories; without this the config file is
+        // never written, redis_available() throws "cannot open file", and the test silently
+        // skips (skip == no assertions == green) — masking real coverage gaps.
+        fs::create_directories(config_path.parent_path());
         std::ofstream out(config_path);
         out << "{\n"
                "  \"backends\": {\n"
@@ -200,6 +205,17 @@ namespace {
                "      ;;\n"
                "  esac\n"
                "done\n"
+               // Optional ordering gate: when FMI_MOCK_GATE_MODE matches this invocation, signal
+               // "entered" and block (bounded) until the test drops a "proceed" file. Lets a test
+               // freeze the supervisor mid-step to observe the dump<restore<promote ordering.
+               "gate_mode=\"${FMI_MOCK_GATE_MODE:-}\"\n"
+               "gate_dir=\"${FMI_MOCK_GATE_DIR:-}\"\n"
+               "if [ -n \"$gate_mode\" ] && [ \"$mode\" = \"$gate_mode\" ] && [ -n \"$gate_dir\" ]; then\n"
+               "  mkdir -p \"$gate_dir\"\n"
+               "  touch \"$gate_dir/entered\"\n"
+               "  n=0\n"
+               "  while [ ! -e \"$gate_dir/proceed\" ] && [ \"$n\" -lt 1000 ]; do sleep 0.05; n=$((n+1)); done\n"
+               "fi\n"
                "mkdir -p \"$dir\"\n"
                "echo \"$mode\" > \"$dir/$mode.marker\"\n"
                "if [ -n \"$log\" ]; then\n"
@@ -486,6 +502,88 @@ BOOST_AUTO_TEST_CASE(criu_coordinator_scopes_sigpipe_to_default_disposition) {
     fs::remove_all(temp_dir);
 }
 
+BOOST_AUTO_TEST_CASE(migration_supervisor_promotes_epoch_only_after_dump_and_restore) {
+    // "Promote last" is the core epoch-fencing invariant: survivors must not reconfigure to
+    // N+1 while the migrated rank is still at N. Asserting only the final state cannot catch a
+    // promote->dump->restore reordering. Freeze the mock criu mid-restore and assert the
+    // ordering directly: dump already done, restore not yet, epoch still N — promotion only
+    // lands after restore completes.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("ordering");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("ordering-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping ordering test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+
+    auto host_id = current_host_id();
+    const int target_pid = 4242;
+    coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
+    coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
+
+    // Freeze the mock criu when it reaches the restore step.
+    auto gate_dir = temp_dir / "gate";
+    setenv("FMI_MOCK_GATE_MODE", "restore", 1);
+    setenv("FMI_MOCK_GATE_DIR", gate_dir.string().c_str(), 1);
+
+    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
+    std::exception_ptr worker_error;
+    std::uint64_t promoted = 0;
+    std::thread worker([&]() {
+        try {
+            promoted = supervisor.migrate_rank(0);
+        } catch (...) {
+            worker_error = std::current_exception();
+        }
+    });
+
+    auto poll = [](auto&& predicate) {
+        for (int i = 0; i < 1000; ++i) {
+            if (predicate()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    };
+
+    bool restore_in_progress = poll([&]() { return fs::exists(gate_dir / "entered"); });
+    BOOST_CHECK(restore_in_progress);
+
+    auto rank0_dir = images_dir / comm_name / "epoch-1" / "rank-0";
+    // At this instant: dump completed, restore mid-flight, epoch not yet promoted.
+    BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
+    BOOST_CHECK(!fs::exists(rank0_dir / "restore.marker"));
+    BOOST_CHECK_EQUAL(coordinator.epoch(), 0U);
+
+    // Let restore finish; promotion must come strictly after it.
+    std::ofstream(gate_dir / "proceed").put('x');
+    worker.join();
+    if (worker_error) {
+        std::rethrow_exception(worker_error);
+    }
+
+    BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
+    BOOST_CHECK_EQUAL(promoted, 1U);
+    BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
+
+    unsetenv("FMI_MOCK_GATE_MODE");
+    unsetenv("FMI_MOCK_GATE_DIR");
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigures_on_promote) {
     // Cover the rank-side checkpoint_and_wait_for_restore sequence end to end, with no real
     // criu: drive a real TransparentMigrationRuntime on a pending rank and assert it releases
@@ -555,16 +653,12 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
         return false;
     });
     BOOST_CHECK(image_ready);
-    // Transport was released and the epoch-N state was marked QUIESCED before the wait.
+    // Transport was released before the image entry was published.
     BOOST_CHECK(prepared.load());
-    bool state_quiesced = false;
-    for (const auto& entry : coordinator->directory_snapshot(0)) {
-        if (entry.rank == 0 && entry.state == FMI::FT::RankState::Quiesced) {
-            state_quiesced = true;
-        }
-    }
-    BOOST_CHECK(state_quiesced);
     // The rank does not advance the epoch itself; it blocks until the supervisor promotes.
+    // (The epoch-N QUIESCED state write is not asserted here: directory_snapshot only returns
+    // registered members, and this rank joins membership at N+1 — the criu supervisor's quiesce
+    // signal is the CRIU registry entry checked above, not the old epoch's state hash.)
     BOOST_CHECK_EQUAL(coordinator->epoch(), 0U);
     BOOST_CHECK(!reconfigured.load());
 
