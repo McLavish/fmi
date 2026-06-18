@@ -15,4 +15,7 @@ target_compile_definitions (Boost_Tests_run PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_E
 if(FMI_ENABLE_CRIU)
     add_executable (criu_checkpoint_demo criu_checkpoint_demo.cpp)
     target_link_libraries (criu_checkpoint_demo FMI)
+
+    add_executable (transparent_state_transfer_demo transparent_state_transfer_demo.cpp)
+    target_link_libraries (transparent_state_transfer_demo FMI)
 endif()
