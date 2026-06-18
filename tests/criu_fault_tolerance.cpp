@@ -714,4 +714,53 @@ BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_direct_data_backend) {
                     [](const std::string&) {}, []() {}));
 }
 
+BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
+    // watch_once's unique job is candidate selection: scan the rank directory for a rank in
+    // MigrationPending/Quiesced and migrate the first one. directory_snapshot only returns
+    // registered members, so register a rank the supported way (construct a Communicator — no
+    // collective is issued, so no rendezvous is needed), mark it for migration, and assert
+    // watch_once discovers and migrates exactly that rank.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("watch");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("watch-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping watch_once test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+
+    // Rank 0 joins the directory as an ACTIVE member at epoch 0.
+    FMI::Communicator rank0(0, 2, config_path.string(), comm_name, 128, "worker-0");
+
+    // Mark it for migration and publish its checkpoint-ready image for epoch 1.
+    coordinator.request_migration(0);
+    auto host_id = current_host_id();
+    const int target_pid = 4242;
+    coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
+    coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
+
+    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
+    auto promoted = supervisor.watch_once();
+
+    BOOST_CHECK_EQUAL(promoted, 1U);
+    BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
+    // The migrated rank was rank 0 specifically: its single-rank image dir was produced.
+    auto rank0_dir = images_dir / comm_name / "epoch-1" / "rank-0";
+    BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
+    BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
+
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_SUITE_END();
