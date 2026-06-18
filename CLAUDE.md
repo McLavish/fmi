@@ -158,16 +158,21 @@ fault tolerance layered around the user API.
   as the control plane and `Direct`/TCP as the preferred data plane. `FMI::FT::Coordinator`
   tracks epochs, membership, placement, and migration state in Redis; migration is triggered
   externally via `request_migration()`. `TransparentMigrationRuntime` checks for migration at
-  `OperationGuard` boundaries. The targeted rank marks itself `QUIESCED` and exits, a
-  replacement rejoins with the same logical rank at epoch N+1, and surviving ranks rebuild
-  channels under the new epoch-qualified communicator name. **Application-state continuity is
-  not implemented yet**; the outgoing channel-release hook and the replacement/reconfigure
-  points are the documented seam for future CRIU-backed checkpoint/restore.
-  - **Experimental CRIU** — `FMI_ENABLE_CRIU=ON` builds `include/ft/experimental/` and
-    `src/ft/experimental/` plus the `fmi-criu-supervisor` CLI, CRIU tests, and
-    `criu_checkpoint_demo`. This code is quarantined WIP raw material for future state
-    transfer, not a second FT mode. It still contains reusable dump/restore and Redis
-    generation-tracking code.
+  `OperationGuard` boundaries. The targeted rank marks itself `QUIESCED`, a replacement takes
+  over the same logical rank at epoch N+1, and surviving ranks rebuild channels under the new
+  epoch-qualified communicator name. **Application-state continuity** is selected by
+  `fault_tolerance.state_transfer` (a mechanism toggle within the one protocol, not a second
+  mode): `"none"` (default) — the rank exits and a fresh replacement recomputes; `"criu"`
+  (same-host v1, needs `FMI_ENABLE_CRIU=ON`) — the rank's process image is CRIU
+  checkpointed/restored so memory is preserved transparently. The CRIU path is driven by the
+  host-local `MigrationSupervisor` (`fmi-migration-supervisor`), reuses the
+  `prepare_channels_for_checkpoint` hook + the survivor reconfigure path, and is verified in
+  `runbooks/local-criu-state-transfer/` (rootless criu) with `tests/transparent_state_transfer_demo.cpp`.
+  - **Experimental whole-job CRIU** — `FMI_ENABLE_CRIU=ON` also builds the separate whole-job
+    rollback path: `FMI::FT::CriuRuntime`, the `fmi-criu-supervisor` CLI, and
+    `criu_checkpoint_demo`. It dumps/restores *all* ranks together to one generation (no epoch
+    change) and is quarantined WIP, distinct from the single-rank `state_transfer="criu"`
+    migration above. Shared criu-invocation code lives in `ft/experimental/CriuExec`.
   - **Epoch fencing invariant** (`PLANS.md`): under FT, every backend-visible name —
     `Direct` pairing names, `Redis`/`S3` object names, per-instance operation counters — is
     epoch-qualified, so stale messages/objects from an old epoch can never be consumed after

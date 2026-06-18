@@ -10,7 +10,9 @@ Chosen semantics:
 - migration is triggered externally
 - cutover happens at FMI operation boundaries via `Communicator`'s `OperationGuard`
 - in-flight collectives are not preserved
-- application-state continuity is not implemented yet; CRIU is the planned future mechanism
+- application-state continuity is available via CRIU same-host state transfer
+  (`fault_tolerance.state_transfer="criu"`); the default (`"none"`) still discards state and
+  relies on a recomputing replacement
 - `Redis` is used for FT membership, epochs, leases, and migration state
 - `Direct` is the preferred/default FMI transport for rank-to-rank communication
 - `Redis` remains available as an alternate data backend, but not the default
@@ -79,12 +81,16 @@ On epoch change:
 
 This is required to prevent stale messages or objects from leaking across migration.
 
-Application state continuity today: none. Transparent migration only fences and rebuilds
-communication. The outgoing rank's channel-release hook (`prepare_channels_for_checkpoint`)
-and the replacement/reconfigure points are the documented seam for future CRIU-backed state
-transfer: checkpoint before the outgoing rank exits, then restore before epoch `N+1` user
-work resumes. No `CheckpointStrategy` abstraction exists yet because there is no integrated
-state-transfer implementation.
+Application state continuity depends on `fault_tolerance.state_transfer`:
+
+- `"none"` (default): transparent migration only fences and rebuilds communication; the
+  targeted rank exits and a fresh replacement recomputes.
+- `"criu"` (same-host v1, requires `FMI_ENABLE_CRIU=ON`): the documented seam is now
+  implemented. The outgoing rank's channel-release hook (`prepare_channels_for_checkpoint`) runs
+  at the quiesce point, and a host-local `MigrationSupervisor` (`fmi-migration-supervisor`)
+  `criu dump`s the process before it leaves and `criu restore`s it before epoch `N+1` user work
+  resumes — so process memory is preserved with no application checkpoint code. See
+  `docs/fault-tolerance.md` and `runbooks/local-criu-state-transfer/`.
 
 ### 5. Define the migration state machine
 
@@ -99,8 +105,12 @@ Flow:
 
 1. external daemon marks logical rank `r` as `MIGRATION_PENDING`
 2. ranks observe the request at the next FMI operation boundary
-3. rank `r` marks itself `QUIESCED` and exits; future CRIU integration checkpoints application state before this exit
-4. replacement worker starts with the same logical rank `r`, registers into epoch `N+1`, and will eventually restore checkpointed state at this join point
+3. rank `r` marks itself `QUIESCED`. With `state_transfer="none"` it exits; with
+   `state_transfer="criu"` it instead publishes a restorable image entry and blocks while the
+   supervisor checkpoints its process state.
+4. the replacement takes over logical rank `r` at epoch `N+1`: with `"none"` a fresh worker
+   registers and recomputes; with `"criu"` the supervisor restores the checkpointed process
+   image, which resumes with its memory intact
 5. once the orchestrator promotes epoch `N+1`, surviving communicators rebuild channels and resume
 
 V1 defers any migration request that arrives while a rank is inside an FMI operation until the next operation boundary.
