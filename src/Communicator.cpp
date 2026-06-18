@@ -80,7 +80,8 @@ namespace FMI {
             operation_runtime = std::make_shared<FMI::FT::TransparentMigrationRuntime>(
                     peer_id, resolved_worker_id, placement, active_epoch,
                     ft_config, coordinator, comm_name,
-                    [this](const std::string& new_name) { reconfigure_to_epoch(new_name); });
+                    [this](const std::string& new_name) { reconfigure_to_epoch(new_name); },
+                    [this]() { prepare_channels_for_checkpoint(); });
         } else {
             this->comm_name = comm_name;
             build_channels(this->comm_name);

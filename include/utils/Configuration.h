@@ -17,8 +17,20 @@ namespace FMI::Utils {
         unsigned int reconfigure_timeout_ms = 10000;
         std::string preferred_data_backend;
 
-        // Experimental CRIU settings. Parsed for the opt-in CRIU code path only; transparent
-        // migration currently does not checkpoint or restore application state.
+        // Selects how a migrated rank's application state is handled at the migration quiesce
+        // point. This is NOT a second FT protocol: transparent migration remains the single
+        // protocol and the epoch-cut semantics are unchanged. It only chooses what happens to
+        // the targeted rank's in-memory state:
+        //   "none" (default) - the rank exits and a fresh replacement recomputes from scratch.
+        //   "criu"           - the rank's process image is checkpointed and restored (same-host
+        //                      v1), preserving application memory transparently. Requires a
+        //                      build with FMI_ENABLE_CRIU=ON.
+        std::string state_transfer = "none";
+
+        // CRIU settings. Used by the CRIU-backed state-transfer path (state_transfer="criu")
+        // and by the experimental whole-job CRIU code. images_dir/poll_ms/quiesce_timeout_ms
+        // govern checkpoint image placement and the quiesce handshake; host_id overrides the
+        // detected hostname for same-host scoping.
         std::string images_dir = "/tmp/fmi-criu-images";
         unsigned int poll_ms = 100;
         unsigned int quiesce_timeout_ms = 10000;
