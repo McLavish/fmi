@@ -29,7 +29,10 @@ namespace FMI::Utils {
             if (timeout_ms != 0) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - start).count();
-                if (static_cast<unsigned int>(elapsed) >= timeout_ms) {
+                // Compare in the signed millisecond domain: elapsed is monotonic (>= 0) and the
+                // widening cast of timeout_ms is exact, so this avoids the truncating
+                // unsigned cast that would wrap past ~49.7 days.
+                if (elapsed >= static_cast<decltype(elapsed)>(timeout_ms)) {
                     return false;
                 }
             }
