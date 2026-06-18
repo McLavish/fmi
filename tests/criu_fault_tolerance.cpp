@@ -763,4 +763,40 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     fs::remove_all(temp_dir);
 }
 
+BOOST_AUTO_TEST_CASE(migration_supervisor_cleanup_removes_images_and_state) {
+    // Repeated migrations accumulate per-epoch image trees; cleanup() must reclaim them and clear
+    // the CRIU control-plane state (the supervisor previously had no cleanup path at all).
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("cleanup");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    std::string comm_name = unique_comm_name("cleanup-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping cleanup test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+
+    // Residue from a prior migration: an image tree plus a CRIU registry entry.
+    auto comm_images = images_dir / comm_name;
+    fs::create_directories(comm_images / "epoch-1" / "rank-0");
+    std::ofstream(comm_images / "epoch-1" / "rank-0" / "dump.marker").put('x');
+    coordinator.criu_register_rank(0, 4242, current_host_id(), "Direct");
+    BOOST_CHECK(fs::exists(comm_images));
+    BOOST_CHECK(!coordinator.criu_rank_info().empty());
+
+    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
+    supervisor.cleanup();
+
+    BOOST_CHECK(!fs::exists(comm_images));
+    BOOST_CHECK(coordinator.criu_rank_info().empty());
+
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_SUITE_END();

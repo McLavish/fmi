@@ -11,9 +11,12 @@
 //
 //   fmi-migration-supervisor watch <comm_name> <num_peers> <config>
 //       Wait for any rank to be marked for migration (request_migration) and migrate it.
+//
+//   fmi-migration-supervisor cleanup <comm_name> <num_peers> <config>
+//       Remove this communicator's CRIU image tree and clear its CRIU control-plane state.
 int main(int argc, char** argv) {
     if (argc < 5) {
-        std::cerr << "usage: fmi-migration-supervisor <migrate|watch> <comm_name> <num_peers> <config> [rank]"
+        std::cerr << "usage: fmi-migration-supervisor <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]"
                   << std::endl;
         return 1;
     }
@@ -43,6 +46,11 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::cout << "promoted_epoch=" << epoch << std::endl;
+            return 0;
+        }
+        if (command == "cleanup") {
+            supervisor.cleanup();
+            std::cout << "cleaned_up=" << comm_name << std::endl;
             return 0;
         }
 
