@@ -2,6 +2,7 @@
 
 #include "../include/fmi.h"
 #include "../include/ft/experimental/CriuRuntime.h"
+#include "../include/ft/experimental/MigrationSupervisor.h"
 
 #include <atomic>
 #include <chrono>
@@ -126,6 +127,7 @@ namespace {
                "    \"poll_interval_ms\": 25,\n"
                "    \"reconfigure_timeout_ms\": 250,\n"
                "    \"preferred_data_backend\": \"Direct\",\n"
+               "    \"state_transfer\": \"criu\",\n"
             << "    \"images_dir\": \"" << images_dir.string() << "\",\n"
                "    \"poll_ms\": 25,\n"
                "    \"quiesce_timeout_ms\": 2000,\n"
@@ -377,6 +379,59 @@ BOOST_AUTO_TEST_CASE(supervisor_uses_mock_criu_for_checkpoint_and_restore) {
     BOOST_CHECK(!fs::exists(images_dir / comm_name));
     BOOST_CHECK(coordinator.criu_rank_info().empty());
 
+    coordinator.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_rank) {
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("migration-supervisor");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("migration-supervisor-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping migration supervisor test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
+    coordinator.clear_criu_job_state();
+    coordinator.clear_job_state();
+
+    auto host_id = current_host_id();
+    BOOST_CHECK_EQUAL(coordinator.epoch(), 0U);
+
+    // Simulate the targeted rank reaching its CRIU quiesce point: publish a restorable image
+    // entry (pid + host + QUIESCED) for the target epoch (current epoch + 1 = 1).
+    const int target_pid = 4242;
+    coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
+    coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
+
+    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
+    auto promoted_epoch = supervisor.migrate_rank(0);
+
+    BOOST_CHECK_EQUAL(promoted_epoch, 1U);
+    BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
+
+    // The supervisor invoked mock criu dump + restore against the single-rank image dir.
+    auto rank0_dir = images_dir / comm_name / "epoch-1" / "rank-0";
+    BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
+    BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
+
+    // The checkpoint-ready marker is cleared so a watch loop does not re-trigger.
+    bool rank0_running = false;
+    for (const auto& info : coordinator.criu_rank_info()) {
+        if (info.rank == 0) {
+            rank0_running = info.state == FMI::FT::CriuRankState::Running;
+        }
+    }
+    BOOST_CHECK(rank0_running);
+
+    coordinator.clear_criu_job_state();
     coordinator.clear_job_state();
     fs::remove_all(temp_dir);
 }
