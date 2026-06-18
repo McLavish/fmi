@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <thread>

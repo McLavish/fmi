@@ -1,5 +1,4 @@
 #include "../../include/ft/TransparentMigrationRuntime.h"
-#include "../../include/ft/experimental/HostId.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -8,14 +7,9 @@
 
 #include <unistd.h>
 #ifdef FMI_ENABLE_CRIU
+#include "../../include/ft/experimental/HostId.h"
 #include <sys/prctl.h>
 #endif
-
-namespace {
-    std::string resolve_backend_name(const FMI::Utils::FaultToleranceConfig& config) {
-        return config.preferred_data_backend.empty() ? "Direct" : config.preferred_data_backend;
-    }
-}
 
 FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         FMI::Utils::peer_num peer_id,
@@ -36,9 +30,7 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         base_comm_name(std::move(base_comm_name)),
         reconfigure_callback(std::move(reconfigure_callback)),
         prepare_for_checkpoint(std::move(prepare_for_checkpoint)),
-        state_transfer(config.state_transfer),
-        backend_name(resolve_backend_name(config)),
-        host_id(FMI::FT::resolve_host_id(config)) {
+        state_transfer(config.state_transfer) {
     if (state_transfer == "criu") {
 #ifndef FMI_ENABLE_CRIU
         throw std::runtime_error(
@@ -84,6 +76,10 @@ void FMI::FT::TransparentMigrationRuntime::exit_operation() {
 void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
 #ifdef FMI_ENABLE_CRIU
     std::uint64_t target_epoch = active_epoch + 1;
+    // Data backend name recorded in the CRIU image registry, and this host's identity for
+    // same-host scoping. Resolved here so non-CRIU migration pays for neither.
+    std::string backend_name = config.preferred_data_backend.empty() ? "Direct" : config.preferred_data_backend;
+    std::string host_id = FMI::FT::resolve_host_id(config);
 
     // Permit the host-local supervisor's (non-parent) criu to ptrace-seize this process under
     // yama ptrace_scope=1. Best-effort: harmlessly fails where YAMA is not present.
