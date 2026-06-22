@@ -78,7 +78,7 @@ Fault-tolerance examples are documented in [docs/fault-tolerance.md](docs/fault-
 
 - epoch-based transparent rank migration with a plain `FMI::Communicator`
 - optional CRIU single-rank state transfer (`state_transfer="criu"`) that preserves the
-  migrated rank's memory, driven by the `fmi-migration-supervisor` CLI
+  migrated rank's memory, driven by the `fmi-rank-agent` CLI
 
 ## Documentation
 

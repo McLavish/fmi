@@ -2,7 +2,7 @@
 
 #include "../include/fmi.h"
 #include "../include/ft/TransparentMigrationRuntime.h"
-#include "../include/ft/experimental/MigrationSupervisor.h"
+#include "../include/ft/experimental/LocalRankAgent.h"
 
 #include <atomic>
 #include <chrono>
@@ -233,7 +233,7 @@ namespace {
                "done\n"
                // Optional ordering gate: when FMI_MOCK_GATE_MODE matches this invocation, signal
                // "entered" and block (bounded) until the test drops a "proceed" file. Lets a test
-               // freeze the supervisor mid-step to observe the dump<restore<promote ordering.
+               // freeze the agent mid-step to observe the dump<restore<promote ordering.
                "gate_mode=\"${FMI_MOCK_GATE_MODE:-}\"\n"
                "gate_dir=\"${FMI_MOCK_GATE_DIR:-}\"\n"
                "if [ -n \"$gate_mode\" ] && [ \"$mode\" = \"$gate_mode\" ] && [ -n \"$gate_dir\" ]; then\n"
@@ -260,16 +260,16 @@ namespace {
 
 BOOST_AUTO_TEST_SUITE(CriuFaultTolerance);
 
-BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_rank) {
-    auto temp_dir = fs::temp_directory_path() / unique_comm_name("migration-supervisor");
+BOOST_AUTO_TEST_CASE(rank_agent_dumps_restores_and_promotes_single_rank) {
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("rank-agent");
     auto images_dir = temp_dir / "images";
     auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
     auto mock_bin_dir = temp_dir / "bin";
     write_mock_criu(mock_bin_dir);
 
-    std::string comm_name = unique_comm_name("migration-supervisor-job");
+    std::string comm_name = unique_comm_name("rank-agent-job");
     if (!redis_available(config_path.string(), comm_name, 2)) {
-        BOOST_TEST_MESSAGE("Skipping migration supervisor test because Redis is unavailable");
+        BOOST_TEST_MESSAGE("Skipping rank agent test because Redis is unavailable");
         fs::remove_all(temp_dir);
         return;
     }
@@ -288,13 +288,13 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_ran
     coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
     coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
 
-    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
-    auto promoted_epoch = supervisor.migrate_rank(0);
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    auto promoted_epoch = agent.migrate_rank(0);
 
     BOOST_CHECK_EQUAL(promoted_epoch, 1U);
     BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
 
-    // The supervisor invoked mock criu dump + restore against the single-rank image dir.
+    // The agent invoked mock criu dump + restore against the single-rank image dir.
     auto rank0_dir = images_dir / comm_name / "epoch-1" / "rank-0";
     BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
     BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
@@ -348,7 +348,7 @@ BOOST_AUTO_TEST_CASE(criu_coordinator_scopes_sigpipe_to_default_disposition) {
     fs::remove_all(temp_dir);
 }
 
-BOOST_AUTO_TEST_CASE(migration_supervisor_promotes_epoch_only_after_dump_and_restore) {
+BOOST_AUTO_TEST_CASE(rank_agent_promotes_epoch_only_after_dump_and_restore) {
     // "Promote last" is the core epoch-fencing invariant: survivors must not reconfigure to
     // N+1 while the migrated rank is still at N. Asserting only the final state cannot catch a
     // promote->dump->restore reordering. Freeze the mock criu mid-restore and assert the
@@ -382,12 +382,12 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_promotes_epoch_only_after_dump_and_res
     setenv("FMI_MOCK_GATE_MODE", "restore", 1);
     setenv("FMI_MOCK_GATE_DIR", gate_dir.string().c_str(), 1);
 
-    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
     std::exception_ptr worker_error;
     std::uint64_t promoted = 0;
     std::thread worker([&]() {
         try {
-            promoted = supervisor.migrate_rank(0);
+            promoted = agent.migrate_rank(0);
         } catch (...) {
             worker_error = std::current_exception();
         }
@@ -434,9 +434,9 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     // Cover the rank-side checkpoint_and_wait_for_restore sequence end to end, with no real
     // criu: drive a real TransparentMigrationRuntime on a pending rank and assert it releases
     // transport, publishes a restorable image entry (registered + QUIESCED for epoch N+1),
-    // marks its epoch state QUIESCED, and — once the supervisor would promote — re-registers as
+    // marks its epoch state QUIESCED, and — once the agent would promote — re-registers as
     // ACTIVE at N+1 and reconfigures its channels. The runtime's wait is unbounded, so it runs
-    // on a worker thread while the test plays the supervisor's role (promote_epoch).
+    // on a worker thread while the test plays the agent's role (promote_epoch).
     auto temp_dir = fs::temp_directory_path() / unique_comm_name("rankside");
     auto images_dir = temp_dir / "images";
     auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
@@ -501,14 +501,14 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     BOOST_CHECK(image_ready);
     // Transport was released before the image entry was published.
     BOOST_CHECK(prepared.load());
-    // The rank does not advance the epoch itself; it blocks until the supervisor promotes.
+    // The rank does not advance the epoch itself; it blocks until the agent promotes.
     // (The epoch-N QUIESCED state write is not asserted here: directory_snapshot only returns
-    // registered members, and this rank joins membership at N+1 — the criu supervisor's quiesce
+    // registered members, and this rank joins membership at N+1 — the rank agent's quiesce
     // signal is the CRIU registry entry checked above, not the old epoch's state hash.)
     BOOST_CHECK_EQUAL(coordinator->epoch(), 0U);
     BOOST_CHECK(!reconfigured.load());
 
-    // Play the supervisor: promote to epoch 1. The restored rank resumes in its wait loop.
+    // Play the agent: promote to epoch 1. The restored rank resumes in its wait loop.
     coordinator->promote_epoch(1);
     bool did_reconfigure = poll([&]() { return reconfigured.load(); });
     worker.join();
@@ -594,8 +594,8 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
     coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
 
-    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
-    auto promoted = supervisor.watch_once();
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    auto promoted = agent.watch_once();
 
     BOOST_CHECK_EQUAL(promoted, 1U);
     BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
@@ -609,9 +609,9 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     fs::remove_all(temp_dir);
 }
 
-BOOST_AUTO_TEST_CASE(migration_supervisor_cleanup_removes_images_and_state) {
+BOOST_AUTO_TEST_CASE(rank_agent_cleanup_removes_images_and_state) {
     // Repeated migrations accumulate per-epoch image trees; cleanup() must reclaim them and clear
-    // the CRIU control-plane state (the supervisor previously had no cleanup path at all).
+    // the CRIU control-plane state (the agent previously had no cleanup path at all).
     auto temp_dir = fs::temp_directory_path() / unique_comm_name("cleanup");
     auto images_dir = temp_dir / "images";
     auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
@@ -634,8 +634,8 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_cleanup_removes_images_and_state) {
     BOOST_CHECK(fs::exists(comm_images));
     BOOST_CHECK(!coordinator.criu_rank_info().empty());
 
-    FMI::FT::MigrationSupervisor supervisor(config_path.string(), comm_name, 2);
-    supervisor.cleanup();
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    agent.cleanup();
 
     BOOST_CHECK(!fs::exists(comm_images));
     BOOST_CHECK(coordinator.criu_rank_info().empty());

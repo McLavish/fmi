@@ -124,7 +124,7 @@ struct FMI::FT::Coordinator::Impl {
             if (previous != SIG_DFL && previous != SIG_ERR) {
                 std::signal(SIGPIPE, previous);
             }
-            // This also arms SIG_IGN in the supervisor/orchestrator processes (which construct a
+            // This also arms SIG_IGN in the rank-agent/orchestrator processes (which construct a
             // Coordinator from the same criu config) even though only the restored rank is
             // --tcp-closed; the over-arming is harmless (those processes do not rely on the
             // default disposition). The disposition is intentionally not restored on destruction:

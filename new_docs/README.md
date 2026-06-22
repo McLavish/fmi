@@ -17,7 +17,7 @@ mechanism toggle for application-state continuity:
   in-memory state: `"none"` (default) exits the rank and a fresh replacement
   recomputes; `"criu"` (same-host v1, `FMI_ENABLE_CRIU=ON`) checkpoints and
   restores the rank's process image so memory survives, driven by the host-local
-  migration supervisor.
+  rank agent.
 
 The old cooperative `Session` / `safe_point()` model is not part of the current
 code path. The `Event` enum still exists in `include/ft/Common.h`, and some old
@@ -46,7 +46,7 @@ docs and runbooks still mention `FTSession`, but no `Session` class or
 - `include/ft/Coordinator.h` and `src/ft/Coordinator.cpp`
 - `include/ft/TransparentMigrationRuntime.h` and
   `src/ft/TransparentMigrationRuntime.cpp`
-- `include/ft/experimental/MigrationSupervisor.h` and
-  `src/ft/experimental/MigrationSupervisor.cpp`
-- `tools/migration_supervisor.cpp`
+- `include/ft/experimental/LocalRankAgent.h` and
+  `src/ft/experimental/LocalRankAgent.cpp`
+- `tools/rank_agent.cpp`
 - `python/PythonFT.cpp` and `python/fmi_python.cpp`

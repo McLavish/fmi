@@ -1,4 +1,4 @@
-#include "../../../include/ft/experimental/MigrationSupervisor.h"
+#include "../../../include/ft/experimental/LocalRankAgent.h"
 #include "../../../include/ft/experimental/CriuExec.h"
 #include "../../../include/ft/experimental/HostId.h"
 #include "../../../include/utils/Configuration.h"
@@ -9,7 +9,7 @@
 
 namespace fs = std::filesystem;
 
-FMI::FT::MigrationSupervisor::MigrationSupervisor(std::string config_path, std::string comm_name,
+FMI::FT::LocalRankAgent::LocalRankAgent(std::string config_path, std::string comm_name,
                                                  FMI::Utils::peer_num num_peers) :
         config_path(std::move(config_path)),
         comm_name(std::move(comm_name)),
@@ -22,26 +22,26 @@ FMI::FT::MigrationSupervisor::MigrationSupervisor(std::string config_path, std::
     coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);
 }
 
-void FMI::FT::MigrationSupervisor::ensure_migration_mode() const {
+void FMI::FT::LocalRankAgent::ensure_migration_mode() const {
     if (!config.enabled) {
-        throw std::runtime_error("Migration supervisor requires fault tolerance to be enabled");
+        throw std::runtime_error("Rank agent requires fault tolerance to be enabled");
     }
     if (config.control_backend != "Redis") {
-        throw std::runtime_error("Migration supervisor requires Redis as the control backend");
+        throw std::runtime_error("Rank agent requires Redis as the control backend");
     }
     if (config.state_transfer != "criu") {
-        throw std::runtime_error("Migration supervisor requires fault_tolerance.state_transfer=\"criu\"");
+        throw std::runtime_error("Rank agent requires fault_tolerance.state_transfer=\"criu\"");
     }
     // Same invariant the rank enforces: CRIU can only dump/restore a process whose data plane
     // is Direct (the sole backend that releases sockets before checkpoint). Refuse to drive a
     // migration against a comm configured for any other data backend.
     if (config.preferred_data_backend != "Direct") {
         throw std::runtime_error(
-                "Migration supervisor requires preferred_data_backend=\"Direct\" for CRIU state transfer");
+                "Rank agent requires preferred_data_backend=\"Direct\" for CRIU state transfer");
     }
 }
 
-void FMI::FT::MigrationSupervisor::cleanup() {
+void FMI::FT::LocalRankAgent::cleanup() {
     auto images_path = fs::path(config.images_dir) / comm_name;
     if (fs::exists(images_path)) {
         fs::remove_all(images_path);
@@ -49,7 +49,7 @@ void FMI::FT::MigrationSupervisor::cleanup() {
     coordinator->clear_criu_state();
 }
 
-std::uint64_t FMI::FT::MigrationSupervisor::migrate_rank(FMI::Utils::peer_num rank) const {
+std::uint64_t FMI::FT::LocalRankAgent::migrate_rank(FMI::Utils::peer_num rank) const {
     std::uint64_t current_epoch = coordinator->epoch();
     std::uint64_t target_epoch = current_epoch + 1;
 
@@ -76,7 +76,7 @@ std::uint64_t FMI::FT::MigrationSupervisor::migrate_rank(FMI::Utils::peer_num ra
     return target_epoch;
 }
 
-std::uint64_t FMI::FT::MigrationSupervisor::watch_once() {
+std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
     // request_migration marks the targeted rank MIGRATION_PENDING (and it stays so until it
     // reaches its quiesce point and flips to QUIESCED). Either state means a migration of this
     // rank is in progress at the current epoch.
@@ -99,7 +99,7 @@ std::uint64_t FMI::FT::MigrationSupervisor::watch_once() {
     return found ? migrate_rank(target) : 0;
 }
 
-FMI::FT::CriuRankInfo FMI::FT::MigrationSupervisor::wait_for_ready_rank(FMI::Utils::peer_num rank,
+FMI::FT::CriuRankInfo FMI::FT::LocalRankAgent::wait_for_ready_rank(FMI::Utils::peer_num rank,
                                                                        std::uint64_t target_epoch) const {
     CriuRankInfo ready;
     bool found = FMI::Utils::poll_until([this, rank, target_epoch, &ready]() {
@@ -120,13 +120,13 @@ FMI::FT::CriuRankInfo FMI::FT::MigrationSupervisor::wait_for_ready_rank(FMI::Uti
     return ready;
 }
 
-std::string FMI::FT::MigrationSupervisor::rank_image_dir(std::uint64_t target_epoch,
+std::string FMI::FT::LocalRankAgent::rank_image_dir(std::uint64_t target_epoch,
                                                         FMI::Utils::peer_num rank) const {
     return (fs::path(config.images_dir) / comm_name / ("epoch-" + std::to_string(target_epoch)) /
             ("rank-" + std::to_string(rank))).string();
 }
 
-void FMI::FT::MigrationSupervisor::dump_rank(int pid, const std::string& dir) const {
+void FMI::FT::LocalRankAgent::dump_rank(int pid, const std::string& dir) const {
     // --tcp-close: the rank still holds its Redis control-plane connection; tell criu to close
     //   it on restore (the Coordinator reconnects lazily) instead of trying to repair it.
     // No --leave-stopped: criu ptrace-seizes, dumps, then kills and reaps the task, freeing the
@@ -142,7 +142,7 @@ void FMI::FT::MigrationSupervisor::dump_rank(int pid, const std::string& dir) co
     });
 }
 
-void FMI::FT::MigrationSupervisor::restore_rank(const std::string& dir) const {
+void FMI::FT::LocalRankAgent::restore_rank(const std::string& dir) const {
     if (!fs::exists(dir)) {
         throw std::runtime_error("Missing CRIU image directory: " + dir);
     }

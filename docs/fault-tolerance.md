@@ -52,14 +52,14 @@ checkpoint code**. The rank stays a plain `FMI::Communicator`; it never calls cr
 
 At the migration quiesce point (`TransparentMigrationRuntime`), the targeted rank:
 
-1. opts in to ptrace from a non-parent supervisor via `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)`
+1. opts in to ptrace from a non-parent rank agent via `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)`
    (needed under the default `yama ptrace_scope=1`),
 2. releases its `Direct` sockets (`prepare_for_checkpoint`),
 3. publishes a restorable image entry (pid + host + `QUIESCED@epoch N+1`) into the Redis CRIU
    rank registry,
 4. blocks in the promotion-wait loop.
 
-A host-local supervisor (`FMI::FT::MigrationSupervisor`, CLI `fmi-migration-supervisor`) then:
+A host-local rank agent (`FMI::FT::LocalRankAgent`, CLI `fmi-rank-agent`) then:
 
 1. waits for that ready entry,
 2. `criu dump`s the rank's process image (which kills and reaps the original),
@@ -97,11 +97,11 @@ post-restore write is not fatal).
 }
 ```
 
-#### Supervisor CLI
+#### Rank agent CLI
 
 ```text
-fmi-migration-supervisor migrate <comm_name> <num_peers> <config> <rank>
-fmi-migration-supervisor watch   <comm_name> <num_peers> <config>
+fmi-rank-agent migrate <comm_name> <num_peers> <config> <rank>
+fmi-rank-agent watch   <comm_name> <num_peers> <config>
 ```
 
 `migrate` performs one migration of an explicit rank; `watch` migrates the first rank marked via
@@ -121,9 +121,9 @@ no shell quoting, so individual flags must not contain spaces.
 - `Direct` is the only supported data backend; Redis is the control plane
 - one targeted rank per migration; no in-flight-collective preservation
 - no Python binding for the CRIU path (the demo is C++)
-- the supervisor is the migration authority and must complete `migrate_rank` (dump → restore →
-  `promote_epoch`). v1 has no supervisor-failure recovery: if it dies between restore and epoch
-  promotion, survivors eventually hit `reconfigure_timeout_ms` and fail. Run the supervisor under
+- the rank agent is the migration authority and must complete `migrate_rank` (dump → restore →
+  `promote_epoch`). v1 has no rank-agent-failure recovery: if it dies between restore and epoch
+  promotion, survivors eventually hit `reconfigure_timeout_ms` and fail. Run the rank agent under
   process supervision for planned migrations.
 - `reconfigure_timeout_ms` (the survivor wait) must comfortably exceed the dump + restore time;
   size it for your largest process image (the runbook uses 60 s). The migrated rank itself waits
@@ -140,7 +140,7 @@ C++:
 
 FMI::FT::Coordinator coordinator("config/fmi.json", comm_name, world_size);
 coordinator.request_migration(rank_to_move);   // mark the rank for migration
-// ... for state_transfer="criu" a fmi-migration-supervisor promotes the epoch;
+// ... for state_transfer="criu" a fmi-rank-agent promotes the epoch;
 //     for state_transfer="none" the orchestrator launches a replacement and calls
 //     coordinator.promote_epoch(coordinator.epoch() + 1);
 ```
@@ -164,5 +164,5 @@ For the CRIU path you need, on the target Linux host:
 - a running `tcpunchd` instance for the `Direct` backend
 - a working `criu` (`criu check --unprivileged` should report "Looks good" for rootless use)
 
-In CI / environments without CRIU capabilities, the supervisor flow is exercised against a mock
+In CI / environments without CRIU capabilities, the rank agent flow is exercised against a mock
 `criu` binary — see the `CriuFaultTolerance` suite in `tests/criu_fault_tolerance.cpp`.

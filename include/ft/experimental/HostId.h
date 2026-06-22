@@ -9,7 +9,7 @@
 #include <unistd.h>
 
 namespace FMI::FT {
-    //! Resolve the host identifier for a CRIU rank/supervisor: the configured override if set,
+    //! Resolve the host identifier for a CRIU rank/agent: the configured override if set,
     //! otherwise the system hostname.
     inline std::string resolve_host_id(const FMI::Utils::FaultToleranceConfig& config) {
         if (!config.host_id.empty()) {

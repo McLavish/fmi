@@ -13,7 +13,7 @@
 void FMI::FT::run_criu(const std::vector<std::string>& args) {
     // Append operator-supplied criu flags (whitespace-split, no shell quoting) from
     // FMI_CRIU_EXTRA_ARGS here, at the single point every criu invocation passes through, so
-    // both supervisors and every dump/restore honour per-deployment flags (e.g. --unprivileged
+    // the rank agent and every dump/restore honour per-deployment flags (e.g. --unprivileged
     // for rootless criu) — no call site can forget to wire it in.
     std::vector<std::string> full_args = args;
     if (const char* extra = std::getenv("FMI_CRIU_EXTRA_ARGS")) {

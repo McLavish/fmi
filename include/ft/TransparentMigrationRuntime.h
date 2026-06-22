@@ -44,7 +44,7 @@ namespace FMI::FT {
 
         //! Wait for the orchestrator to promote the epoch, then rebuild channels in place.
         //! timeout_ms == 0 disables the wall-clock deadline (used across a CRIU dump/restore,
-        //! where the external supervisor controls completion).
+        //! where the external rank agent controls completion).
         void wait_for_promotion_and_reconfigure(unsigned int timeout_ms);
 
         //! CRIU state-transfer quiesce point for the migration target: release transport,

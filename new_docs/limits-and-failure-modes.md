@@ -39,16 +39,16 @@ are deliberate v1 design boundaries.
 ## CRIU-Coordinated
 
 - CRIU support is C++ only in the current bindings.
-- The v1 supervisor supports same-host jobs only.
+- The v1 rank agent supports same-host jobs only.
 - Only the Direct data backend is supported.
 - Redis data backend may be disabled, but Redis control-plane service is still
   required.
 - CRIU rank metadata does not currently expire stale ranks by heartbeat time.
-- The migration supervisor `criu dump`s the target (reaping its pid) and then
+- The rank agent `criu dump`s the target (reaping its pid) and then
   `criu restore`s it; a restore failure after the dump is unrecoverable.
 - Successful checkpoint/restore requires a working `criu` executable and the
   kernel/container privileges CRIU needs. Tests use a mock `criu` binary for
-  supervisor behavior.
+  rank agent behavior.
 
 ## Operational Guidance
 
@@ -61,4 +61,4 @@ are deliberate v1 design boundaries.
 - Clear Redis job state between manual test runs if reusing a communicator
   name.
 - For CRIU, set a stable `host_id` in config when hostname identity could
-  change across containers or supervisor processes.
+  change across containers or rank agent processes.

@@ -5,18 +5,18 @@
 
 // Host-local driver for CRIU-backed single-rank transparent migration (same-host v1).
 //
-//   fmi-migration-supervisor migrate <comm_name> <num_peers> <config> <rank>
+//   fmi-rank-agent migrate <comm_name> <num_peers> <config> <rank>
 //       Migrate one explicit logical rank: wait for it to reach its checkpoint-ready quiesce
 //       point, criu dump + restore its process image, then promote the epoch.
 //
-//   fmi-migration-supervisor watch <comm_name> <num_peers> <config>
+//   fmi-rank-agent watch <comm_name> <num_peers> <config>
 //       Wait for any rank to be marked for migration (request_migration) and migrate it.
 //
-//   fmi-migration-supervisor cleanup <comm_name> <num_peers> <config>
+//   fmi-rank-agent cleanup <comm_name> <num_peers> <config>
 //       Remove this communicator's CRIU image tree and clear its CRIU control-plane state.
 int main(int argc, char** argv) {
     if (argc < 5) {
-        std::cerr << "usage: fmi-migration-supervisor <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]"
+        std::cerr << "usage: fmi-rank-agent <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]"
                   << std::endl;
         return 1;
     }
@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     std::string config_path = argv[4];
 
     try {
-        FMI::FT::MigrationSupervisor supervisor(config_path, comm_name, num_peers);
+        FMI::FT::LocalRankAgent agent(config_path, comm_name, num_peers);
 
         if (command == "migrate") {
             if (argc < 6) {
@@ -35,12 +35,12 @@ int main(int argc, char** argv) {
                 return 1;
             }
             auto rank = static_cast<FMI::Utils::peer_num>(std::stoul(argv[5]));
-            std::cout << "migrated_rank=" << rank << " promoted_epoch=" << supervisor.migrate_rank(rank)
+            std::cout << "migrated_rank=" << rank << " promoted_epoch=" << agent.migrate_rank(rank)
                       << std::endl;
             return 0;
         }
         if (command == "watch") {
-            auto epoch = supervisor.watch_once();
+            auto epoch = agent.watch_once();
             if (epoch == 0) {
                 std::cerr << "no migration request observed within the quiesce timeout" << std::endl;
                 return 1;
@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (command == "cleanup") {
-            supervisor.cleanup();
+            agent.cleanup();
             std::cout << "cleaned_up=" << comm_name << std::endl;
             return 0;
         }

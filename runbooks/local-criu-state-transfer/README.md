@@ -28,7 +28,7 @@ never recomputes.
 ## How it works
 
 ```
-rank 0 (target)                    supervisor (fmi-migration-supervisor)        rank 1 (survivor)
+rank 0 (target)                    rank agent (fmi-rank-agent)        rank 1 (survivor)
   barrier(): enter_operation
    sees pending migration of self
    prctl(PR_SET_PTRACER, ANY)
@@ -47,7 +47,7 @@ rank 0 (target)                    supervisor (fmi-migration-supervisor)        
 Key points:
 - The rank is a plain `FMI::Communicator` app. It never calls criu; it only signals readiness
   through the Redis control plane (`fault_tolerance.state_transfer="criu"`).
-- `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)` lets the non-parent supervisor's criu ptrace-seize
+- `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)` lets the non-parent rank agent's criu ptrace-seize
   the rank under `yama ptrace_scope=1` (the host default).
 - Direct sockets are closed before the dump; the restored rank re-pairs lazily under the
   epoch-`N+1` communicator name. The Redis control connection is closed by `--tcp-close` and
@@ -55,7 +55,7 @@ Key points:
 
 ## Prerequisites
 
-- Build with CRIU enabled (produces the demo + `fmi-migration-supervisor`):
+- Build with CRIU enabled (produces the demo + `fmi-rank-agent`):
   see the `build-unified-criu` flags in the repo, or `CLAUDE.md`. The driver defaults to
   `FMI_BUILD_DIR=<repo>/build-unified-criu`.
 - A running **Redis** control plane on `127.0.0.1:6379` (e.g. `docker run -d --name fmi-redis
@@ -75,7 +75,7 @@ FMI_CRIU_EXTRA_ARGS="--unprivileged" bash runbooks/local-criu-state-transfer/run
 Expected tail:
 
 ```
-[driver] running migration supervisor (real criu dump/restore)
+[driver] running rank agent (real criu dump/restore)
 migrated_rank=0 promoted_epoch=1
 rank=0 post_migration_state=101 phase2_sum=203 expected=203
 rank=0 OK: application state survived transparent migration
@@ -109,7 +109,7 @@ docker run --rm -it --privileged --name fmi-criu \
 - One targeted rank per migration; in-flight collectives are not preserved (migration happens
   only at operation boundaries).
 - No Python binding for the CRIU path (the demo is C++).
-- No supervisor-failure recovery: the supervisor must complete dump → restore →
+- No rank-agent-failure recovery: the rank agent must complete dump → restore →
   `promote_epoch`. If it dies mid-migration, survivor ranks hit `reconfigure_timeout_ms` and
   fail. `reconfigure_timeout_ms` must exceed the dump + restore time (this runbook uses 60 s).
 - `FMI_CRIU_EXTRA_ARGS` is split on whitespace with no quoting; individual flags must not

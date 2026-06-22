@@ -5,7 +5,7 @@
 #   1. launch two transparent_state_transfer_demo ranks (plain FMI::Communicator)
 #   2. wait until both are ACTIVE at epoch 0
 #   3. request migration of rank 0 (control plane: Redis)
-#   4. run fmi-migration-supervisor, which criu-dumps + criu-restores rank 0 and promotes epoch 1
+#   4. run fmi-rank-agent, which criu-dumps + criu-restores rank 0 and promotes epoch 1
 #   5. assert both ranks finish with the post-migration allreduce == expected (state survived)
 #
 # Requires: a running Redis (control plane), a running tcpunchd on :10000 (Direct data plane),
@@ -19,7 +19,7 @@ BUILD_DIR="${FMI_BUILD_DIR:-${REPO_ROOT}/build-unified-criu}"
 CONFIG="${RUNBOOK_DIR}/fmi.json"
 
 DEMO="${BUILD_DIR}/tests/transparent_state_transfer_demo"
-SUPERVISOR="${BUILD_DIR}/tools/fmi-migration-supervisor"
+AGENT="${BUILD_DIR}/tools/fmi-rank-agent"
 NUM_PEERS=2
 COMM_NAME="${COMM_NAME:-criu-stx-$(date +%s)}"
 WINDOW_MS="${WINDOW_MS:-8000}"
@@ -36,7 +36,7 @@ log() { echo "[driver] $*"; }
 fail() { echo "[driver] FAIL: $*" >&2; exit 1; }
 
 [ -x "${DEMO}" ] || fail "demo binary not found: ${DEMO} (build with FMI_ENABLE_CRIU=ON)"
-[ -x "${SUPERVISOR}" ] || fail "supervisor not found: ${SUPERVISOR}"
+[ -x "${AGENT}" ] || fail "rank agent not found: ${AGENT}"
 command -v criu >/dev/null 2>&1 || fail "criu not on PATH"
 redis ping >/dev/null 2>&1 || fail "Redis not reachable"
 
@@ -74,12 +74,12 @@ log "requesting migration of rank 0"
 redis sadd "${PREFIX}pending" 0 >/dev/null
 redis hset "${PREFIX}epoch:0:states" 0 MIGRATION_PENDING >/dev/null
 
-# Run the host-local supervisor: it waits for rank 0 to checkpoint-quiesce, then criu
+# Run the host-local rank agent: it waits for rank 0 to checkpoint-quiesce, then criu
 # dump/restore + promote epoch 1.
-log "running migration supervisor (real criu dump/restore)"
-"${SUPERVISOR}" migrate "${COMM_NAME}" "${NUM_PEERS}" "${CONFIG}" 0
-SUP_RC=$?
-[ "${SUP_RC}" -eq 0 ] || fail "supervisor exited ${SUP_RC} (see /tmp/fmi-criu-images/${COMM_NAME}/epoch-1/rank-0/{dump,restore}.log)"
+log "running rank agent (real criu dump/restore)"
+"${AGENT}" migrate "${COMM_NAME}" "${NUM_PEERS}" "${CONFIG}" 0
+AGENT_RC=$?
+[ "${AGENT_RC}" -eq 0 ] || fail "rank agent exited ${AGENT_RC} (see /tmp/fmi-criu-images/${COMM_NAME}/epoch-1/rank-0/{dump,restore}.log)"
 
 # Wait for both ranks to finish.
 log "waiting for ranks to finish"

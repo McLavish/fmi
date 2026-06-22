@@ -41,8 +41,8 @@ Transparent migration methods intended for external orchestration include:
 - `placement_for_rank(epoch, rank)`
 - `clear_job_state()`
 
-CRIU methods (the single-rank registry) are used by the host-local migration
-supervisor and the migration runtime, but are public in the header:
+CRIU methods (the single-rank registry) are used by the host-local rank agent
+and the migration runtime, but are public in the header:
 
 - rank registration and state updates (`criu_register_rank`,
   `criu_mark_rank_running`, `criu_mark_rank_quiesced`)
@@ -70,17 +70,17 @@ arguments.
 - `directory_snapshot(epoch)`
 
 There is no Python `FTSession` in the current binding, and there is no Python
-binding for CRIU supervisor operations.
+binding for CRIU rank agent operations.
 
-## CRIU Migration Supervisor CLI
+## CRIU Rank Agent CLI
 
-The host-local migration supervisor is a C++ tool:
+The host-local rank agent is a C++ tool:
 
 ```text
-fmi-migration-supervisor <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]
+fmi-rank-agent <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]
 ```
 
-It is built from `tools/migration_supervisor.cpp` when tools and CRIU support are
+It is built from `tools/rank_agent.cpp` when tools and CRIU support are
 enabled.
 
 ## Operation Runtime Hook

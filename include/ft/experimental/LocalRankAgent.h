@@ -1,5 +1,5 @@
-#ifndef FMI_FT_MIGRATIONSUPERVISOR_H
-#define FMI_FT_MIGRATIONSUPERVISOR_H
+#ifndef FMI_FT_LOCALRANKAGENT_H
+#define FMI_FT_LOCALRANKAGENT_H
 
 #include "../../utils/Common.h"
 #include "../../utils/Configuration.h"
@@ -14,14 +14,14 @@ namespace FMI::FT {
     //!
     //! It bridges the transparent-migration control plane (Redis) to criu: when a targeted
     //! rank reaches its migration quiesce point it publishes a checkpoint-ready image entry in
-    //! the CRIU rank registry (pid + host + QUIESCED). The supervisor waits for that entry,
+    //! the CRIU rank registry (pid + host + QUIESCED). The agent waits for that entry,
     //! `criu dump`s the rank's process image, `criu restore`s it (preserving application
     //! memory), then promotes the communicator epoch so survivors and the restored rank
     //! reconfigure across the epoch cut. The targeted rank stays a plain FMI::Communicator
     //! application; it never invokes criu itself.
-    class MigrationSupervisor {
+    class LocalRankAgent {
     public:
-        MigrationSupervisor(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
+        LocalRankAgent(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
 
         //! Migrate a single logical rank: wait for it to publish a checkpoint-ready image on
         //! this host, criu-dump it, criu-restore it, then promote the epoch. Returns the
@@ -54,4 +54,4 @@ namespace FMI::FT {
     };
 }
 
-#endif //FMI_FT_MIGRATIONSUPERVISOR_H
+#endif //FMI_FT_LOCALRANKAGENT_H

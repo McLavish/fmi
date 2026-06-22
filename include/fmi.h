@@ -4,7 +4,7 @@
 #include "Communicator.h"
 #include "ft/Coordinator.h"
 #ifdef FMI_ENABLE_CRIU
-#include "ft/experimental/MigrationSupervisor.h"
+#include "ft/experimental/LocalRankAgent.h"
 #endif
 
 #endif //FMI_FMI_H

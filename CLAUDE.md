@@ -107,10 +107,10 @@ Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id
 control + data plane), and the AWS Lambda + S3 flow is in `runbooks/aws-python311-s3/`; both
 READMEs are verified step-by-step runbooks. JSON config templates live in `config/`.
 
-The experimental CRIU migration supervisor CLI is built only with `FMI_ENABLE_CRIU=ON`:
+The experimental CRIU rank agent CLI is built only with `FMI_ENABLE_CRIU=ON`:
 
 ```text
-fmi-migration-supervisor {migrate|watch|cleanup} <comm_name> <num_peers> <config> [rank]
+fmi-rank-agent {migrate|watch|cleanup} <comm_name> <num_peers> <config> [rank]
 ```
 
 ## Architecture
@@ -165,7 +165,7 @@ fault tolerance layered around the user API.
   mode): `"none"` (default) — the rank exits and a fresh replacement recomputes; `"criu"`
   (same-host v1, needs `FMI_ENABLE_CRIU=ON`) — the rank's process image is CRIU
   checkpointed/restored so memory is preserved transparently. The CRIU path is driven by the
-  host-local `MigrationSupervisor` (`fmi-migration-supervisor`), reuses the
+  host-local `LocalRankAgent` (`fmi-rank-agent`), reuses the
   `prepare_channels_for_checkpoint` hook + the survivor reconfigure path, and is verified in
   `runbooks/local-criu-state-transfer/` (rootless criu) with `tests/transparent_state_transfer_demo.cpp`.
     Shared criu-invocation code lives in `ft/experimental/CriuExec`.

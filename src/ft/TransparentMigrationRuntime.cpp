@@ -35,7 +35,7 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         // prepare_for_checkpoint(); Redis/S3 channels would be captured with live sockets and
         // the image registry would falsely record "Direct". Pin the data plane to Direct so
         // channel selection can never pick an unsupported backend (the same-host Direct-only
-        // invariant the migration supervisor also enforces).
+        // invariant the rank agent also enforces).
         if (config.preferred_data_backend != "Direct") {
             throw std::runtime_error(
                     "fault_tolerance.state_transfer=\"criu\" requires preferred_data_backend=\"Direct\" "
@@ -64,7 +64,7 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     if (coordinator->is_rank_pending(peer_id)) {
         // This rank is the migration target.
         if (config.state_transfer == "criu") {
-            // Preserve application state: checkpoint this process and let the supervisor
+            // Preserve application state: checkpoint this process and let the rank agent
             // restore it. Control resumes (in the restored image) at the epoch-N+1 rebuild.
             checkpoint_and_wait_for_restore();
             return;
@@ -91,7 +91,7 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
     std::string backend_name = config.preferred_data_backend;
     std::string host_id = FMI::FT::resolve_host_id(config);
 
-    // Permit the host-local supervisor's (non-parent) criu to ptrace-seize this process under
+    // Permit the host-local rank agent's (non-parent) criu to ptrace-seize this process under
     // yama ptrace_scope=1. Best-effort: harmlessly fails where YAMA is not present.
     prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 
@@ -101,14 +101,14 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
         prepare_for_checkpoint();
     }
 
-    // Publish a restorable image entry the supervisor can find: pid + host + QUIESCED for the
+    // Publish a restorable image entry the rank agent can find: pid + host + QUIESCED for the
     // target epoch. Reuses the CRIU rank registry (single-rank scope).
     int pid = static_cast<int>(getpid());
     coordinator->criu_register_rank(peer_id, pid, host_id, backend_name);
     coordinator->criu_mark_rank_quiesced(peer_id, pid, host_id, backend_name, target_epoch);
     coordinator->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
 
-    // Block until restored and promoted. The supervisor dumps this process here and restores
+    // Block until restored and promoted. The rank agent dumps this process here and restores
     // it; the restored image resumes in this same loop, observes epoch N+1, and reconfigures
     // exactly like a survivor — carrying preserved application memory. Unbounded: the dump /
     // restore span must not race a wall-clock deadline.

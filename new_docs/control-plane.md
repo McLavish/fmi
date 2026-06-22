@@ -111,7 +111,7 @@ fmi:ft:<comm>:criu:rank:<rank>
 - `quiesced_generation`
 - `last_heartbeat_ms`
 
-CRIU rank heartbeats are timestamps in a hash. The current supervisor logic
+CRIU rank heartbeats are timestamps in a hash. The current rank agent logic
 does not expire old CRIU rank entries by timestamp.
 
 ## Cleanup
@@ -122,5 +122,5 @@ all `epoch:*` keys for the communicator.
 `Coordinator::clear_criu_state()` deletes all keys under the communicator's
 `criu:*` subtree.
 
-The migration supervisor's `cleanup()` also removes
+The rank agent's `cleanup()` also removes
 `images_dir/<comm_name>/` before clearing CRIU Redis state.

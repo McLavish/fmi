@@ -9,7 +9,7 @@
 //
 // This exercises single-rank transparent
 // migration with fault_tolerance.state_transfer="criu": a plain FMI::Communicator application,
-// one rank migrated mid-run by an external fmi-migration-supervisor. The proof of state
+// one rank migrated mid-run by an external fmi-rank-agent. The proof of state
 // transfer is the post-migration collective: rank r mutates a local `state` BEFORE the
 // migration boundary, and the phase-2 allreduce can only produce the expected total if every
 // rank's in-memory `state` survived the criu dump/restore — with no application checkpoint code

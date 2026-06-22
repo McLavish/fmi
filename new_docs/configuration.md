@@ -70,7 +70,7 @@ that wait.
 }
 ```
 
-If `host_id` is empty, CRIU runtime and supervisor use `gethostname()`.
+If `host_id` is empty, the migration runtime and rank agent use `gethostname()`.
 
 ## Backend Validation
 
