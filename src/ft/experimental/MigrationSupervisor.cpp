@@ -1,20 +1,34 @@
 #include "../../../include/ft/experimental/MigrationSupervisor.h"
 #include "../../../include/ft/experimental/CriuExec.h"
+#include "../../../include/ft/experimental/HostId.h"
+#include "../../../include/utils/Configuration.h"
 
 #include <filesystem>
+#include <memory>
 #include <stdexcept>
 
 namespace fs = std::filesystem;
 
 FMI::FT::MigrationSupervisor::MigrationSupervisor(std::string config_path, std::string comm_name,
                                                  FMI::Utils::peer_num num_peers) :
-        FmiFtSupervisor(std::move(config_path), std::move(comm_name), num_peers) {
+        config_path(std::move(config_path)),
+        comm_name(std::move(comm_name)),
+        num_peers(num_peers) {
+    FMI::Utils::Configuration configuration(this->config_path);
+    config = configuration.get_fault_tolerance_config();
+    // Validate the full configuration before opening the Redis control-plane connection.
     ensure_migration_mode();
-    connect();
+    host_id = FMI::FT::resolve_host_id(config);
+    coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);
 }
 
 void FMI::FT::MigrationSupervisor::ensure_migration_mode() const {
-    validate_base();
+    if (!config.enabled) {
+        throw std::runtime_error("Migration supervisor requires fault tolerance to be enabled");
+    }
+    if (config.control_backend != "Redis") {
+        throw std::runtime_error("Migration supervisor requires Redis as the control backend");
+    }
     if (config.state_transfer != "criu") {
         throw std::runtime_error("Migration supervisor requires fault_tolerance.state_transfer=\"criu\"");
     }
@@ -25,6 +39,14 @@ void FMI::FT::MigrationSupervisor::ensure_migration_mode() const {
         throw std::runtime_error(
                 "Migration supervisor requires preferred_data_backend=\"Direct\" for CRIU state transfer");
     }
+}
+
+void FMI::FT::MigrationSupervisor::cleanup() {
+    auto images_path = fs::path(config.images_dir) / comm_name;
+    if (fs::exists(images_path)) {
+        fs::remove_all(images_path);
+    }
+    coordinator->clear_criu_state();
 }
 
 std::uint64_t FMI::FT::MigrationSupervisor::migrate_rank(FMI::Utils::peer_num rank) const {

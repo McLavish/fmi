@@ -72,7 +72,6 @@ endif()
 if(FMI_ENABLE_CRIU)
     list(APPEND FMI_SOURCES
         src/ft/experimental/CriuExec.cpp
-        src/ft/experimental/FmiFtSupervisor.cpp
         src/ft/experimental/MigrationSupervisor.cpp
     )
 endif()
