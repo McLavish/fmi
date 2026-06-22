@@ -6,6 +6,7 @@
 #include <unistd.h>
 #ifdef FMI_ENABLE_CRIU
 #include "../../include/ft/experimental/HostId.h"
+#include <csignal>
 #include <sys/prctl.h>
 #endif
 
@@ -40,6 +41,19 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
             throw std::runtime_error(
                     "fault_tolerance.state_transfer=\"criu\" requires preferred_data_backend=\"Direct\" "
                     "(the only checkpoint-safe data backend); got \"" + config.preferred_data_backend + "\"");
+        }
+
+        // criu's --tcp-close drops the Redis control socket across checkpoint/restore, so the
+        // restored rank's next write would raise SIGPIPE and — under the default disposition — be
+        // killed before the ControlPlane can reconnect. Ignore SIGPIPE (process-global) so the
+        // write fails with EPIPE and command() reconnects transparently. Armed here, on the rank
+        // that is actually checkpointed, so it is captured in the image; never overwrite a handler
+        // the application already installed; intentionally not restored (the rank keeps this
+        // disposition for the rest of the FT session). Only this rank-side path needs it — the
+        // rank agent / orchestrator processes are not --tcp-closed, so they no longer over-arm it.
+        auto previous = std::signal(SIGPIPE, SIG_IGN);
+        if (previous != SIG_DFL && previous != SIG_ERR) {
+            std::signal(SIGPIPE, previous);
         }
 #else
         throw std::runtime_error(

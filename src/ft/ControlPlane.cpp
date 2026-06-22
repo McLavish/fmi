@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <csignal>
 #include <initializer_list>
 #include <mutex>
 #include <stdexcept>
@@ -111,26 +110,6 @@ struct FMI::FT::ControlPlane::Impl {
             comm_name(std::move(comm_name)),
             num_peers(num_peers) {
 #if FMI_ENABLE_REDIS
-        // criu's --tcp-close drops the Redis control socket across a checkpoint/restore, so the
-        // restored process's next write would raise SIGPIPE and — under the default disposition —
-        // be killed before command() can reconnect. Ignore SIGPIPE so the write fails with EPIPE
-        // instead and command() reconnects transparently. This signal disposition is process-
-        // global, so keep the footprint minimal: arm it only on the criu state-transfer path that
-        // actually introduces the risk, and never overwrite a SIGPIPE handler the application
-        // already installed. (A narrower per-write MSG_NOSIGNAL is not reachable here because
-        // hiredis owns the socket writes and exposes no no-signal option.)
-        if (this->config.state_transfer == "criu") {
-            auto previous = std::signal(SIGPIPE, SIG_IGN);
-            if (previous != SIG_DFL && previous != SIG_ERR) {
-                std::signal(SIGPIPE, previous);
-            }
-            // This also arms SIG_IGN in the rank-agent/orchestrator processes (which construct a
-            // ControlPlane from the same criu config) even though only the restored rank is
-            // --tcp-closed; the over-arming is harmless (those processes do not rely on the
-            // default disposition). The disposition is intentionally not restored on destruction:
-            // a ControlPlane lives for the FT session, and restoring SIG_DFL could re-expose an
-            // in-flight reconnect to a fatal SIGPIPE.
-        }
         connect();
 #endif
     }

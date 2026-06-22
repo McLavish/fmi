@@ -312,39 +312,38 @@ BOOST_AUTO_TEST_CASE(rank_agent_dumps_restores_and_promotes_single_rank) {
     fs::remove_all(temp_dir);
 }
 
-BOOST_AUTO_TEST_CASE(criu_control_plane_scopes_sigpipe_to_default_disposition) {
+BOOST_AUTO_TEST_CASE(criu_runtime_scopes_sigpipe_to_default_disposition) {
     // The criu state-transfer path needs SIGPIPE ignored so a --tcp-close'd Redis socket
-    // surfaces EPIPE instead of killing the restored process. That disposition is process-
-    // global, so the ControlPlane must only take it over when the application left SIGPIPE at
-    // its default — never clobbering a handler the application installed itself.
-    auto temp_dir = fs::temp_directory_path() / unique_comm_name("sigpipe");
-    auto images_dir = temp_dir / "images";
-    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
-    std::string comm_name = unique_comm_name("sigpipe-job");
-    if (!redis_available(config_path.string(), comm_name, 1)) {
-        BOOST_TEST_MESSAGE("Skipping SIGPIPE scoping test because Redis is unavailable");
-        fs::remove_all(temp_dir);
-        return;
-    }
+    // surfaces EPIPE instead of killing the restored rank. That disposition is process-global,
+    // so the runtime (the rank-side criu owner) must only take it over when the application left
+    // SIGPIPE at its default — never clobbering a handler the application installed itself.
+    // No Redis needed: the runtime ctor arms SIGPIPE before it touches the control plane, so a
+    // null control plane is fine (mirrors criu_state_transfer_rejects_non_direct_data_backend).
+    FMI::Utils::FaultToleranceConfig config;
+    config.enabled = true;
+    config.control_backend = "Redis";
+    config.state_transfer = "criu";
+    config.preferred_data_backend = "Direct";
 
     auto original = current_sigpipe_handler();
 
-    // From the default disposition, a criu-mode ControlPlane arms SIG_IGN.
+    // From the default disposition, a criu-mode runtime arms SIG_IGN.
     std::signal(SIGPIPE, SIG_DFL);
     {
-        FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 1);
+        FMI::FT::TransparentMigrationRuntime runtime(0, "worker", "", 0, config, nullptr, "comm",
+                                                     [](const std::string&) {}, []() {});
         BOOST_CHECK(current_sigpipe_handler() == SIG_IGN);
     }
 
     // An application-installed handler is left untouched.
     std::signal(SIGPIPE, sigpipe_probe_handler);
     {
-        FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 1);
+        FMI::FT::TransparentMigrationRuntime runtime(0, "worker", "", 0, config, nullptr, "comm",
+                                                     [](const std::string&) {}, []() {});
         BOOST_CHECK(current_sigpipe_handler() == sigpipe_probe_handler);
     }
 
     std::signal(SIGPIPE, original);
-    fs::remove_all(temp_dir);
 }
 
 BOOST_AUTO_TEST_CASE(rank_agent_promotes_epoch_only_after_dump_and_restore) {
