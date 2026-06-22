@@ -41,13 +41,13 @@ Transparent migration methods intended for external orchestration include:
 - `placement_for_rank(epoch, rank)`
 - `clear_job_state()`
 
-CRIU methods are used by `CriuRuntime` and `CriuSupervisor`, but are public in
-the header:
+CRIU methods (the single-rank registry) are used by the host-local migration
+supervisor and the migration runtime, but are public in the header:
 
-- rank registration and state updates
-- checkpoint and restore generation requests
-- job and rank status reads
-- `clear_criu_job_state()`
+- rank registration and state updates (`criu_register_rank`,
+  `criu_mark_rank_running`, `criu_mark_rank_quiesced`)
+- rank status reads (`criu_rank_info`)
+- `clear_criu_state()`
 
 ## Python Binding
 
@@ -72,15 +72,15 @@ arguments.
 There is no Python `FTSession` in the current binding, and there is no Python
 binding for CRIU supervisor operations.
 
-## CRIU Supervisor CLI
+## CRIU Migration Supervisor CLI
 
-The CRIU supervisor is a C++ tool:
+The host-local migration supervisor is a C++ tool:
 
 ```text
-fmi-criu-supervisor <checkpoint|restore|status|cleanup> <comm_name> <num_peers> <config> [generation]
+fmi-migration-supervisor <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]
 ```
 
-It is built from `tools/criu_supervisor.cpp` when tools and CRIU support are
+It is built from `tools/migration_supervisor.cpp` when tools and CRIU support are
 enabled.
 
 ## Operation Runtime Hook
@@ -91,7 +91,6 @@ an optional `FMI::FT::OperationRuntime`.
 Implemented runtimes:
 
 - `TransparentMigrationRuntime`
-- `CriuRuntime`
 
-This hook is the common point where both modes enforce operation-boundary
+This hook is the common point where migration enforces operation-boundary
 coordination.

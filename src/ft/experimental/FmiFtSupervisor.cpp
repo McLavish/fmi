@@ -37,5 +37,5 @@ void FMI::FT::FmiFtSupervisor::cleanup() {
     if (fs::exists(images_path)) {
         fs::remove_all(images_path);
     }
-    coordinator->clear_criu_job_state();
+    coordinator->clear_criu_state();
 }

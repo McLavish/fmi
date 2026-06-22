@@ -44,8 +44,8 @@ are deliberate v1 design boundaries.
 - Redis data backend may be disabled, but Redis control-plane service is still
   required.
 - CRIU rank metadata does not currently expire stale ranks by heartbeat time.
-- `CriuSupervisor::restore()` kills registered old PIDs greater than zero
-  before restoring.
+- The migration supervisor `criu dump`s the target (reaping its pid) and then
+  `criu restore`s it; a restore failure after the dump is unrecoverable.
 - Successful checkpoint/restore requires a working `criu` executable and the
   kernel/container privileges CRIU needs. Tests use a mock `criu` binary for
   supervisor behavior.

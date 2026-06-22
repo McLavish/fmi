@@ -4,18 +4,20 @@ This folder documents the fault-tolerance implementation in the current branch.
 It is intentionally implementation-facing: the goal is to describe what the code
 does today, which invariants it relies on, and where the boundaries are.
 
-## Current FT Modes
+## Current FT Model
 
-FMI has two implemented fault-tolerance modes:
+FMI has one implemented fault-tolerance protocol, transparent migration, with a
+mechanism toggle for application-state continuity:
 
 - `transparent_migration`: a plain `FMI::Communicator` is made migration-aware.
-  FMI checks Redis at operation boundaries, exits the migrating rank, lets a
-  replacement rank join the orchestrator-promoted epoch, and rebuilds surviving
-  communicators under an epoch-qualified transport name.
-- `criu_coordinated`: a plain `FMI::Communicator` is paired with a CRIU runtime.
-  FMI drains active operations, closes Direct sockets, reports quiescence to
-  Redis, and blocks until an external supervisor restores a checkpoint
-  generation.
+  FMI checks Redis at operation boundaries, lets a replacement rank join the
+  orchestrator-promoted epoch, and rebuilds surviving communicators under an
+  epoch-qualified transport name.
+- `fault_tolerance.state_transfer` selects what happens to the migrated rank's
+  in-memory state: `"none"` (default) exits the rank and a fresh replacement
+  recomputes; `"criu"` (same-host v1, `FMI_ENABLE_CRIU=ON`) checkpoints and
+  restores the rank's process image so memory survives, driven by the host-local
+  migration supervisor.
 
 The old cooperative `Session` / `safe_point()` model is not part of the current
 code path. The `Event` enum still exists in `include/ft/Common.h`, and some old
@@ -29,9 +31,8 @@ docs and runbooks still mention `FTSession`, but no `Session` class or
 - [epochs.md](epochs.md): how communicator epochs work and why every
   backend-visible name is epoch-qualified.
 - [transparent-migration.md](transparent-migration.md): construction,
-  centralized promotion, operation-boundary behavior, and reconfiguration.
-- [criu-coordinated.md](criu-coordinated.md): runtime/supervisor behavior,
-  checkpoint generations, and same-host Direct-only constraints.
+  centralized promotion, operation-boundary behavior, reconfiguration, and the
+  CRIU single-rank state-transfer mechanism.
 - [configuration.md](configuration.md): JSON fields parsed by the current
   implementation and mode-specific validation.
 - [api-surface.md](api-surface.md): C++, Python, and CLI entry points.
@@ -45,7 +46,7 @@ docs and runbooks still mention `FTSession`, but no `Session` class or
 - `include/ft/Coordinator.h` and `src/ft/Coordinator.cpp`
 - `include/ft/TransparentMigrationRuntime.h` and
   `src/ft/TransparentMigrationRuntime.cpp`
-- `include/ft/CriuRuntime.h` and `src/ft/CriuRuntime.cpp`
-- `include/ft/CriuSupervisor.h` and `src/ft/CriuSupervisor.cpp`
-- `tools/criu_supervisor.cpp`
+- `include/ft/experimental/MigrationSupervisor.h` and
+  `src/ft/experimental/MigrationSupervisor.cpp`
+- `tools/migration_supervisor.cpp`
 - `python/PythonFT.cpp` and `python/fmi_python.cpp`

@@ -7,7 +7,7 @@
 
 // CRIU transparent state-transfer demo (same-host v1).
 //
-// Unlike criu_checkpoint_demo (whole-job rollback), this exercises single-rank transparent
+// This exercises single-rank transparent
 // migration with fault_tolerance.state_transfer="criu": a plain FMI::Communicator application,
 // one rank migrated mid-run by an external fmi-migration-supervisor. The proof of state
 // transfer is the post-migration collective: rank r mutates a local `state` BEFORE the

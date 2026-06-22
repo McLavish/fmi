@@ -29,26 +29,9 @@ namespace FMI::FT {
     };
 
 #ifdef FMI_ENABLE_CRIU
-    enum class CriuJobState : std::uint8_t {
-        Running,
-        CheckpointRequested,
-        Quiesced,
-        CheckpointComplete,
-        RestoreRequested,
-        Restored
-    };
-
     enum class CriuRankState : std::uint8_t {
         Running,
         Quiesced
-    };
-
-    struct CriuJobInfo {
-        CriuJobState state = CriuJobState::Running;
-        std::uint64_t requested_generation = 0;
-        std::uint64_t completed_generation = 0;
-        std::uint64_t restore_generation = 0;
-        std::string supervisor;
     };
 
     struct CriuRankInfo {
@@ -59,11 +42,6 @@ namespace FMI::FT {
         CriuRankState state = CriuRankState::Running;
         std::uint64_t quiesced_generation = 0;
         std::uint64_t last_heartbeat_ms = 0;
-    };
-
-    struct CriuStatus {
-        CriuJobInfo job;
-        std::vector<CriuRankInfo> ranks;
     };
 #endif
 }

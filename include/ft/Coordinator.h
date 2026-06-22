@@ -46,22 +46,13 @@ namespace FMI::FT {
         [[nodiscard]] std::uint64_t epoch() const;
 
 #ifdef FMI_ENABLE_CRIU
-        //! Remove all CRIU FT metadata associated with this communicator name.
-        void clear_criu_job_state();
+        //! Remove the CRIU rank registry associated with this communicator name.
+        void clear_criu_state();
 
         void criu_register_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id, const std::string& backend) const;
         void criu_mark_rank_running(FMI::Utils::peer_num rank, int pid, const std::string& host_id, const std::string& backend) const;
         void criu_mark_rank_quiesced(FMI::Utils::peer_num rank, int pid, const std::string& host_id, const std::string& backend,
                                      std::uint64_t generation) const;
-        [[nodiscard]] std::uint64_t criu_request_checkpoint(const std::string& supervisor_id) const;
-        [[nodiscard]] bool criu_all_ranks_quiesced(std::uint64_t generation, const std::string& host_id = "") const;
-        void criu_mark_job_quiesced(std::uint64_t generation, const std::string& supervisor_id) const;
-        void criu_mark_checkpoint_complete(std::uint64_t generation, const std::string& supervisor_id) const;
-        [[nodiscard]] std::uint64_t criu_request_restore(std::uint64_t generation, const std::string& supervisor_id) const;
-        void criu_mark_job_restored(std::uint64_t generation, const std::string& supervisor_id) const;
-        [[nodiscard]] std::uint64_t criu_requested_generation() const;
-        [[nodiscard]] std::uint64_t criu_restore_generation() const;
-        [[nodiscard]] CriuJobInfo criu_job_info() const;
         [[nodiscard]] std::vector<CriuRankInfo> criu_rank_info() const;
 #endif
 
@@ -80,11 +71,9 @@ namespace FMI::FT {
 
         void check_world_size(const std::string& meta_key, const char* error_message) const;
 #ifdef FMI_ENABLE_CRIU
-        void ensure_criu_job() const;
+        void ensure_criu_registry() const;
         void criu_write_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id, const std::string& backend,
                              CriuRankState state, bool write_generation, std::uint64_t generation) const;
-        void set_criu_job_state(CriuJobState state, const char* generation_field, std::uint64_t generation,
-                                const std::string& supervisor_id) const;
 #endif
     };
 }

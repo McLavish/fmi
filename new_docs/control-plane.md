@@ -99,20 +99,6 @@ fmi:ft:<comm>:criu:rank:<rank>
 `criu:meta` is a hash. It stores:
 
 - `world_size`
-- `state`
-- `requested_generation`
-- `completed_generation`
-- `restore_generation`
-- `supervisor`
-
-CRIU job state strings are:
-
-- `RUNNING`
-- `CHECKPOINT_REQUESTED`
-- `QUIESCED`
-- `CHECKPOINT_COMPLETE`
-- `RESTORE_REQUESTED`
-- `RESTORED`
 
 `criu:ranks` is a set of registered ranks.
 
@@ -133,8 +119,8 @@ does not expire old CRIU rank entries by timestamp.
 `Coordinator::clear_job_state()` deletes the transparent-migration metadata and
 all `epoch:*` keys for the communicator.
 
-`Coordinator::clear_criu_job_state()` deletes all keys under the communicator's
+`Coordinator::clear_criu_state()` deletes all keys under the communicator's
 `criu:*` subtree.
 
-`CriuSupervisor::cleanup()` also removes
+The migration supervisor's `cleanup()` also removes
 `images_dir/<comm_name>/` before clearing CRIU Redis state.

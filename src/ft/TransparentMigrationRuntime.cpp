@@ -34,8 +34,8 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         // select must release its sockets before the dump. Only Direct overrides
         // prepare_for_checkpoint(); Redis/S3 channels would be captured with live sockets and
         // the image registry would falsely record "Direct". Pin the data plane to Direct so
-        // channel selection can never pick an unsupported backend (mirrors the whole-job CRIU
-        // path's CriuSupervisor::ensure_same_host_scope invariant).
+        // channel selection can never pick an unsupported backend (the same-host Direct-only
+        // invariant the migration supervisor also enforces).
         if (config.preferred_data_backend != "Direct") {
             throw std::runtime_error(
                     "fault_tolerance.state_transfer=\"criu\" requires preferred_data_backend=\"Direct\" "

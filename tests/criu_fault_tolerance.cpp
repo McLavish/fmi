@@ -2,7 +2,6 @@
 
 #include "../include/fmi.h"
 #include "../include/ft/TransparentMigrationRuntime.h"
-#include "../include/ft/experimental/CriuRuntime.h"
 #include "../include/ft/experimental/MigrationSupervisor.h"
 
 #include <atomic>
@@ -47,7 +46,7 @@ namespace {
     bool redis_available(const std::string& config_path, const std::string& comm_name, FMI::Utils::peer_num num_peers = 2) {
         try {
             FMI::FT::Coordinator coordinator(config_path, comm_name, num_peers);
-            coordinator.clear_criu_job_state();
+            coordinator.clear_criu_state();
             coordinator.clear_job_state();
             return true;
         } catch (const std::exception& e) {
@@ -261,187 +260,6 @@ namespace {
 
 BOOST_AUTO_TEST_SUITE(CriuFaultTolerance);
 
-BOOST_AUTO_TEST_CASE(coordinator_tracks_criu_checkpoint_and_restore_state) {
-    std::string comm_name = unique_comm_name();
-    if (!redis_available(criu_config_path, comm_name, 2)) {
-        BOOST_TEST_MESSAGE("Skipping CRIU coordinator state test because Redis is unavailable");
-        return;
-    }
-
-    FMI::FT::Coordinator coordinator(criu_config_path, comm_name, 2);
-    coordinator.clear_criu_job_state();
-    coordinator.clear_job_state();
-
-    auto host_id = current_host_id();
-    coordinator.criu_register_rank(0, 111, host_id, "Direct");
-    coordinator.criu_register_rank(1, 222, host_id, "Direct");
-
-    auto info = coordinator.criu_job_info();
-    BOOST_CHECK(info.state == FMI::FT::CriuJobState::Running);
-    BOOST_CHECK_EQUAL(info.requested_generation, 0U);
-    BOOST_CHECK_EQUAL(info.completed_generation, 0U);
-    BOOST_CHECK_EQUAL(info.restore_generation, 0U);
-
-    auto generation = coordinator.criu_request_checkpoint("supervisor-a");
-    BOOST_CHECK_EQUAL(generation, 1U);
-    BOOST_CHECK_EQUAL(coordinator.criu_requested_generation(), 1U);
-    BOOST_CHECK(!coordinator.criu_all_ranks_quiesced(generation, host_id));
-
-    coordinator.criu_mark_rank_quiesced(0, 111, host_id, "Direct", generation);
-    BOOST_CHECK(!coordinator.criu_all_ranks_quiesced(generation, host_id));
-
-    coordinator.criu_mark_rank_quiesced(1, 222, host_id, "Direct", generation);
-    BOOST_CHECK(coordinator.criu_all_ranks_quiesced(generation, host_id));
-
-    coordinator.criu_mark_job_quiesced(generation, "supervisor-a");
-    BOOST_CHECK(coordinator.criu_job_info().state == FMI::FT::CriuJobState::Quiesced);
-
-    coordinator.criu_mark_checkpoint_complete(generation, "supervisor-a");
-    info = coordinator.criu_job_info();
-    BOOST_CHECK(info.state == FMI::FT::CriuJobState::CheckpointComplete);
-    BOOST_CHECK_EQUAL(info.completed_generation, generation);
-
-    BOOST_CHECK_EQUAL(coordinator.criu_request_restore(generation, "supervisor-a"), generation);
-    info = coordinator.criu_job_info();
-    BOOST_CHECK(info.state == FMI::FT::CriuJobState::RestoreRequested);
-    BOOST_CHECK_EQUAL(info.restore_generation, generation);
-
-    coordinator.criu_mark_job_restored(generation, "supervisor-a");
-    info = coordinator.criu_job_info();
-    BOOST_CHECK(info.state == FMI::FT::CriuJobState::Restored);
-    BOOST_CHECK_EQUAL(info.restore_generation, generation);
-
-    auto ranks = coordinator.criu_rank_info();
-    BOOST_REQUIRE_EQUAL(ranks.size(), 2U);
-    BOOST_CHECK_EQUAL(ranks[0].rank, 0U);
-    BOOST_CHECK_EQUAL(ranks[1].rank, 1U);
-    BOOST_CHECK(ranks[0].state == FMI::FT::CriuRankState::Quiesced);
-    BOOST_CHECK(ranks[1].state == FMI::FT::CriuRankState::Quiesced);
-    BOOST_CHECK_EQUAL(ranks[0].quiesced_generation, generation);
-    BOOST_CHECK_EQUAL(ranks[1].quiesced_generation, generation);
-
-    coordinator.clear_criu_job_state();
-    coordinator.clear_job_state();
-}
-
-BOOST_AUTO_TEST_CASE(runtime_quiesces_only_after_active_ops_drain) {
-    std::string comm_name = unique_comm_name();
-    if (!redis_available(criu_config_path, comm_name, 1)) {
-        BOOST_TEST_MESSAGE("Skipping CRIU runtime test because Redis is unavailable");
-        return;
-    }
-
-    FMI::FT::Coordinator coordinator(criu_config_path, comm_name, 1);
-    coordinator.clear_criu_job_state();
-    coordinator.clear_job_state();
-
-    std::atomic<int> prepare_calls = 0;
-    auto host_id = current_host_id();
-
-    {
-        FMI::FT::CriuRuntime runtime(0, 1, criu_config_path, comm_name, "Direct", [&prepare_calls]() {
-            prepare_calls.fetch_add(1);
-        });
-
-        runtime.enter_operation();
-        auto generation = coordinator.criu_request_checkpoint("supervisor-b");
-
-        auto blocked_enter = std::async(std::launch::async, [&runtime]() {
-            runtime.enter_operation();
-            return true;
-        });
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        BOOST_CHECK(blocked_enter.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
-        BOOST_CHECK_EQUAL(prepare_calls.load(), 0);
-
-        auto exit_future = std::async(std::launch::async, [&runtime]() {
-            runtime.exit_operation();
-            return true;
-        });
-
-        wait_until([&prepare_calls]() { return prepare_calls.load() == 1; });
-        wait_until([&coordinator, generation, &host_id]() {
-            return coordinator.criu_all_ranks_quiesced(generation, host_id);
-        });
-        BOOST_CHECK(blocked_enter.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
-        BOOST_CHECK(exit_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
-
-        BOOST_CHECK_EQUAL(coordinator.criu_request_restore(generation, "supervisor-b"), generation);
-        BOOST_CHECK(exit_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-        BOOST_CHECK(blocked_enter.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-        BOOST_CHECK(exit_future.get());
-        BOOST_CHECK(blocked_enter.get());
-
-        auto ranks = coordinator.criu_rank_info();
-        BOOST_REQUIRE_EQUAL(ranks.size(), 1U);
-        BOOST_CHECK(ranks[0].state == FMI::FT::CriuRankState::Running);
-        BOOST_CHECK_EQUAL(ranks[0].quiesced_generation, generation);
-
-        runtime.exit_operation();
-        runtime.shutdown();
-    }
-
-    coordinator.clear_criu_job_state();
-    coordinator.clear_job_state();
-}
-
-BOOST_AUTO_TEST_CASE(supervisor_uses_mock_criu_for_checkpoint_and_restore) {
-    auto temp_dir = fs::temp_directory_path() / unique_comm_name("criu-supervisor");
-    auto images_dir = temp_dir / "images";
-    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
-    auto mock_bin_dir = temp_dir / "bin";
-    write_mock_criu(mock_bin_dir);
-
-    std::string comm_name = unique_comm_name("criu-supervisor-job");
-    if (!redis_available(config_path.string(), comm_name, 2)) {
-        BOOST_TEST_MESSAGE("Skipping CRIU supervisor test because Redis is unavailable");
-        fs::remove_all(temp_dir);
-        return;
-    }
-
-    ScopedPathPrefix path_guard(mock_bin_dir);
-    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_job_state();
-    coordinator.clear_job_state();
-
-    auto host_id = current_host_id();
-    coordinator.criu_register_rank(0, 0, host_id, "Direct");
-    coordinator.criu_register_rank(1, 0, host_id, "Direct");
-
-    FMI::FT::CriuSupervisor supervisor(config_path.string(), comm_name, 2);
-    auto checkpoint_future = std::async(std::launch::async, [&supervisor]() {
-        return supervisor.checkpoint();
-    });
-
-    wait_until([&coordinator]() { return coordinator.criu_requested_generation() == 1; });
-    coordinator.criu_mark_rank_quiesced(0, 0, host_id, "Direct", 1);
-    coordinator.criu_mark_rank_quiesced(1, 0, host_id, "Direct", 1);
-
-    BOOST_REQUIRE(checkpoint_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-    auto checkpoint_generation = checkpoint_future.get();
-    BOOST_CHECK_EQUAL(checkpoint_generation, 1U);
-
-    auto rank0_dir = images_dir / comm_name / "generation-1" / "rank-0";
-    auto rank1_dir = images_dir / comm_name / "generation-1" / "rank-1";
-    BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
-    BOOST_CHECK(fs::exists(rank1_dir / "dump.marker"));
-    BOOST_CHECK(coordinator.criu_job_info().state == FMI::FT::CriuJobState::CheckpointComplete);
-
-    auto restore_generation = supervisor.restore(checkpoint_generation);
-    BOOST_CHECK_EQUAL(restore_generation, checkpoint_generation);
-    BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
-    BOOST_CHECK(fs::exists(rank1_dir / "restore.marker"));
-    BOOST_CHECK(coordinator.criu_job_info().state == FMI::FT::CriuJobState::Restored);
-
-    supervisor.cleanup();
-    BOOST_CHECK(!fs::exists(images_dir / comm_name));
-    BOOST_CHECK(coordinator.criu_rank_info().empty());
-
-    coordinator.clear_job_state();
-    fs::remove_all(temp_dir);
-}
-
 BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_rank) {
     auto temp_dir = fs::temp_directory_path() / unique_comm_name("migration-supervisor");
     auto images_dir = temp_dir / "images";
@@ -458,7 +276,7 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_ran
 
     ScopedPathPrefix path_guard(mock_bin_dir);
     FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
 
     auto host_id = current_host_id();
@@ -490,7 +308,7 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_dumps_restores_and_promotes_single_ran
     }
     BOOST_CHECK(rank0_running);
 
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
     fs::remove_all(temp_dir);
 }
@@ -551,7 +369,7 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_promotes_epoch_only_after_dump_and_res
 
     ScopedPathPrefix path_guard(mock_bin_dir);
     FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
 
     auto host_id = current_host_id();
@@ -607,7 +425,7 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_promotes_epoch_only_after_dump_and_res
 
     unsetenv("FMI_MOCK_GATE_MODE");
     unsetenv("FMI_MOCK_GATE_DIR");
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
     fs::remove_all(temp_dir);
 }
@@ -631,7 +449,7 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
 
     auto config = FMI::Utils::Configuration(config_path.string()).get_fault_tolerance_config();
     auto coordinator = std::make_shared<FMI::FT::Coordinator>(config_path.string(), comm_name, 2);
-    coordinator->clear_criu_job_state();
+    coordinator->clear_criu_state();
     coordinator->clear_job_state();
     coordinator->request_migration(0);  // rank 0 becomes the migration target at epoch 0
 
@@ -712,7 +530,7 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     }
     BOOST_CHECK(active_at_epoch1);
 
-    coordinator->clear_criu_job_state();
+    coordinator->clear_criu_state();
     coordinator->clear_job_state();
     fs::remove_all(temp_dir);
 }
@@ -763,7 +581,7 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
 
     ScopedPathPrefix path_guard(mock_bin_dir);
     FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
 
     // Rank 0 joins the directory as an ACTIVE member at epoch 0.
@@ -786,7 +604,7 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
     BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
 
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
     fs::remove_all(temp_dir);
 }
@@ -805,7 +623,7 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_cleanup_removes_images_and_state) {
     }
 
     FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
 
     // Residue from a prior migration: an image tree plus a CRIU registry entry.
@@ -822,51 +640,7 @@ BOOST_AUTO_TEST_CASE(migration_supervisor_cleanup_removes_images_and_state) {
     BOOST_CHECK(!fs::exists(comm_images));
     BOOST_CHECK(coordinator.criu_rank_info().empty());
 
-    coordinator.clear_criu_job_state();
-    coordinator.clear_job_state();
-    fs::remove_all(temp_dir);
-}
-
-BOOST_AUTO_TEST_CASE(criu_extra_args_reach_the_whole_job_supervisor) {
-    // FMI_CRIU_EXTRA_ARGS must reach every criu invocation, not just the migration path. Drive
-    // the whole-job CriuSupervisor (which previously could not see the flag — its dump/restore
-    // built criu args without it) and assert the operator flag lands on the criu command line.
-    auto temp_dir = fs::temp_directory_path() / unique_comm_name("extra-args");
-    auto images_dir = temp_dir / "images";
-    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
-    auto mock_bin_dir = temp_dir / "bin";
-    write_mock_criu(mock_bin_dir);
-
-    std::string comm_name = unique_comm_name("extra-args-job");
-    if (!redis_available(config_path.string(), comm_name, 1)) {
-        BOOST_TEST_MESSAGE("Skipping criu extra-args test because Redis is unavailable");
-        fs::remove_all(temp_dir);
-        return;
-    }
-
-    ScopedPathPrefix path_guard(mock_bin_dir);
-    ScopedEnv extra_args("FMI_CRIU_EXTRA_ARGS", "--unprivileged");
-
-    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 1);
-    coordinator.clear_criu_job_state();
-    coordinator.clear_job_state();
-    auto host_id = current_host_id();
-    coordinator.criu_register_rank(0, 0, host_id, "Direct");
-
-    FMI::FT::CriuSupervisor supervisor(config_path.string(), comm_name, 1);
-    auto checkpoint_future = std::async(std::launch::async, [&supervisor]() { return supervisor.checkpoint(); });
-    wait_until([&coordinator]() { return coordinator.criu_requested_generation() == 1; });
-    coordinator.criu_mark_rank_quiesced(0, 0, host_id, "Direct", 1);
-    BOOST_REQUIRE(checkpoint_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-    (void) checkpoint_future.get();
-
-    auto args_file = images_dir / comm_name / "generation-1" / "rank-0" / "dump.args";
-    BOOST_REQUIRE(fs::exists(args_file));
-    std::ifstream in(args_file);
-    std::string recorded((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    BOOST_CHECK(recorded.find("--unprivileged") != std::string::npos);
-
-    coordinator.clear_criu_job_state();
+    coordinator.clear_criu_state();
     coordinator.clear_job_state();
     fs::remove_all(temp_dir);
 }

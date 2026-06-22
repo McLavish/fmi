@@ -74,24 +74,6 @@ namespace {
     }
 
 #ifdef FMI_ENABLE_CRIU
-    std::string state_to_string(FMI::FT::CriuJobState state) {
-        switch (state) {
-            case FMI::FT::CriuJobState::Running:
-                return "RUNNING";
-            case FMI::FT::CriuJobState::CheckpointRequested:
-                return "CHECKPOINT_REQUESTED";
-            case FMI::FT::CriuJobState::Quiesced:
-                return "QUIESCED";
-            case FMI::FT::CriuJobState::CheckpointComplete:
-                return "CHECKPOINT_COMPLETE";
-            case FMI::FT::CriuJobState::RestoreRequested:
-                return "RESTORE_REQUESTED";
-            case FMI::FT::CriuJobState::Restored:
-                return "RESTORED";
-        }
-        throw std::runtime_error("Unknown CRIU job state");
-    }
-
     std::string state_to_string(FMI::FT::CriuRankState state) {
         switch (state) {
             case FMI::FT::CriuRankState::Running:
@@ -100,28 +82,6 @@ namespace {
                 return "QUIESCED";
         }
         throw std::runtime_error("Unknown CRIU rank state");
-    }
-
-    FMI::FT::CriuJobState criu_job_state_from_string(const std::string& state) {
-        if (state == "RUNNING") {
-            return FMI::FT::CriuJobState::Running;
-        }
-        if (state == "CHECKPOINT_REQUESTED") {
-            return FMI::FT::CriuJobState::CheckpointRequested;
-        }
-        if (state == "QUIESCED") {
-            return FMI::FT::CriuJobState::Quiesced;
-        }
-        if (state == "CHECKPOINT_COMPLETE") {
-            return FMI::FT::CriuJobState::CheckpointComplete;
-        }
-        if (state == "RESTORE_REQUESTED") {
-            return FMI::FT::CriuJobState::RestoreRequested;
-        }
-        if (state == "RESTORED") {
-            return FMI::FT::CriuJobState::Restored;
-        }
-        throw std::runtime_error("Unknown CRIU job state string: " + state);
     }
 
     FMI::FT::CriuRankState criu_rank_state_from_string(const std::string& state) {
@@ -430,7 +390,7 @@ void FMI::FT::Coordinator::clear_job_state() {
 }
 
 #ifdef FMI_ENABLE_CRIU
-void FMI::FT::Coordinator::clear_criu_job_state() {
+void FMI::FT::Coordinator::clear_criu_state() {
 #if FMI_ENABLE_REDIS
     auto reply = impl->command({"KEYS", impl->criu_prefix() + "*"});
     if (reply->type != REDIS_REPLY_ARRAY) {
@@ -494,17 +454,11 @@ void FMI::FT::Coordinator::promote_epoch(std::uint64_t next_epoch) const {
 }
 
 #ifdef FMI_ENABLE_CRIU
-void FMI::FT::Coordinator::ensure_criu_job() const {
+void FMI::FT::Coordinator::ensure_criu_registry() const {
 #if FMI_ENABLE_REDIS
     auto exists = impl->command({"EXISTS", impl->criu_meta_key()});
     if (exists->integer == 0) {
-        impl->command({"HSET", impl->criu_meta_key(),
-                       "world_size", std::to_string(impl->num_peers),
-                       "state", state_to_string(CriuJobState::Running),
-                       "requested_generation", "0",
-                       "completed_generation", "0",
-                       "restore_generation", "0",
-                       "supervisor", "none"});
+        impl->command({"HSET", impl->criu_meta_key(), "world_size", std::to_string(impl->num_peers)});
     } else {
         check_world_size(impl->criu_meta_key(), "CRIU FT world size does not match the stored communicator metadata");
     }
@@ -515,7 +469,7 @@ void FMI::FT::Coordinator::criu_write_rank(FMI::Utils::peer_num rank, int pid, c
                                            const std::string& backend, CriuRankState state, bool write_generation,
                                            std::uint64_t generation) const {
 #if FMI_ENABLE_REDIS
-    ensure_criu_job();
+    ensure_criu_registry();
     std::vector<std::string> args = {"HSET", impl->criu_rank_key(rank),
                                      "pid", std::to_string(pid),
                                      "host_id", host_id,
@@ -549,92 +503,6 @@ void FMI::FT::Coordinator::criu_mark_rank_running(FMI::Utils::peer_num rank, int
 void FMI::FT::Coordinator::criu_mark_rank_quiesced(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
                                                    const std::string& backend, std::uint64_t generation) const {
     criu_write_rank(rank, pid, host_id, backend, CriuRankState::Quiesced, true, generation);
-}
-
-void FMI::FT::Coordinator::set_criu_job_state(CriuJobState state, const char* generation_field, std::uint64_t generation,
-                                              const std::string& supervisor_id) const {
-#if FMI_ENABLE_REDIS
-    impl->command({"HSET", impl->criu_meta_key(),
-                   "state", state_to_string(state),
-                   generation_field, std::to_string(generation),
-                   "supervisor", supervisor_id});
-#else
-    (void) state; (void) generation_field; (void) generation; (void) supervisor_id;
-#endif
-}
-
-std::uint64_t FMI::FT::Coordinator::criu_request_checkpoint(const std::string& supervisor_id) const {
-#if FMI_ENABLE_REDIS
-    auto info = criu_job_info();
-    std::uint64_t next_generation = std::max(info.requested_generation, info.completed_generation) + 1;
-    set_criu_job_state(CriuJobState::CheckpointRequested, "requested_generation", next_generation, supervisor_id);
-    return next_generation;
-#else
-    return 0;
-#endif
-}
-
-bool FMI::FT::Coordinator::criu_all_ranks_quiesced(std::uint64_t generation, const std::string& host_id) const {
-#if FMI_ENABLE_REDIS
-    auto ranks = criu_rank_info();
-    std::size_t relevant_ranks = 0;
-    for (const auto& rank : ranks) {
-        if (!host_id.empty() && rank.host_id != host_id) {
-            continue;
-        }
-        relevant_ranks++;
-        if (rank.state != CriuRankState::Quiesced || rank.quiesced_generation != generation) {
-            return false;
-        }
-    }
-    return relevant_ranks > 0;
-#else
-    return false;
-#endif
-}
-
-void FMI::FT::Coordinator::criu_mark_job_quiesced(std::uint64_t generation, const std::string& supervisor_id) const {
-    set_criu_job_state(CriuJobState::Quiesced, "requested_generation", generation, supervisor_id);
-}
-
-void FMI::FT::Coordinator::criu_mark_checkpoint_complete(std::uint64_t generation, const std::string& supervisor_id) const {
-    set_criu_job_state(CriuJobState::CheckpointComplete, "completed_generation", generation, supervisor_id);
-}
-
-std::uint64_t FMI::FT::Coordinator::criu_request_restore(std::uint64_t generation, const std::string& supervisor_id) const {
-    set_criu_job_state(CriuJobState::RestoreRequested, "restore_generation", generation, supervisor_id);
-    return generation;
-}
-
-void FMI::FT::Coordinator::criu_mark_job_restored(std::uint64_t generation, const std::string& supervisor_id) const {
-    set_criu_job_state(CriuJobState::Restored, "restore_generation", generation, supervisor_id);
-}
-
-std::uint64_t FMI::FT::Coordinator::criu_requested_generation() const {
-    return criu_job_info().requested_generation;
-}
-
-std::uint64_t FMI::FT::Coordinator::criu_restore_generation() const {
-    return criu_job_info().restore_generation;
-}
-
-FMI::FT::CriuJobInfo FMI::FT::Coordinator::criu_job_info() const {
-#if FMI_ENABLE_REDIS
-    ensure_criu_job();
-
-    const auto& meta = impl->criu_meta_key();
-    FMI::FT::CriuJobInfo info;
-    if (auto state = impl->hget(meta, "state")) {
-        info.state = criu_job_state_from_string(*state);
-    }
-    info.requested_generation = impl->hget_u64(meta, "requested_generation", info.requested_generation);
-    info.completed_generation = impl->hget_u64(meta, "completed_generation", info.completed_generation);
-    info.restore_generation = impl->hget_u64(meta, "restore_generation", info.restore_generation);
-    info.supervisor = impl->hget(meta, "supervisor").value_or(info.supervisor);
-    return info;
-#else
-    return {};
-#endif
 }
 
 std::vector<FMI::FT::CriuRankInfo> FMI::FT::Coordinator::criu_rank_info() const {

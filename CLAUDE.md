@@ -97,7 +97,7 @@ The CRIU tests are designed to run against a *mock* `criu` binary because real
 checkpoint/restore needs kernel capabilities usually unavailable in dev environments.
 
 Standalone demos (also under `tests/`, built as separate executables): `ft_migration_demo`.
-The experimental `criu_checkpoint_demo` is built only with `FMI_ENABLE_CRIU=ON`.
+The experimental `transparent_state_transfer_demo` is built only with `FMI_ENABLE_CRIU=ON`.
 
 ## Running things
 
@@ -107,10 +107,10 @@ Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id
 control + data plane), and the AWS Lambda + S3 flow is in `runbooks/aws-python311-s3/`; both
 READMEs are verified step-by-step runbooks. JSON config templates live in `config/`.
 
-The experimental CRIU supervisor CLI is built only with `FMI_ENABLE_CRIU=ON`:
+The experimental CRIU migration supervisor CLI is built only with `FMI_ENABLE_CRIU=ON`:
 
 ```text
-fmi-criu-supervisor {checkpoint|restore|status|cleanup} <comm_name> <num_peers> <config> [generation]
+fmi-migration-supervisor {migrate|watch|cleanup} <comm_name> <num_peers> <config> [rank]
 ```
 
 ## Architecture
@@ -168,11 +168,7 @@ fault tolerance layered around the user API.
   host-local `MigrationSupervisor` (`fmi-migration-supervisor`), reuses the
   `prepare_channels_for_checkpoint` hook + the survivor reconfigure path, and is verified in
   `runbooks/local-criu-state-transfer/` (rootless criu) with `tests/transparent_state_transfer_demo.cpp`.
-  - **Experimental whole-job CRIU** — `FMI_ENABLE_CRIU=ON` also builds the separate whole-job
-    rollback path: `FMI::FT::CriuRuntime`, the `fmi-criu-supervisor` CLI, and
-    `criu_checkpoint_demo`. It dumps/restores *all* ranks together to one generation (no epoch
-    change) and is quarantined WIP, distinct from the single-rank `state_transfer="criu"`
-    migration above. Shared criu-invocation code lives in `ft/experimental/CriuExec`.
+    Shared criu-invocation code lives in `ft/experimental/CriuExec`.
   - **Epoch fencing invariant** (`PLANS.md`): under FT, every backend-visible name —
     `Direct` pairing names, `Redis`/`S3` object names, per-instance operation counters — is
     epoch-qualified, so stale messages/objects from an old epoch can never be consumed after

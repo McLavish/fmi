@@ -76,9 +76,9 @@ C++ sample code for the library is available at [tests/communicator.cpp](tests/c
 
 Fault-tolerance examples are documented in [docs/fault-tolerance.md](docs/fault-tolerance.md). The repository includes:
 
-- epoch-based rank migration with `FMI::FT::Session`
-- CRIU-coordinated same-host checkpoint/restore with plain `FMI::Communicator`
-- the `fmi-criu-supervisor` CLI for CRIU-mode checkpoint, restore, status, and cleanup
+- epoch-based transparent rank migration with a plain `FMI::Communicator`
+- optional CRIU single-rank state transfer (`state_transfer="criu"`) that preserves the
+  migrated rank's memory, driven by the `fmi-migration-supervisor` CLI
 
 ## Documentation
 

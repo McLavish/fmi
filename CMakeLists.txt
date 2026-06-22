@@ -7,9 +7,9 @@ option(FMI_ENABLE_REDIS "Enable the Redis backend" ON)
 option(FMI_ENABLE_CRIU "Build experimental CRIU checkpoint/restore support" OFF)
 option(FMI_USE_STATIC_BOOST "Prefer static Boost libraries" ON)
 
-# The CRIU paths (whole-job rollback and single-rank state transfer) use the Redis-backed FT
-# control plane; the Coordinator throws without it. Fail at configure time rather than letting
-# the CRIU control-plane calls silently no-op when Redis is disabled.
+# The CRIU single-rank state-transfer path uses the Redis-backed FT control plane; the
+# Coordinator throws without it. Fail at configure time rather than letting the CRIU
+# control-plane calls silently no-op when Redis is disabled.
 if(FMI_ENABLE_CRIU AND NOT FMI_ENABLE_REDIS)
     message(FATAL_ERROR "FMI_ENABLE_CRIU=ON requires FMI_ENABLE_REDIS=ON (the CRIU control plane uses Redis)")
 endif()
@@ -72,9 +72,7 @@ endif()
 if(FMI_ENABLE_CRIU)
     list(APPEND FMI_SOURCES
         src/ft/experimental/CriuExec.cpp
-        src/ft/experimental/CriuRuntime.cpp
         src/ft/experimental/FmiFtSupervisor.cpp
-        src/ft/experimental/CriuSupervisor.cpp
         src/ft/experimental/MigrationSupervisor.cpp
     )
 endif()
