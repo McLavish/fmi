@@ -4,7 +4,7 @@ Epochs are the central fencing mechanism for `transparent_migration`.
 
 An epoch is a monotonically increasing communicator generation stored in Redis
 as `fmi:ft:<comm_name>:meta[current_epoch]`. Epoch `0` is created when the
-coordinator first initializes a job.
+control plane first initializes a job.
 
 ## Why Epochs Exist
 
@@ -45,7 +45,7 @@ deleted, but their names no longer match the new epoch.
 When `fault_tolerance.mode` is `transparent_migration`, the `Communicator`
 constructor:
 
-1. creates a `Coordinator` for the base communicator name
+1. creates a `ControlPlane` for the base communicator name
 2. reads `current_epoch`
 3. if this rank is in the pending set, waits until the orchestrator promotes
    and clears pending, then re-reads `current_epoch`

@@ -1,4 +1,4 @@
-#include "../../include/ft/Coordinator.h"
+#include "../../include/ft/ControlPlane.h"
 #include "../../include/utils/Configuration.h"
 
 #include <algorithm>
@@ -97,7 +97,7 @@ namespace {
 #endif
 }
 
-struct FMI::FT::Coordinator::Impl {
+struct FMI::FT::ControlPlane::Impl {
     Utils::FaultToleranceConfig config;
     std::string comm_name;
     Utils::peer_num num_peers;
@@ -125,10 +125,10 @@ struct FMI::FT::Coordinator::Impl {
                 std::signal(SIGPIPE, previous);
             }
             // This also arms SIG_IGN in the rank-agent/orchestrator processes (which construct a
-            // Coordinator from the same criu config) even though only the restored rank is
+            // ControlPlane from the same criu config) even though only the restored rank is
             // --tcp-closed; the over-arming is harmless (those processes do not rely on the
             // default disposition). The disposition is intentionally not restored on destruction:
-            // a Coordinator lives for the FT session, and restoring SIG_DFL could re-expose an
+            // a ControlPlane lives for the FT session, and restoring SIG_DFL could re-expose an
             // in-flight reconnect to a fatal SIGPIPE.
         }
         connect();
@@ -255,7 +255,7 @@ struct FMI::FT::Coordinator::Impl {
 #endif
 };
 
-FMI::FT::Coordinator::Coordinator(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers) {
+FMI::FT::ControlPlane::ControlPlane(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers) {
     Utils::Configuration config(std::move(config_path));
     auto ft_config = config.get_fault_tolerance_config();
     if (!ft_config.enabled) {
@@ -268,9 +268,9 @@ FMI::FT::Coordinator::Coordinator(std::string config_path, std::string comm_name
     ensure_job();
 }
 
-FMI::FT::Coordinator::~Coordinator() = default;
+FMI::FT::ControlPlane::~ControlPlane() = default;
 
-void FMI::FT::Coordinator::check_world_size(const std::string& meta_key, const char* error_message) const {
+void FMI::FT::ControlPlane::check_world_size(const std::string& meta_key, const char* error_message) const {
 #if FMI_ENABLE_REDIS
     auto world_size = impl->command({"HGET", meta_key, "world_size"});
     if (world_size->type == REDIS_REPLY_NIL) {
@@ -284,7 +284,7 @@ void FMI::FT::Coordinator::check_world_size(const std::string& meta_key, const c
 #endif
 }
 
-void FMI::FT::Coordinator::ensure_job() const {
+void FMI::FT::ControlPlane::ensure_job() const {
 #if FMI_ENABLE_REDIS
     auto exists = impl->command({"EXISTS", impl->meta_key()});
     if (exists->integer == 0) {
@@ -303,7 +303,7 @@ void FMI::FT::Coordinator::ensure_job() const {
 #endif
 }
 
-std::uint64_t FMI::FT::Coordinator::epoch() const {
+std::uint64_t FMI::FT::ControlPlane::epoch() const {
 #if FMI_ENABLE_REDIS
     ensure_job();
     return impl->hget_u64(impl->meta_key(), "current_epoch");
@@ -312,7 +312,7 @@ std::uint64_t FMI::FT::Coordinator::epoch() const {
 #endif
 }
 
-void FMI::FT::Coordinator::request_migration(FMI::Utils::peer_num rank) {
+void FMI::FT::ControlPlane::request_migration(FMI::Utils::peer_num rank) {
 #if FMI_ENABLE_REDIS
     ensure_job();
     auto current_epoch = epoch();
@@ -321,13 +321,13 @@ void FMI::FT::Coordinator::request_migration(FMI::Utils::peer_num rank) {
 #endif
 }
 
-void FMI::FT::Coordinator::set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const {
+void FMI::FT::ControlPlane::set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const {
 #if FMI_ENABLE_REDIS
     impl->command({"HSET", impl->placement_key(epoch), std::to_string(rank), placement});
 #endif
 }
 
-std::string FMI::FT::Coordinator::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
+std::string FMI::FT::ControlPlane::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
 #if FMI_ENABLE_REDIS
     return impl->hget(impl->placement_key(epoch), std::to_string(rank)).value_or("");
 #else
@@ -335,7 +335,7 @@ std::string FMI::FT::Coordinator::placement_for_rank(std::uint64_t epoch, FMI::U
 #endif
 }
 
-std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::Coordinator::directory_snapshot(std::uint64_t epoch) const {
+std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::ControlPlane::directory_snapshot(std::uint64_t epoch) const {
 #if FMI_ENABLE_REDIS
     std::vector<FMI::FT::RankDirectoryEntry> ranks;
     auto reply = impl->command({"HKEYS", impl->members_key(epoch)});
@@ -372,7 +372,7 @@ std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::Coordinator::directory_snapsho
 #endif
 }
 
-void FMI::FT::Coordinator::clear_job_state() {
+void FMI::FT::ControlPlane::clear_job_state() {
 #if FMI_ENABLE_REDIS
     impl->command({"DEL", impl->meta_key()});
     impl->command({"DEL", impl->pending_key()});
@@ -390,7 +390,7 @@ void FMI::FT::Coordinator::clear_job_state() {
 }
 
 #ifdef FMI_ENABLE_CRIU
-void FMI::FT::Coordinator::clear_criu_state() {
+void FMI::FT::ControlPlane::clear_criu_state() {
 #if FMI_ENABLE_REDIS
     auto reply = impl->command({"KEYS", impl->criu_prefix() + "*"});
     if (reply->type != REDIS_REPLY_ARRAY) {
@@ -406,7 +406,7 @@ void FMI::FT::Coordinator::clear_criu_state() {
 }
 #endif
 
-bool FMI::FT::Coordinator::has_pending_migration() const {
+bool FMI::FT::ControlPlane::has_pending_migration() const {
 #if FMI_ENABLE_REDIS
     auto reply = impl->command({"SCARD", impl->pending_key()});
     return reply->integer > 0;
@@ -415,7 +415,7 @@ bool FMI::FT::Coordinator::has_pending_migration() const {
 #endif
 }
 
-bool FMI::FT::Coordinator::is_rank_pending(FMI::Utils::peer_num rank) const {
+bool FMI::FT::ControlPlane::is_rank_pending(FMI::Utils::peer_num rank) const {
 #if FMI_ENABLE_REDIS
     auto reply = impl->command({"SISMEMBER", impl->pending_key(), std::to_string(rank)});
     return reply->integer == 1;
@@ -424,7 +424,7 @@ bool FMI::FT::Coordinator::is_rank_pending(FMI::Utils::peer_num rank) const {
 #endif
 }
 
-void FMI::FT::Coordinator::register_rank(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id,
+void FMI::FT::ControlPlane::register_rank(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id,
                                          FMI::FT::RankState state) const {
 #if FMI_ENABLE_REDIS
     impl->command({"HSET", impl->members_key(epoch), std::to_string(rank), worker_id});
@@ -432,13 +432,13 @@ void FMI::FT::Coordinator::register_rank(std::uint64_t epoch, FMI::Utils::peer_n
 #endif
 }
 
-void FMI::FT::Coordinator::set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, FMI::FT::RankState state) const {
+void FMI::FT::ControlPlane::set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, FMI::FT::RankState state) const {
 #if FMI_ENABLE_REDIS
     impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), state_to_string(state)});
 #endif
 }
 
-void FMI::FT::Coordinator::promote_epoch(std::uint64_t next_epoch) const {
+void FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
 #if FMI_ENABLE_REDIS
     static const std::string script =
             "local current = redis.call('HGET', KEYS[1], 'current_epoch') "
@@ -454,7 +454,7 @@ void FMI::FT::Coordinator::promote_epoch(std::uint64_t next_epoch) const {
 }
 
 #ifdef FMI_ENABLE_CRIU
-void FMI::FT::Coordinator::ensure_criu_registry() const {
+void FMI::FT::ControlPlane::ensure_criu_registry() const {
 #if FMI_ENABLE_REDIS
     auto exists = impl->command({"EXISTS", impl->criu_meta_key()});
     if (exists->integer == 0) {
@@ -465,7 +465,7 @@ void FMI::FT::Coordinator::ensure_criu_registry() const {
 #endif
 }
 
-void FMI::FT::Coordinator::criu_write_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
+void FMI::FT::ControlPlane::criu_write_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
                                            const std::string& backend, CriuRankState state, bool write_generation,
                                            std::uint64_t generation) const {
 #if FMI_ENABLE_REDIS
@@ -487,7 +487,7 @@ void FMI::FT::Coordinator::criu_write_rank(FMI::Utils::peer_num rank, int pid, c
 #endif
 }
 
-void FMI::FT::Coordinator::criu_register_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
+void FMI::FT::ControlPlane::criu_register_rank(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
                                               const std::string& backend) const {
 #if FMI_ENABLE_REDIS
     criu_write_rank(rank, pid, host_id, backend, CriuRankState::Running, true, 0);
@@ -495,17 +495,17 @@ void FMI::FT::Coordinator::criu_register_rank(FMI::Utils::peer_num rank, int pid
 #endif
 }
 
-void FMI::FT::Coordinator::criu_mark_rank_running(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
+void FMI::FT::ControlPlane::criu_mark_rank_running(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
                                                   const std::string& backend) const {
     criu_write_rank(rank, pid, host_id, backend, CriuRankState::Running, false, 0);
 }
 
-void FMI::FT::Coordinator::criu_mark_rank_quiesced(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
+void FMI::FT::ControlPlane::criu_mark_rank_quiesced(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
                                                    const std::string& backend, std::uint64_t generation) const {
     criu_write_rank(rank, pid, host_id, backend, CriuRankState::Quiesced, true, generation);
 }
 
-std::vector<FMI::FT::CriuRankInfo> FMI::FT::Coordinator::criu_rank_info() const {
+std::vector<FMI::FT::CriuRankInfo> FMI::FT::ControlPlane::criu_rank_info() const {
 #if FMI_ENABLE_REDIS
     std::vector<FMI::FT::CriuRankInfo> ranks;
     auto reply = impl->command({"SMEMBERS", impl->criu_ranks_key()});

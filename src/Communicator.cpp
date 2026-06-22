@@ -1,6 +1,6 @@
 #include "../include/Communicator.h"
 #include "../include/ft/TransparentMigrationRuntime.h"
-#include "../include/ft/Coordinator.h"
+#include "../include/ft/ControlPlane.h"
 
 #include <chrono>
 #include <utility>
@@ -39,26 +39,26 @@ namespace FMI {
             // Resolve worker_id (auto-generate if not provided)
             std::string resolved_worker_id = worker_id.empty() ? make_worker_id(peer_id) : std::move(worker_id);
 
-            auto coordinator = std::make_shared<FMI::FT::Coordinator>(config_path, comm_name, num_peers);
-            std::uint64_t current_epoch = coordinator->epoch();
+            auto control_plane = std::make_shared<FMI::FT::ControlPlane>(config_path, comm_name, num_peers);
+            std::uint64_t current_epoch = control_plane->epoch();
 
-            if (coordinator->is_rank_pending(peer_id)) {
+            if (control_plane->is_rank_pending(peer_id)) {
                 // A replacement rank waits for the orchestrator to promote and clear pending.
                 bool cleared = FMI::Utils::poll_until(
-                        [&]() { return !coordinator->is_rank_pending(peer_id); },
+                        [&]() { return !control_plane->is_rank_pending(peer_id); },
                         ft_config.reconfigure_timeout_ms, ft_config.poll_interval_ms);
                 if (!cleared) {
                     throw FMI::Utils::Timeout();
                 }
-                current_epoch = coordinator->epoch();
+                current_epoch = control_plane->epoch();
             }
 
             std::uint64_t active_epoch = current_epoch;
-            coordinator->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Active);
+            control_plane->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Active);
             // PLANS.md step 4 seam: a future CRIU-backed state restore for replacement ranks
             // belongs here, after the rank joins epoch N+1 and before it resumes user work.
             if (!placement.empty()) {
-                coordinator->set_placement(active_epoch, peer_id, placement);
+                control_plane->set_placement(active_epoch, peer_id, placement);
             }
 
             this->comm_name = epoch_comm_name(comm_name, active_epoch);
@@ -72,7 +72,7 @@ namespace FMI {
 
             operation_runtime = std::make_shared<FMI::FT::TransparentMigrationRuntime>(
                     peer_id, resolved_worker_id, placement, active_epoch,
-                    ft_config, coordinator, comm_name,
+                    ft_config, control_plane, comm_name,
                     [this](const std::string& new_name) { reconfigure_to_epoch(new_name); },
                     [this]() { prepare_channels_for_checkpoint(); });
         } else {

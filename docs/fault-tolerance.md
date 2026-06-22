@@ -69,7 +69,7 @@ A host-local rank agent (`FMI::FT::LocalRankAgent`, CLI `fmi-rank-agent`) then:
 
 The restored rank and the survivors both observe epoch `N+1` and reconfigure their channels under
 the new epoch-qualified name; `Direct` re-pairs lazily. The Redis control connection is closed by
-criu's `--tcp-close` and the `Coordinator` reconnects lazily (SIGPIPE is ignored so the first
+criu's `--tcp-close` and the `ControlPlane` reconnects lazily (SIGPIPE is ignored so the first
 post-restore write is not fatal).
 
 #### Configuration
@@ -131,29 +131,29 @@ no shell quoting, so individual flags must not contain spaces.
 
 ## Triggering a migration
 
-An orchestrator drives migration through the `Coordinator` control plane.
+An orchestrator drives migration through the `ControlPlane` control plane.
 
 C++:
 
 ```cpp
 #include <fmi.h>
 
-FMI::FT::Coordinator coordinator("config/fmi.json", comm_name, world_size);
-coordinator.request_migration(rank_to_move);   // mark the rank for migration
+FMI::FT::ControlPlane control_plane("config/fmi.json", comm_name, world_size);
+control_plane.request_migration(rank_to_move);   // mark the rank for migration
 // ... for state_transfer="criu" a fmi-rank-agent promotes the epoch;
 //     for state_transfer="none" the orchestrator launches a replacement and calls
-//     coordinator.promote_epoch(coordinator.epoch() + 1);
+//     control_plane.promote_epoch(control_plane.epoch() + 1);
 ```
 
-Python (`fmi.FTCoordinator`):
+Python (`fmi.FTControlPlane`):
 
 ```python
 import fmi
 
-coordinator = fmi.FTCoordinator("config/fmi.json", comm_name, world_size)
-coordinator.request_migration(rank_to_move)
-# coordinator.promote_epoch()  # advance to the next epoch
-# coordinator.directory_snapshot(epoch)  # inspect rank states/placements
+control_plane = fmi.FTControlPlane("config/fmi.json", comm_name, world_size)
+control_plane.request_migration(rank_to_move)
+# control_plane.promote_epoch()  # advance to the next epoch
+# control_plane.directory_snapshot(epoch)  # inspect rank states/placements
 ```
 
 ## Operational requirements

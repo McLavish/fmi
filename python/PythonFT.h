@@ -3,7 +3,7 @@
 
 #include <boost/python/list.hpp>
 
-#include <ft/Coordinator.h>
+#include <ft/ControlPlane.h>
 #include <memory>
 #include <string>
 
@@ -15,9 +15,9 @@ namespace FMI::Utils {
         std::string state;
     };
 
-    class PythonFTCoordinator {
+    class PythonFTControlPlane {
     public:
-        PythonFTCoordinator(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
+        PythonFTControlPlane(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
 
         void request_migration(FMI::Utils::peer_num rank);
         void promote_epoch();
@@ -27,7 +27,7 @@ namespace FMI::Utils {
         boost::python::list directory_snapshot(std::uint64_t epoch);
 
     private:
-        std::shared_ptr<FMI::FT::Coordinator> coordinator;
+        std::shared_ptr<FMI::FT::ControlPlane> control_plane;
     };
 }
 

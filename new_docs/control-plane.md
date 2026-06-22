@@ -4,16 +4,16 @@ Both FT modes use Redis as the control plane. The Redis data backend can still
 be disabled for normal FMI traffic; the control plane uses its own
 `fault_tolerance.control_host` and `fault_tolerance.control_port` settings.
 
-`FMI::FT::Coordinator` is the only in-tree control-plane client. It validates
+`FMI::FT::ControlPlane` is the only in-tree control-plane client. It validates
 that FT is enabled and that `control_backend` is `Redis`.
 
 ## Client Behavior
 
-The coordinator owns one persistent `redisContext` per `Coordinator::Impl`.
+The control plane owns one persistent `redisContext` per `ControlPlane::Impl`.
 Commands are sent with `redisCommandArgv`, so communicator names, worker IDs,
 and placement strings are always command arguments rather than printf-format
 strings. On a broken connection, the client reconnects and retries the command
-once. Access to the hiredis context is serialized inside the coordinator so
+once. Access to the hiredis context is serialized inside the control plane so
 CRIU runtime helper threads can share the same control client.
 
 The higher-level communicator and channel runtime still assumes one FMI
@@ -62,7 +62,7 @@ string. FMI stores this string but does not interpret it.
 
 ## Migration Request
 
-`Coordinator::request_migration(rank)` does two things:
+`ControlPlane::request_migration(rank)` does two things:
 
 - adds `rank` to the `pending` set
 - sets that rank's state in the current epoch to `MIGRATION_PENDING`
@@ -73,7 +73,7 @@ and promote the epoch.
 
 ## Epoch Promotion
 
-`Coordinator::promote_epoch(next_epoch)` is the single writer path for
+`ControlPlane::promote_epoch(next_epoch)` is the single writer path for
 `current_epoch`. Workers never call it.
 
 Promotion runs as one Lua `EVAL` script:
@@ -116,10 +116,10 @@ does not expire old CRIU rank entries by timestamp.
 
 ## Cleanup
 
-`Coordinator::clear_job_state()` deletes the transparent-migration metadata and
+`ControlPlane::clear_job_state()` deletes the transparent-migration metadata and
 all `epoch:*` keys for the communicator.
 
-`Coordinator::clear_criu_state()` deletes all keys under the communicator's
+`ControlPlane::clear_criu_state()` deletes all keys under the communicator's
 `criu:*` subtree.
 
 The rank agent's `cleanup()` also removes

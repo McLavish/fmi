@@ -8,7 +8,7 @@ option(FMI_ENABLE_CRIU "Build experimental CRIU checkpoint/restore support" OFF)
 option(FMI_USE_STATIC_BOOST "Prefer static Boost libraries" ON)
 
 # The CRIU single-rank state-transfer path uses the Redis-backed FT control plane; the
-# Coordinator throws without it. Fail at configure time rather than letting the CRIU
+# ControlPlane throws without it. Fail at configure time rather than letting the CRIU
 # control-plane calls silently no-op when Redis is disabled.
 if(FMI_ENABLE_CRIU AND NOT FMI_ENABLE_REDIS)
     message(FATAL_ERROR "FMI_ENABLE_CRIU=ON requires FMI_ENABLE_REDIS=ON (the CRIU control plane uses Redis)")
@@ -47,7 +47,7 @@ set(FMI_SOURCES
     src/utils/ChannelPolicy.cpp
     src/comm/PeerToPeer.cpp
     src/comm/Direct.cpp
-    src/ft/Coordinator.cpp
+    src/ft/ControlPlane.cpp
     src/ft/TransparentMigrationRuntime.cpp
 )
 

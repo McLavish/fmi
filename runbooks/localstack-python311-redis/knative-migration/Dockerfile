@@ -19,7 +19,7 @@ COPY knative-migration/fmi-orchestrator.json /var/task/fmi-orchestrator.json
 COPY knative-migration/knative_http.py /var/task/knative_http.py
 COPY knative-migration/orchestrator.py /var/task/orchestrator.py
 
-RUN python3.11 -c "import fmi; assert hasattr(fmi, 'FTCoordinator'); print('fmi import smoke test ok')"
+RUN python3.11 -c "import fmi; assert hasattr(fmi, 'FTControlPlane'); print('fmi import smoke test ok')"
 
 EXPOSE 8080
 ENTRYPOINT []

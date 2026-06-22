@@ -3,7 +3,7 @@
 
 #include "../utils/Common.h"
 #include "../utils/Configuration.h"
-#include "Coordinator.h"
+#include "ControlPlane.h"
 #include "OperationRuntime.h"
 
 #include <cstdint>
@@ -20,7 +20,7 @@ namespace FMI::FT {
             std::string placement,
             std::uint64_t active_epoch,
             const FMI::Utils::FaultToleranceConfig& config,
-            std::shared_ptr<FMI::FT::Coordinator> coordinator,
+            std::shared_ptr<FMI::FT::ControlPlane> control_plane,
             std::string base_comm_name,
             std::function<void(const std::string&)> reconfigure_callback,
             std::function<void()> prepare_for_checkpoint = {});
@@ -34,7 +34,7 @@ namespace FMI::FT {
         std::string placement;
         std::uint64_t active_epoch;
         FMI::Utils::FaultToleranceConfig config;
-        std::shared_ptr<FMI::FT::Coordinator> coordinator;
+        std::shared_ptr<FMI::FT::ControlPlane> control_plane;
         std::string base_comm_name;
         std::function<void(const std::string&)> reconfigure_callback;
         std::function<void()> prepare_for_checkpoint;

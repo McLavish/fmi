@@ -201,7 +201,7 @@ docker buildx build \
 The Dockerfile runs this smoke test during build:
 
 ```bash
-python3.11 -c "import fmi; assert hasattr(fmi, 'FTCoordinator'); print('fmi import smoke test ok')"
+python3.11 -c "import fmi; assert hasattr(fmi, 'FTControlPlane'); print('fmi import smoke test ok')"
 ```
 
 If that fails, rebuild the FMI bundle for the container base before continuing.

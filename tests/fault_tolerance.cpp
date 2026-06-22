@@ -25,8 +25,8 @@ namespace {
 
     bool redis_available(const std::string& comm_name) {
         try {
-            FMI::FT::Coordinator coordinator(ft_config_path, comm_name, 2);
-            coordinator.clear_job_state();
+            FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+            control_plane.clear_job_state();
             return true;
         } catch (const std::exception&) {
             return false;
@@ -49,8 +49,8 @@ BOOST_AUTO_TEST_CASE(transparent_migration_epoch_fenced_comm_name) {
         return;
     }
 
-    FMI::FT::Coordinator coordinator(ft_config_path, comm_name, 2);
-    coordinator.clear_job_state();
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
 
     FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a");
     FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b");
@@ -58,7 +58,7 @@ BOOST_AUTO_TEST_CASE(transparent_migration_epoch_fenced_comm_name) {
     BOOST_CHECK_EQUAL(rank0.get_comm_name(), comm_name + "@epoch=0");
     BOOST_CHECK_EQUAL(rank1.get_comm_name(), comm_name + "@epoch=0");
 
-    coordinator.clear_job_state();
+    control_plane.clear_job_state();
 }
 
 // Placement is stored in the rank directory and visible via directory_snapshot
@@ -69,13 +69,13 @@ BOOST_AUTO_TEST_CASE(transparent_migration_placement_in_directory) {
         return;
     }
 
-    FMI::FT::Coordinator coordinator(ft_config_path, comm_name, 2);
-    coordinator.clear_job_state();
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
 
     FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a", "vm");
     FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b", "vm");
 
-    auto dir = coordinator.directory_snapshot(0);
+    auto dir = control_plane.directory_snapshot(0);
     BOOST_REQUIRE_EQUAL(dir.size(), 2u);
     auto entry0 = *std::find_if(dir.begin(), dir.end(), [](const FMI::FT::RankDirectoryEntry& e){ return e.rank == 0; });
     auto entry1 = *std::find_if(dir.begin(), dir.end(), [](const FMI::FT::RankDirectoryEntry& e){ return e.rank == 1; });
@@ -84,7 +84,7 @@ BOOST_AUTO_TEST_CASE(transparent_migration_placement_in_directory) {
     BOOST_CHECK_EQUAL(entry0.worker_id, "worker-a");
     BOOST_CHECK_EQUAL(entry1.worker_id, "worker-b");
 
-    coordinator.clear_job_state();
+    control_plane.clear_job_state();
 }
 
 // Replacement rank constructor waits while its rank is pending, then joins the externally promoted epoch.
@@ -95,15 +95,15 @@ BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
         return;
     }
 
-    FMI::FT::Coordinator coordinator(ft_config_path, comm_name, 2);
-    coordinator.clear_job_state();
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
 
     // Rank 0 and rank 1 register into epoch 0
     FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a");
     FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b");
 
     // Trigger migration for rank 1
-    coordinator.request_migration(1);
+    control_plane.request_migration(1);
 
     // Launch replacement in a thread; if it observes pending, its constructor blocks until promotion clears it.
     std::future<std::string> replacement_comm_name = std::async(std::launch::async, [&]() {
@@ -114,18 +114,18 @@ BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
     // Give the replacement thread a moment to enter its constructor spin loop,
     // then promote epoch 1 externally as the centralized orchestrator.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    coordinator.promote_epoch(1);
+    control_plane.promote_epoch(1);
 
     std::string rep_name = replacement_comm_name.get();
     BOOST_CHECK_EQUAL(rep_name, comm_name + "@epoch=1");
 
-    auto dir1 = coordinator.directory_snapshot(1);
+    auto dir1 = control_plane.directory_snapshot(1);
     auto rep = std::find_if(dir1.begin(), dir1.end(), [](const FMI::FT::RankDirectoryEntry& e){ return e.rank == 1; });
     BOOST_REQUIRE(rep != dir1.end());
     BOOST_CHECK_EQUAL(rep->worker_id, "worker-c");
     BOOST_CHECK_EQUAL(rep->placement, "serverless");
 
-    coordinator.clear_job_state();
+    control_plane.clear_job_state();
 }
 
 BOOST_AUTO_TEST_SUITE_END();

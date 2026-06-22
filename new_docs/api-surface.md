@@ -19,18 +19,18 @@ FMI::Communicator(
 ```
 
 `worker_id` identifies the concrete worker process for a logical rank.
-`placement` is stored in the coordinator directory and can be used by external
+`placement` is stored in the control-plane directory and can be used by external
 orchestrators. FMI does not interpret placement.
 
 When FT is disabled, these arguments have no FT effect.
 
 `Communicator::get_comm_name()` returns the effective channel communicator
-name. In `transparent_migration`, this includes the epoch suffix. In
-`criu_coordinated` and non-FT mode, it is the base communicator name.
+name. Under transparent migration this includes the epoch suffix; in non-FT
+mode it is the base communicator name.
 
-## C++ Coordinator
+## C++ ControlPlane
 
-`FMI::FT::Coordinator` is available through `include/fmi.h`.
+`FMI::FT::ControlPlane` is available through `include/fmi.h`.
 
 Transparent migration methods intended for external orchestration include:
 
@@ -54,13 +54,13 @@ and the migration runtime, but are public in the header:
 Python exposes:
 
 - `fmi.Communicator`
-- `fmi.FTCoordinator`
+- `fmi.FTControlPlane`
 - `fmi.RankDirectoryEntry`
 
 `fmi.Communicator` accepts optional `faas_memory`, `worker_id`, and `placement`
 arguments.
 
-`fmi.FTCoordinator` exposes:
+`fmi.FTControlPlane` exposes:
 
 - `request_migration(rank)`
 - `promote_epoch()`

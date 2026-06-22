@@ -51,7 +51,7 @@ Key points:
   the rank under `yama ptrace_scope=1` (the host default).
 - Direct sockets are closed before the dump; the restored rank re-pairs lazily under the
   epoch-`N+1` communicator name. The Redis control connection is closed by `--tcp-close` and
-  the Coordinator reconnects lazily (SIGPIPE is ignored so that reconnect is not fatal).
+  the ControlPlane reconnects lazily (SIGPIPE is ignored so that reconnect is not fatal).
 
 ## Prerequisites
 

@@ -69,7 +69,7 @@ done
 [ "${S0}" = "ACTIVE" ] && [ "${S1}" = "ACTIVE" ] || fail "ranks did not reach ACTIVE (s0=${S0} s1=${S1})"
 log "both ranks ACTIVE"
 
-# Request migration of rank 0 (same effect as Coordinator::request_migration).
+# Request migration of rank 0 (same effect as ControlPlane::request_migration).
 log "requesting migration of rank 0"
 redis sadd "${PREFIX}pending" 0 >/dev/null
 redis hset "${PREFIX}epoch:0:states" 0 MIGRATION_PENDING >/dev/null

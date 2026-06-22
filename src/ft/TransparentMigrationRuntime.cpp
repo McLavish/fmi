@@ -15,7 +15,7 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         std::string placement,
         std::uint64_t active_epoch,
         const FMI::Utils::FaultToleranceConfig& config,
-        std::shared_ptr<FMI::FT::Coordinator> coordinator,
+        std::shared_ptr<FMI::FT::ControlPlane> control_plane,
         std::string base_comm_name,
         std::function<void(const std::string&)> reconfigure_callback,
         std::function<void()> prepare_for_checkpoint) :
@@ -24,7 +24,7 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         placement(std::move(placement)),
         active_epoch(active_epoch),
         config(config),
-        coordinator(std::move(coordinator)),
+        control_plane(std::move(control_plane)),
         base_comm_name(std::move(base_comm_name)),
         reconfigure_callback(std::move(reconfigure_callback)),
         prepare_for_checkpoint(std::move(prepare_for_checkpoint)) {
@@ -51,17 +51,17 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
 }
 
 void FMI::FT::TransparentMigrationRuntime::enter_operation() {
-    auto observed = coordinator->epoch();
+    auto observed = control_plane->epoch();
     if (observed > active_epoch) {
         wait_for_promotion_and_reconfigure(config.reconfigure_timeout_ms);
         return;
     }
 
-    if (!coordinator->has_pending_migration()) {
+    if (!control_plane->has_pending_migration()) {
         return;
     }
 
-    if (coordinator->is_rank_pending(peer_id)) {
+    if (control_plane->is_rank_pending(peer_id)) {
         // This rank is the migration target.
         if (config.state_transfer == "criu") {
             // Preserve application state: checkpoint this process and let the rank agent
@@ -70,7 +70,7 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
             return;
         }
         // Default (state_transfer == "none"): quiesce and exit; a fresh replacement recomputes.
-        coordinator->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
+        control_plane->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
         std::exit(0);
     }
 
@@ -104,9 +104,9 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
     // Publish a restorable image entry the rank agent can find: pid + host + QUIESCED for the
     // target epoch. Reuses the CRIU rank registry (single-rank scope).
     int pid = static_cast<int>(getpid());
-    coordinator->criu_register_rank(peer_id, pid, host_id, backend_name);
-    coordinator->criu_mark_rank_quiesced(peer_id, pid, host_id, backend_name, target_epoch);
-    coordinator->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
+    control_plane->criu_register_rank(peer_id, pid, host_id, backend_name);
+    control_plane->criu_mark_rank_quiesced(peer_id, pid, host_id, backend_name, target_epoch);
+    control_plane->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
 
     // Block until restored and promoted. The rank agent dumps this process here and restores
     // it; the restored image resumes in this same loop, observes epoch N+1, and reconfigures
@@ -119,16 +119,16 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
 void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure(unsigned int timeout_ms) {
     std::uint64_t observed = active_epoch;
     bool promoted = FMI::Utils::poll_until(
-            [this, &observed]() { observed = coordinator->epoch(); return observed > active_epoch; },
+            [this, &observed]() { observed = control_plane->epoch(); return observed > active_epoch; },
             timeout_ms, config.poll_interval_ms);
     if (!promoted) {
         throw FMI::Utils::Timeout();
     }
 
     active_epoch = observed;
-    coordinator->register_rank(active_epoch, peer_id, worker_id, FMI::FT::RankState::Active);
+    control_plane->register_rank(active_epoch, peer_id, worker_id, FMI::FT::RankState::Active);
     if (!placement.empty()) {
-        coordinator->set_placement(active_epoch, peer_id, placement);
+        control_plane->set_placement(active_epoch, peer_id, placement);
     }
     // After a CRIU restore the rebuilt channels must be ready before control returns to user
     // code; reconfigure installs the epoch-N+1 channel set in place.

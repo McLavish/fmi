@@ -9,26 +9,29 @@ block is missing, FT is disabled.
 
 ```text
 enabled = false
-mode = transparent_migration
 control_backend = Redis
 control_host = 127.0.0.1
 control_port = 6379
 poll_interval_ms = 1000
 reconfigure_timeout_ms = 10000
 preferred_data_backend = ""
+state_transfer = none
 images_dir = /tmp/fmi-criu-images
 poll_ms = 100
 quiesce_timeout_ms = 10000
 host_id = ""
 ```
 
-The mode parser accepts only:
+There is no FT `mode` selector. FT is turned on with `enabled`; the single
+transparent-migration protocol is always used. `state_transfer` selects how the
+migrated rank's application state is handled and accepts only:
 
-- `transparent_migration`
-- `criu_coordinated`
+- `none` (default) — the rank exits and a fresh replacement recomputes
+- `criu` — the rank's process image is checkpointed/restored (needs
+  `FMI_ENABLE_CRIU=ON` and a `Direct` data plane)
 
-Older documentation may mention `safe_point_restart`; that string is not
-accepted by the current parser.
+Older documentation may mention a `mode` field or `safe_point_restart`; neither
+is read by the current parser.
 
 ## Transparent Migration Example
 
@@ -36,13 +39,13 @@ accepted by the current parser.
 {
   "fault_tolerance": {
     "enabled": true,
-    "mode": "transparent_migration",
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
     "poll_interval_ms": 25,
     "reconfigure_timeout_ms": 250,
-    "preferred_data_backend": "Direct"
+    "preferred_data_backend": "Direct",
+    "state_transfer": "none"
   }
 }
 ```
@@ -57,7 +60,7 @@ that wait.
 {
   "fault_tolerance": {
     "enabled": true,
-    "mode": "criu_coordinated",
+    "state_transfer": "criu",
     "control_backend": "Redis",
     "control_host": "127.0.0.1",
     "control_port": 6379,
@@ -74,10 +77,10 @@ If `host_id` is empty, the migration runtime and rank agent use `gethostname()`.
 
 ## Backend Validation
 
-For all FT modes, if `preferred_data_backend` is non-empty, the communicator
+For any FT config, if `preferred_data_backend` is non-empty, the communicator
 constructor verifies that the named backend is active in `backends`.
 
-For `criu_coordinated`, validation is stricter:
+For `state_transfer = "criu"`, validation is stricter:
 
 - `Direct` must be active
 - no other data backend may be active

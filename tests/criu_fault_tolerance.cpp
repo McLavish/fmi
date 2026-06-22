@@ -45,9 +45,9 @@ namespace {
 
     bool redis_available(const std::string& config_path, const std::string& comm_name, FMI::Utils::peer_num num_peers = 2) {
         try {
-            FMI::FT::Coordinator coordinator(config_path, comm_name, num_peers);
-            coordinator.clear_criu_state();
-            coordinator.clear_job_state();
+            FMI::FT::ControlPlane control_plane(config_path, comm_name, num_peers);
+            control_plane.clear_criu_state();
+            control_plane.clear_job_state();
             return true;
         } catch (const std::exception& e) {
             BOOST_TEST_MESSAGE(std::string("redis_available exception: ") + e.what());
@@ -73,7 +73,7 @@ namespace {
         return value ? "true" : "false";
     }
 
-    // A distinguishable application SIGPIPE handler used to assert the Coordinator does not
+    // A distinguishable application SIGPIPE handler used to assert the ControlPlane does not
     // overwrite a disposition the application already installed.
     void sigpipe_probe_handler(int) {}
 
@@ -275,24 +275,24 @@ BOOST_AUTO_TEST_CASE(rank_agent_dumps_restores_and_promotes_single_rank) {
     }
 
     ScopedPathPrefix path_guard(mock_bin_dir);
-    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
 
     auto host_id = current_host_id();
-    BOOST_CHECK_EQUAL(coordinator.epoch(), 0U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
 
     // Simulate the targeted rank reaching its CRIU quiesce point: publish a restorable image
     // entry (pid + host + QUIESCED) for the target epoch (current epoch + 1 = 1).
     const int target_pid = 4242;
-    coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
-    coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
+    control_plane.criu_register_rank(0, target_pid, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
 
     FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
     auto promoted_epoch = agent.migrate_rank(0);
 
     BOOST_CHECK_EQUAL(promoted_epoch, 1U);
-    BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
 
     // The agent invoked mock criu dump + restore against the single-rank image dir.
     auto rank0_dir = images_dir / comm_name / "epoch-1" / "rank-0";
@@ -301,22 +301,22 @@ BOOST_AUTO_TEST_CASE(rank_agent_dumps_restores_and_promotes_single_rank) {
 
     // The checkpoint-ready marker is cleared so a watch loop does not re-trigger.
     bool rank0_running = false;
-    for (const auto& info : coordinator.criu_rank_info()) {
+    for (const auto& info : control_plane.criu_rank_info()) {
         if (info.rank == 0) {
             rank0_running = info.state == FMI::FT::CriuRankState::Running;
         }
     }
     BOOST_CHECK(rank0_running);
 
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
     fs::remove_all(temp_dir);
 }
 
-BOOST_AUTO_TEST_CASE(criu_coordinator_scopes_sigpipe_to_default_disposition) {
+BOOST_AUTO_TEST_CASE(criu_control_plane_scopes_sigpipe_to_default_disposition) {
     // The criu state-transfer path needs SIGPIPE ignored so a --tcp-close'd Redis socket
     // surfaces EPIPE instead of killing the restored process. That disposition is process-
-    // global, so the Coordinator must only take it over when the application left SIGPIPE at
+    // global, so the ControlPlane must only take it over when the application left SIGPIPE at
     // its default — never clobbering a handler the application installed itself.
     auto temp_dir = fs::temp_directory_path() / unique_comm_name("sigpipe");
     auto images_dir = temp_dir / "images";
@@ -330,17 +330,17 @@ BOOST_AUTO_TEST_CASE(criu_coordinator_scopes_sigpipe_to_default_disposition) {
 
     auto original = current_sigpipe_handler();
 
-    // From the default disposition, a criu-mode Coordinator arms SIG_IGN.
+    // From the default disposition, a criu-mode ControlPlane arms SIG_IGN.
     std::signal(SIGPIPE, SIG_DFL);
     {
-        FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 1);
+        FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 1);
         BOOST_CHECK(current_sigpipe_handler() == SIG_IGN);
     }
 
     // An application-installed handler is left untouched.
     std::signal(SIGPIPE, sigpipe_probe_handler);
     {
-        FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 1);
+        FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 1);
         BOOST_CHECK(current_sigpipe_handler() == sigpipe_probe_handler);
     }
 
@@ -368,14 +368,14 @@ BOOST_AUTO_TEST_CASE(rank_agent_promotes_epoch_only_after_dump_and_restore) {
     }
 
     ScopedPathPrefix path_guard(mock_bin_dir);
-    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
 
     auto host_id = current_host_id();
     const int target_pid = 4242;
-    coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
-    coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
+    control_plane.criu_register_rank(0, target_pid, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
 
     // Freeze the mock criu when it reaches the restore step.
     auto gate_dir = temp_dir / "gate";
@@ -410,7 +410,7 @@ BOOST_AUTO_TEST_CASE(rank_agent_promotes_epoch_only_after_dump_and_restore) {
     // At this instant: dump completed, restore mid-flight, epoch not yet promoted.
     BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
     BOOST_CHECK(!fs::exists(rank0_dir / "restore.marker"));
-    BOOST_CHECK_EQUAL(coordinator.epoch(), 0U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
 
     // Let restore finish; promotion must come strictly after it.
     std::ofstream(gate_dir / "proceed").put('x');
@@ -421,12 +421,12 @@ BOOST_AUTO_TEST_CASE(rank_agent_promotes_epoch_only_after_dump_and_restore) {
 
     BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
     BOOST_CHECK_EQUAL(promoted, 1U);
-    BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
 
     unsetenv("FMI_MOCK_GATE_MODE");
     unsetenv("FMI_MOCK_GATE_DIR");
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
     fs::remove_all(temp_dir);
 }
 
@@ -448,10 +448,10 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     }
 
     auto config = FMI::Utils::Configuration(config_path.string()).get_fault_tolerance_config();
-    auto coordinator = std::make_shared<FMI::FT::Coordinator>(config_path.string(), comm_name, 2);
-    coordinator->clear_criu_state();
-    coordinator->clear_job_state();
-    coordinator->request_migration(0);  // rank 0 becomes the migration target at epoch 0
+    auto control_plane = std::make_shared<FMI::FT::ControlPlane>(config_path.string(), comm_name, 2);
+    control_plane->clear_criu_state();
+    control_plane->clear_job_state();
+    control_plane->request_migration(0);  // rank 0 becomes the migration target at epoch 0
 
     std::atomic<bool> prepared{false};
     std::atomic<bool> reconfigured{false};
@@ -459,7 +459,7 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     std::string reconfigured_name;
 
     FMI::FT::TransparentMigrationRuntime runtime(
-            0, "worker-0", "", 0, config, coordinator, comm_name,
+            0, "worker-0", "", 0, config, control_plane, comm_name,
             [&](const std::string& new_name) {
                 {
                     std::lock_guard<std::mutex> lock(name_mutex);
@@ -490,7 +490,7 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
 
     // The rank publishes a checkpoint-ready image entry for epoch N+1 (= 1).
     bool image_ready = poll([&]() {
-        for (const auto& info : coordinator->criu_rank_info()) {
+        for (const auto& info : control_plane->criu_rank_info()) {
             if (info.rank == 0 && info.state == FMI::FT::CriuRankState::Quiesced &&
                 info.quiesced_generation == 1 && info.pid > 0) {
                 return true;
@@ -505,11 +505,11 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     // (The epoch-N QUIESCED state write is not asserted here: directory_snapshot only returns
     // registered members, and this rank joins membership at N+1 — the rank agent's quiesce
     // signal is the CRIU registry entry checked above, not the old epoch's state hash.)
-    BOOST_CHECK_EQUAL(coordinator->epoch(), 0U);
+    BOOST_CHECK_EQUAL(control_plane->epoch(), 0U);
     BOOST_CHECK(!reconfigured.load());
 
     // Play the agent: promote to epoch 1. The restored rank resumes in its wait loop.
-    coordinator->promote_epoch(1);
+    control_plane->promote_epoch(1);
     bool did_reconfigure = poll([&]() { return reconfigured.load(); });
     worker.join();
 
@@ -523,15 +523,15 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     }
     // The rank rejoined as ACTIVE under the new epoch.
     bool active_at_epoch1 = false;
-    for (const auto& entry : coordinator->directory_snapshot(1)) {
+    for (const auto& entry : control_plane->directory_snapshot(1)) {
         if (entry.rank == 0 && entry.state == FMI::FT::RankState::Active) {
             active_at_epoch1 = true;
         }
     }
     BOOST_CHECK(active_at_epoch1);
 
-    coordinator->clear_criu_state();
-    coordinator->clear_job_state();
+    control_plane->clear_criu_state();
+    control_plane->clear_job_state();
     fs::remove_all(temp_dir);
 }
 
@@ -539,8 +539,8 @@ BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_direct_data_backend) {
     // CRIU freezes the whole process image, so the data plane must be Direct — the only backend
     // that releases its sockets in prepare_for_checkpoint(). The runtime must fail fast at
     // construction if the data plane is pinned to anything else, rather than later dumping a
-    // process with live Redis/S3 sockets. No Redis needed: the check runs before the coordinator
-    // is touched, so a null coordinator is fine.
+    // process with live Redis/S3 sockets. No Redis needed: the check runs before the control_plane
+    // is touched, so a null control_plane is fine.
     FMI::Utils::FaultToleranceConfig config;
     config.enabled = true;
     config.control_backend = "Redis";
@@ -580,32 +580,32 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     }
 
     ScopedPathPrefix path_guard(mock_bin_dir);
-    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
 
     // Rank 0 joins the directory as an ACTIVE member at epoch 0.
     FMI::Communicator rank0(0, 2, config_path.string(), comm_name, 128, "worker-0");
 
     // Mark it for migration and publish its checkpoint-ready image for epoch 1.
-    coordinator.request_migration(0);
+    control_plane.request_migration(0);
     auto host_id = current_host_id();
     const int target_pid = 4242;
-    coordinator.criu_register_rank(0, target_pid, host_id, "Direct");
-    coordinator.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
+    control_plane.criu_register_rank(0, target_pid, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
 
     FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
     auto promoted = agent.watch_once();
 
     BOOST_CHECK_EQUAL(promoted, 1U);
-    BOOST_CHECK_EQUAL(coordinator.epoch(), 1U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
     // The migrated rank was rank 0 specifically: its single-rank image dir was produced.
     auto rank0_dir = images_dir / comm_name / "epoch-1" / "rank-0";
     BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
     BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
 
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
     fs::remove_all(temp_dir);
 }
 
@@ -622,26 +622,26 @@ BOOST_AUTO_TEST_CASE(rank_agent_cleanup_removes_images_and_state) {
         return;
     }
 
-    FMI::FT::Coordinator coordinator(config_path.string(), comm_name, 2);
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
 
     // Residue from a prior migration: an image tree plus a CRIU registry entry.
     auto comm_images = images_dir / comm_name;
     fs::create_directories(comm_images / "epoch-1" / "rank-0");
     std::ofstream(comm_images / "epoch-1" / "rank-0" / "dump.marker").put('x');
-    coordinator.criu_register_rank(0, 4242, current_host_id(), "Direct");
+    control_plane.criu_register_rank(0, 4242, current_host_id(), "Direct");
     BOOST_CHECK(fs::exists(comm_images));
-    BOOST_CHECK(!coordinator.criu_rank_info().empty());
+    BOOST_CHECK(!control_plane.criu_rank_info().empty());
 
     FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
     agent.cleanup();
 
     BOOST_CHECK(!fs::exists(comm_images));
-    BOOST_CHECK(coordinator.criu_rank_info().empty());
+    BOOST_CHECK(control_plane.criu_rank_info().empty());
 
-    coordinator.clear_criu_state();
-    coordinator.clear_job_state();
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
     fs::remove_all(temp_dir);
 }
 

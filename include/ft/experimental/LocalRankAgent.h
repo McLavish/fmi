@@ -3,7 +3,7 @@
 
 #include "../../utils/Common.h"
 #include "../../utils/Configuration.h"
-#include "../Coordinator.h"
+#include "../ControlPlane.h"
 
 #include <cstdint>
 #include <memory>
@@ -50,7 +50,7 @@ namespace FMI::FT {
         FMI::Utils::peer_num num_peers;
         FMI::Utils::FaultToleranceConfig config;
         std::string host_id;
-        std::shared_ptr<FMI::FT::Coordinator> coordinator;
+        std::shared_ptr<FMI::FT::ControlPlane> control_plane;
     };
 }
 

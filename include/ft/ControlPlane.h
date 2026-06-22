@@ -17,15 +17,15 @@ namespace FMI {
 namespace FMI::FT {
     class TransparentMigrationRuntime;
     //! Control-plane client used by FMI::Communicator (transparent migration) and by external daemons that request migrations.
-    class Coordinator {
+    class ControlPlane {
     public:
-        Coordinator(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
-        ~Coordinator();
+        ControlPlane(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
+        ~ControlPlane();
 
-        Coordinator(const Coordinator&) = delete;
-        Coordinator& operator=(const Coordinator&) = delete;
-        Coordinator(Coordinator&&) noexcept = default;
-        Coordinator& operator=(Coordinator&&) noexcept = default;
+        ControlPlane(const ControlPlane&) = delete;
+        ControlPlane& operator=(const ControlPlane&) = delete;
+        ControlPlane(ControlPlane&&) noexcept = default;
+        ControlPlane& operator=(ControlPlane&&) noexcept = default;
 
         //! Request a migration for the logical rank.
         void request_migration(FMI::Utils::peer_num rank);

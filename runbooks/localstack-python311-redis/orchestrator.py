@@ -177,15 +177,15 @@ def cleanup_leftover_ec2_containers():
             subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
-def snapshot_by_rank(coordinator, epoch):
-    return {entry.rank: entry for entry in coordinator.directory_snapshot(epoch)}
+def snapshot_by_rank(control_plane, epoch):
+    return {entry.rank: entry for entry in control_plane.directory_snapshot(epoch)}
 
 
-def wait_for_snapshot(coordinator, epoch, predicate, description, timeout_s, interval_s=1.0):
+def wait_for_snapshot(control_plane, epoch, predicate, description, timeout_s, interval_s=1.0):
     deadline = time.time() + timeout_s
     last_snapshot = {}
     while time.time() < deadline:
-        last_snapshot = snapshot_by_rank(coordinator, epoch)
+        last_snapshot = snapshot_by_rank(control_plane, epoch)
         if predicate(last_snapshot):
             return last_snapshot
         time.sleep(interval_s)
@@ -220,8 +220,8 @@ def both_ranks_present(snapshot):
 
 
 def run(comm_name, n):
-    coordinator = fmi.FTCoordinator(str(HOST_CONFIG), comm_name, NUM_PEERS)
-    coordinator.clear_job_state()
+    control_plane = fmi.FTControlPlane(str(HOST_CONFIG), comm_name, NUM_PEERS)
+    control_plane.clear_job_state()
     client = lambda_client()
 
     rank0_vm_wid = f"rank0-vm-{uuid.uuid4().hex[:8]}"
@@ -242,7 +242,7 @@ def run(comm_name, n):
     instance_ids.append(iid1)
 
     epoch0 = wait_for_snapshot(
-        coordinator,
+        control_plane,
         0,
         both_ranks_active,
         "epoch 0 ranks 0 and 1 ACTIVE",
@@ -250,10 +250,10 @@ def run(comm_name, n):
     )
 
     print("[orchestrator] requesting migration of rank 0", flush=True)
-    coordinator.request_migration(0)
+    control_plane.request_migration(0)
 
     epoch0 = wait_for_snapshot(
-        coordinator,
+        control_plane,
         0,
         lambda snap: 0 in snap and snap[0].state == "QUIESCED",
         "epoch 0 rank 0 QUIESCED",
@@ -278,12 +278,12 @@ def run(comm_name, n):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         replacement = pool.submit(invoke_worker_sync, client, replacement_payload, 120)
         print("[orchestrator] promoting migration epoch", flush=True)
-        coordinator.promote_epoch()
+        control_plane.promote_epoch()
         lambda_response = replacement.result(timeout=180)
     print(f"[orchestrator] Lambda response: {lambda_response}", flush=True)
 
     epoch1 = wait_for_snapshot(
-        coordinator,
+        control_plane,
         1,
         both_ranks_active,
         "epoch 1 ranks 0 and 1 ACTIVE",
@@ -370,7 +370,7 @@ def run(comm_name, n):
         sys.exit(1)
 
     print("\nPASSED: rank directory flip verified AND post-migration allreduce result == 3.0")
-    coordinator.clear_job_state()
+    control_plane.clear_job_state()
 
     # Clean up EC2 instances
     terminate_ec2_instances(instance_ids)
@@ -378,7 +378,7 @@ def run(comm_name, n):
 
 
 def cleanup(comm_name):
-    fmi.FTCoordinator(str(HOST_CONFIG), comm_name, NUM_PEERS).clear_job_state()
+    fmi.FTControlPlane(str(HOST_CONFIG), comm_name, NUM_PEERS).clear_job_state()
     # Terminate any running EC2 instances via LocalStack
     result = subprocess.run(
         [

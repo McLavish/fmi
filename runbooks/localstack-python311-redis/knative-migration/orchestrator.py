@@ -158,15 +158,15 @@ def invoke_serverless(url, payload, timeout=240):
         raise RuntimeError(f"serverless invoke returned non-JSON body: {body!r}") from exc
 
 
-def snapshot_by_rank(coordinator, epoch):
-    return {entry.rank: entry for entry in coordinator.directory_snapshot(epoch)}
+def snapshot_by_rank(control_plane, epoch):
+    return {entry.rank: entry for entry in control_plane.directory_snapshot(epoch)}
 
 
-def wait_for_snapshot(coordinator, epoch, predicate, description, timeout_s, interval_s=1.0):
+def wait_for_snapshot(control_plane, epoch, predicate, description, timeout_s, interval_s=1.0):
     deadline = time.time() + timeout_s
     last_snapshot = {}
     while time.time() < deadline:
-        last_snapshot = snapshot_by_rank(coordinator, epoch)
+        last_snapshot = snapshot_by_rank(control_plane, epoch)
         if predicate(last_snapshot):
             return last_snapshot
         time.sleep(interval_s)
@@ -250,8 +250,8 @@ def verify_migration(epoch0, epoch1, serverless_response, rank0_vm_wid, rank1_vm
 
 
 def run(comm_name, n, gap_s, image, serverless_url):
-    coordinator = fmi.FTCoordinator(str(ORCHESTRATOR_CONFIG), comm_name, NUM_PEERS)
-    coordinator.clear_job_state()
+    control_plane = fmi.FTControlPlane(str(ORCHESTRATOR_CONFIG), comm_name, NUM_PEERS)
+    control_plane.clear_job_state()
     kube = KubernetesJobClient()
 
     # "Always" suits a real registry (ECR); local clusters load the image into
@@ -283,7 +283,7 @@ def run(comm_name, n, gap_s, image, serverless_url):
             f1.result()
 
         epoch0_active = wait_for_snapshot(
-            coordinator,
+            control_plane,
             0,
             both_ranks_active,
             "epoch 0 ranks 0 and 1 ACTIVE",
@@ -292,10 +292,10 @@ def run(comm_name, n, gap_s, image, serverless_url):
         print_snapshot("Epoch 0 active", epoch0_active)
 
         print("[orchestrator] requesting migration of rank 0", flush=True)
-        coordinator.request_migration(0)
+        control_plane.request_migration(0)
 
         epoch0 = wait_for_snapshot(
-            coordinator,
+            control_plane,
             0,
             lambda snap: 0 in snap and snap[0].state == "QUIESCED",
             "epoch 0 rank 0 QUIESCED",
@@ -317,12 +317,12 @@ def run(comm_name, n, gap_s, image, serverless_url):
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             replacement = pool.submit(invoke_serverless, serverless_url, payload)
             print("[orchestrator] promoting migration epoch", flush=True)
-            coordinator.promote_epoch()
+            control_plane.promote_epoch()
             serverless_response = replacement.result(timeout=260)
         print(f"[orchestrator] HTTP /invoke response {serverless_response}", flush=True)
 
         epoch1 = wait_for_snapshot(
-            coordinator,
+            control_plane,
             1,
             both_ranks_active,
             "epoch 1 ranks 0 and 1 ACTIVE",
@@ -352,7 +352,7 @@ def run(comm_name, n, gap_s, image, serverless_url):
             flush=True,
         )
         print("\nPASSED: rank directory flip verified AND post-migration allreduce result == 3.0", flush=True)
-        coordinator.clear_job_state()
+        control_plane.clear_job_state()
     finally:
         keep = os.environ.get("KEEP_JOBS_ON_FAILURE", "").lower() in ("1", "true", "yes")
         if keep and sys.exc_info()[0] is not None:
@@ -366,8 +366,8 @@ def run(comm_name, n, gap_s, image, serverless_url):
 
 
 def cleanup(comm_name):
-    coordinator = fmi.FTCoordinator(str(ORCHESTRATOR_CONFIG), comm_name, NUM_PEERS)
-    coordinator.clear_job_state()
+    control_plane = fmi.FTControlPlane(str(ORCHESTRATOR_CONFIG), comm_name, NUM_PEERS)
+    control_plane.clear_job_state()
     print(f"[orchestrator] cleared FMI state for {comm_name}", flush=True)
 
 

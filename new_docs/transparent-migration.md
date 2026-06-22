@@ -26,7 +26,7 @@ constructor performs FT setup before building channels:
 2. validate `preferred_data_backend`, if one is configured
 3. resolve a worker ID, either from the constructor argument or by generating
    `rank-<rank>-pid-<pid>-ts-<millis>`
-4. create a Redis-backed `Coordinator`
+4. create a Redis-backed `ControlPlane`
 5. read the active Redis epoch
 6. if this rank is pending, wait until the orchestrator promotes and clears
    pending, then re-read the epoch
@@ -102,11 +102,11 @@ coordination.
 
 ## Observability
 
-Use `FTCoordinator` to inspect migration state:
+Use `FTControlPlane` to inspect migration state:
 
 - `epoch()` returns the active epoch
 - `directory_snapshot(epoch)` returns rank, worker ID, placement, and state
 - `placement_for_rank(epoch, rank)` returns the stored placement string
 - `promote_epoch()` advances to the next epoch from Python orchestrators
 
-The Python binding exposes these methods through `fmi.FTCoordinator`.
+The Python binding exposes these methods through `fmi.FTControlPlane`.

@@ -6,10 +6,10 @@ are deliberate v1 design boundaries.
 ## General
 
 - Redis is required for FT control.
-- `FMI_ENABLE_REDIS` must be enabled at build time for coordinator operations.
+- `FMI_ENABLE_REDIS` must be enabled at build time for control-plane operations.
 - FT metadata is scoped by base `comm_name`; concurrent unrelated jobs must use
   distinct communicator names.
-- Coordinator commands use one persistent Redis connection per coordinator and
+- ControlPlane commands use one persistent Redis connection per control plane and
   argv-form command calls. Access to that connection is serialized.
 - The current threading assumption is one operation at a time per
   communicator at the channel/runtime level.

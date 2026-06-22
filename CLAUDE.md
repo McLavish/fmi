@@ -155,7 +155,7 @@ fault tolerance layered around the user API.
 
 - **Fault tolerance** (`include/ft/`, `src/ft/`, design in `PLANS.md`, usage in
   `docs/fault-tolerance.md`): transparent migration is the single FT protocol. It uses Redis
-  as the control plane and `Direct`/TCP as the preferred data plane. `FMI::FT::Coordinator`
+  as the control plane and `Direct`/TCP as the preferred data plane. `FMI::FT::ControlPlane`
   tracks epochs, membership, placement, and migration state in Redis; migration is triggered
   externally via `request_migration()`. `TransparentMigrationRuntime` checks for migration at
   `OperationGuard` boundaries. The targeted rank marks itself `QUIESCED`, a replacement takes
@@ -176,7 +176,7 @@ fault tolerance layered around the user API.
 
 - **Python bindings** (`python/`): a Boost.Python module. `fmi_python.cpp` is the module
   entry point; `PythonCommunicator.cpp` exposes `Communicator`; `PythonFT.cpp` exposes the
-  FT coordinator surface (`FTCoordinator`) plus the type/op helpers (`hints`, `func`, `op`,
+  FT control-plane surface (`FTControlPlane`) plus the type/op helpers (`hints`, `func`, `op`,
   `datatypes`, `types`). Because Python is dynamically typed, collective calls
   take an explicit `fmi.types(...)` descriptor and return results directly rather than
   filling a receive buffer.

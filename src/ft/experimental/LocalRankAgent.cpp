@@ -19,7 +19,7 @@ FMI::FT::LocalRankAgent::LocalRankAgent(std::string config_path, std::string com
     // Validate the full configuration before opening the Redis control-plane connection.
     ensure_migration_mode();
     host_id = FMI::FT::resolve_host_id(config);
-    coordinator = std::make_shared<FMI::FT::Coordinator>(this->config_path, this->comm_name, num_peers);
+    control_plane = std::make_shared<FMI::FT::ControlPlane>(this->config_path, this->comm_name, num_peers);
 }
 
 void FMI::FT::LocalRankAgent::ensure_migration_mode() const {
@@ -46,11 +46,11 @@ void FMI::FT::LocalRankAgent::cleanup() {
     if (fs::exists(images_path)) {
         fs::remove_all(images_path);
     }
-    coordinator->clear_criu_state();
+    control_plane->clear_criu_state();
 }
 
 std::uint64_t FMI::FT::LocalRankAgent::migrate_rank(FMI::Utils::peer_num rank) const {
-    std::uint64_t current_epoch = coordinator->epoch();
+    std::uint64_t current_epoch = control_plane->epoch();
     std::uint64_t target_epoch = current_epoch + 1;
 
     // Wait until the targeted rank has reached its quiesce point and published a restorable
@@ -68,11 +68,11 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_rank(FMI::Utils::peer_num rank) c
 
     // The restored rank no longer needs its checkpoint-ready marker; clear it so a watch loop
     // does not treat the entry as a fresh request.
-    coordinator->criu_mark_rank_running(rank, rank_info.pid, host_id, rank_info.backend);
+    control_plane->criu_mark_rank_running(rank, rank_info.pid, host_id, rank_info.backend);
 
     // Promote the epoch last: survivors and the restored rank both observe N+1 and reconfigure
     // their channels under the new epoch-qualified communicator name.
-    coordinator->promote_epoch(target_epoch);
+    control_plane->promote_epoch(target_epoch);
     return target_epoch;
 }
 
@@ -87,7 +87,7 @@ std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
     // QUIESCED for another reason, this scan would need to disambiguate.
     FMI::Utils::peer_num target = 0;
     bool found = FMI::Utils::poll_until([this, &target]() {
-        for (const auto& entry : coordinator->directory_snapshot(coordinator->epoch())) {
+        for (const auto& entry : control_plane->directory_snapshot(control_plane->epoch())) {
             if (entry.state == RankState::MigrationPending || entry.state == RankState::Quiesced) {
                 target = entry.rank;
                 return true;
@@ -103,7 +103,7 @@ FMI::FT::CriuRankInfo FMI::FT::LocalRankAgent::wait_for_ready_rank(FMI::Utils::p
                                                                        std::uint64_t target_epoch) const {
     CriuRankInfo ready;
     bool found = FMI::Utils::poll_until([this, rank, target_epoch, &ready]() {
-        for (const auto& info : coordinator->criu_rank_info()) {
+        for (const auto& info : control_plane->criu_rank_info()) {
             if (info.rank == rank && info.host_id == host_id &&
                 info.state == CriuRankState::Quiesced && info.quiesced_generation == target_epoch &&
                 info.pid > 0) {
@@ -128,7 +128,7 @@ std::string FMI::FT::LocalRankAgent::rank_image_dir(std::uint64_t target_epoch,
 
 void FMI::FT::LocalRankAgent::dump_rank(int pid, const std::string& dir) const {
     // --tcp-close: the rank still holds its Redis control-plane connection; tell criu to close
-    //   it on restore (the Coordinator reconnects lazily) instead of trying to repair it.
+    //   it on restore (the ControlPlane reconnects lazily) instead of trying to repair it.
     // No --leave-stopped: criu ptrace-seizes, dumps, then kills and reaps the task, freeing the
     //   pid so the immediate restore can reclaim it.
     // Operator flags (FMI_CRIU_EXTRA_ARGS) are appended inside run_criu.

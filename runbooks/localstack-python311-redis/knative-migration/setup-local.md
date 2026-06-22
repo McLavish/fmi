@@ -105,7 +105,7 @@ sudo podman push --tls-verify=false "$FMI_IMAGE"   # --tls-verify=false: plain-H
 The Dockerfile runs the import smoke test during build:
 
 ```text
-python3.11 -c "import fmi; assert hasattr(fmi, 'FTCoordinator'); print('fmi import smoke test ok')"
+python3.11 -c "import fmi; assert hasattr(fmi, 'FTControlPlane'); print('fmi import smoke test ok')"
 ```
 
 ## 7. Deploy Redis, RBAC, And The Knative Service

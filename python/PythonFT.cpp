@@ -14,33 +14,33 @@ namespace {
     }
 }
 
-FMI::Utils::PythonFTCoordinator::PythonFTCoordinator(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers) {
-    coordinator = std::make_shared<FMI::FT::Coordinator>(std::move(config_path), std::move(comm_name), num_peers);
+FMI::Utils::PythonFTControlPlane::PythonFTControlPlane(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers) {
+    control_plane = std::make_shared<FMI::FT::ControlPlane>(std::move(config_path), std::move(comm_name), num_peers);
 }
 
-void FMI::Utils::PythonFTCoordinator::request_migration(FMI::Utils::peer_num rank) {
-    coordinator->request_migration(rank);
+void FMI::Utils::PythonFTControlPlane::request_migration(FMI::Utils::peer_num rank) {
+    control_plane->request_migration(rank);
 }
 
-void FMI::Utils::PythonFTCoordinator::promote_epoch() {
-    coordinator->promote_epoch(coordinator->epoch() + 1);
+void FMI::Utils::PythonFTControlPlane::promote_epoch() {
+    control_plane->promote_epoch(control_plane->epoch() + 1);
 }
 
-void FMI::Utils::PythonFTCoordinator::clear_job_state() {
-    coordinator->clear_job_state();
+void FMI::Utils::PythonFTControlPlane::clear_job_state() {
+    control_plane->clear_job_state();
 }
 
-std::uint64_t FMI::Utils::PythonFTCoordinator::epoch() const {
-    return coordinator->epoch();
+std::uint64_t FMI::Utils::PythonFTControlPlane::epoch() const {
+    return control_plane->epoch();
 }
 
-std::string FMI::Utils::PythonFTCoordinator::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) {
-    return coordinator->placement_for_rank(epoch, rank);
+std::string FMI::Utils::PythonFTControlPlane::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) {
+    return control_plane->placement_for_rank(epoch, rank);
 }
 
-boost::python::list FMI::Utils::PythonFTCoordinator::directory_snapshot(std::uint64_t epoch) {
+boost::python::list FMI::Utils::PythonFTControlPlane::directory_snapshot(std::uint64_t epoch) {
     boost::python::list result;
-    for (const auto& entry : coordinator->directory_snapshot(epoch)) {
+    for (const auto& entry : control_plane->directory_snapshot(epoch)) {
         PythonRankDirectoryEntry python_entry;
         python_entry.rank = entry.rank;
         python_entry.worker_id = entry.worker_id;

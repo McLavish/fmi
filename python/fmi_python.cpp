@@ -32,13 +32,13 @@ BOOST_PYTHON_MODULE(fmi)
         .def_readonly("state", &FMI::Utils::PythonRankDirectoryEntry::state)
     ;
 
-    class_<FMI::Utils::PythonFTCoordinator>("FTCoordinator", init<std::string, std::string, FMI::Utils::peer_num>())
-        .def("request_migration", &FMI::Utils::PythonFTCoordinator::request_migration)
-        .def("promote_epoch", &FMI::Utils::PythonFTCoordinator::promote_epoch)
-        .def("clear_job_state", &FMI::Utils::PythonFTCoordinator::clear_job_state)
-        .def("epoch", &FMI::Utils::PythonFTCoordinator::epoch)
-        .def("placement_for_rank", &FMI::Utils::PythonFTCoordinator::placement_for_rank)
-        .def("directory_snapshot", &FMI::Utils::PythonFTCoordinator::directory_snapshot)
+    class_<FMI::Utils::PythonFTControlPlane>("FTControlPlane", init<std::string, std::string, FMI::Utils::peer_num>())
+        .def("request_migration", &FMI::Utils::PythonFTControlPlane::request_migration)
+        .def("promote_epoch", &FMI::Utils::PythonFTControlPlane::promote_epoch)
+        .def("clear_job_state", &FMI::Utils::PythonFTControlPlane::clear_job_state)
+        .def("epoch", &FMI::Utils::PythonFTControlPlane::epoch)
+        .def("placement_for_rank", &FMI::Utils::PythonFTControlPlane::placement_for_rank)
+        .def("directory_snapshot", &FMI::Utils::PythonFTControlPlane::directory_snapshot)
     ;
 
     enum_<FMI::Utils::PythonType>("datatypes")

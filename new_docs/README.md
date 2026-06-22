@@ -43,7 +43,7 @@ docs and runbooks still mention `FTSession`, but no `Session` class or
 
 - `include/Communicator.h` and `src/Communicator.cpp`
 - `include/ft/Common.h`
-- `include/ft/Coordinator.h` and `src/ft/Coordinator.cpp`
+- `include/ft/ControlPlane.h` and `src/ft/ControlPlane.cpp`
 - `include/ft/TransparentMigrationRuntime.h` and
   `src/ft/TransparentMigrationRuntime.cpp`
 - `include/ft/experimental/LocalRankAgent.h` and
