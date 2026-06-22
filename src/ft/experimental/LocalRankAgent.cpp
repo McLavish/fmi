@@ -1,5 +1,6 @@
 #include "../../../include/ft/experimental/LocalRankAgent.h"
 #include "../../../include/ft/experimental/CriuExec.h"
+#include "../../../include/ft/experimental/CriuRequirements.h"
 #include "../../../include/ft/experimental/HostId.h"
 #include "../../../include/utils/Configuration.h"
 
@@ -32,13 +33,8 @@ void FMI::FT::LocalRankAgent::ensure_migration_mode() const {
     if (config.state_transfer != "criu") {
         throw std::runtime_error("Rank agent requires fault_tolerance.state_transfer=\"criu\"");
     }
-    // Same invariant the rank enforces: CRIU can only dump/restore a process whose data plane
-    // is Direct (the sole backend that releases sockets before checkpoint). Refuse to drive a
-    // migration against a comm configured for any other data backend.
-    if (config.preferred_data_backend != "Direct") {
-        throw std::runtime_error(
-                "Rank agent requires preferred_data_backend=\"Direct\" for CRIU state transfer");
-    }
+    // Same Direct-only data-plane rule the rank-side runtime enforces (shared helper).
+    require_checkpoint_safe_data_plane(config);
 }
 
 void FMI::FT::LocalRankAgent::cleanup() {

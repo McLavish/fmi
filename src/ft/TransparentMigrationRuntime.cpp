@@ -5,6 +5,7 @@
 
 #include <unistd.h>
 #ifdef FMI_ENABLE_CRIU
+#include "../../include/ft/experimental/CriuRequirements.h"
 #include "../../include/ft/experimental/HostId.h"
 #include <csignal>
 #include <sys/prctl.h>
@@ -32,16 +33,10 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
     if (config.state_transfer == "criu") {
 #ifdef FMI_ENABLE_CRIU
         // CRIU freezes the whole process image, so every data-plane channel the policy might
-        // select must release its sockets before the dump. Only Direct overrides
-        // prepare_for_checkpoint(); Redis/S3 channels would be captured with live sockets and
-        // the image registry would falsely record "Direct". Pin the data plane to Direct so
-        // channel selection can never pick an unsupported backend (the same-host Direct-only
-        // invariant the rank agent also enforces).
-        if (config.preferred_data_backend != "Direct") {
-            throw std::runtime_error(
-                    "fault_tolerance.state_transfer=\"criu\" requires preferred_data_backend=\"Direct\" "
-                    "(the only checkpoint-safe data backend); got \"" + config.preferred_data_backend + "\"");
-        }
+        // select must release its sockets before the dump. Pin the data plane to Direct (the only
+        // backend that releases sockets) so channel selection can never pick an unsupported one;
+        // the rank agent enforces the same rule via this shared helper.
+        require_checkpoint_safe_data_plane(config);
 
         // criu's --tcp-close drops the Redis control socket across checkpoint/restore, so the
         // restored rank's next write would raise SIGPIPE and — under the default disposition — be
