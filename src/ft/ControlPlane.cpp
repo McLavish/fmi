@@ -306,6 +306,14 @@ void FMI::FT::ControlPlane::set_placement(std::uint64_t epoch, FMI::Utils::peer_
 #endif
 }
 
+void FMI::FT::ControlPlane::join_epoch(std::uint64_t epoch, FMI::Utils::peer_num rank,
+                                       const std::string& worker_id, const std::string& placement) const {
+    register_rank(epoch, rank, worker_id, RankState::Active);
+    if (!placement.empty()) {
+        set_placement(epoch, rank, placement);
+    }
+}
+
 std::string FMI::FT::ControlPlane::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
 #if FMI_ENABLE_REDIS
     return impl->hget(impl->placement_key(epoch), std::to_string(rank)).value_or("");

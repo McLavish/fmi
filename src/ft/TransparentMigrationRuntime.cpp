@@ -136,11 +136,8 @@ void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure() 
             0, config.poll_interval_ms);
 
     active_epoch = observed;
-    control_plane->register_rank(active_epoch, peer_id, worker_id, FMI::FT::RankState::Active);
-    if (!placement.empty()) {
-        control_plane->set_placement(active_epoch, peer_id, placement);
-    }
+    control_plane->join_epoch(active_epoch, peer_id, worker_id, placement);
     // After a CRIU restore the rebuilt channels must be ready before control returns to user
     // code; reconfigure installs the epoch-N+1 channel set in place.
-    reconfigure_callback(base_comm_name + "@epoch=" + std::to_string(active_epoch));
+    reconfigure_callback(epoch_comm_name(base_comm_name, active_epoch));
 }

@@ -28,6 +28,13 @@ namespace FMI::FT {
         RankState state = RankState::Active;
     };
 
+    //! Epoch-qualified communicator name. Every backend-visible name is epoch-fenced so stale
+    //! messages/objects from an old epoch can never be consumed after reconfiguration. Used by
+    //! both the Communicator (initial + reconfigure) and the migration runtime.
+    inline std::string epoch_comm_name(const std::string& base, std::uint64_t epoch) {
+        return base + "@epoch=" + std::to_string(epoch);
+    }
+
 #ifdef FMI_ENABLE_CRIU
     enum class CriuRankState : std::uint8_t {
         Running,

@@ -11,10 +11,6 @@ namespace {
         auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
         return "rank-" + std::to_string(peer_id) + "-pid-" + std::to_string(getpid()) + "-ts-" + std::to_string(millis);
     }
-
-    std::string epoch_comm_name(const std::string& base, std::uint64_t epoch) {
-        return base + "@epoch=" + std::to_string(epoch);
-    }
 }
 
 namespace FMI {
@@ -55,14 +51,11 @@ namespace FMI {
             }
 
             std::uint64_t active_epoch = current_epoch;
-            control_plane->register_rank(active_epoch, peer_id, resolved_worker_id, FMI::FT::RankState::Active);
             // PLANS.md step 4 seam: a future CRIU-backed state restore for replacement ranks
             // belongs here, after the rank joins epoch N+1 and before it resumes user work.
-            if (!placement.empty()) {
-                control_plane->set_placement(active_epoch, peer_id, placement);
-            }
+            control_plane->join_epoch(active_epoch, peer_id, resolved_worker_id, placement);
 
-            this->comm_name = epoch_comm_name(comm_name, active_epoch);
+            this->comm_name = FMI::FT::epoch_comm_name(comm_name, active_epoch);
             build_channels(this->comm_name);
 
             double gib_second_price = config.get_faas_price();

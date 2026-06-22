@@ -42,6 +42,12 @@ namespace FMI::FT {
         //! Write placement for a rank in a given epoch.
         void set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const;
 
+        //! Join @p epoch as an Active member: register (rank -> worker_id), and record placement if
+        //! non-empty. The single membership-join used by both the Communicator constructor (initial
+        //! join) and the migration runtime (re-join after epoch promotion).
+        void join_epoch(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id,
+                        const std::string& placement) const;
+
         //! Return the currently active communicator epoch.
         [[nodiscard]] std::uint64_t epoch() const;
 
