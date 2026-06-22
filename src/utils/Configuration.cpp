@@ -53,7 +53,6 @@ namespace FMI::Utils {
         config.control_host = ft_tree.get("control_host", config.control_host);
         config.control_port = ft_tree.get("control_port", config.control_port);
         config.poll_interval_ms = ft_tree.get("poll_interval_ms", config.poll_interval_ms);
-        config.reconfigure_timeout_ms = ft_tree.get("reconfigure_timeout_ms", config.reconfigure_timeout_ms);
         config.preferred_data_backend = ft_tree.get("preferred_data_backend", config.preferred_data_backend);
         config.state_transfer = ft_tree.get("state_transfer", config.state_transfer);
         config.images_dir = ft_tree.get("images_dir", config.images_dir);

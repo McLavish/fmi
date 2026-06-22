@@ -145,7 +145,6 @@ namespace {
                "    \"control_host\": \"127.0.0.1\",\n"
                "    \"control_port\": 6379,\n"
                "    \"poll_interval_ms\": 25,\n"
-               "    \"reconfigure_timeout_ms\": 250,\n"
                "    \"preferred_data_backend\": \"Direct\",\n"
                "    \"state_transfer\": \"criu\",\n"
             << "    \"images_dir\": \"" << images_dir.string() << "\",\n"

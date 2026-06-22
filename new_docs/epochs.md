@@ -68,9 +68,9 @@ Promotion uses a Redis Lua compare-and-set script. It advances
 `current_epoch` only when the requested next epoch is greater than the stored
 epoch, and it clears the pending set in the same script.
 
-If promotion is not observed within `reconfigure_timeout_ms`, the waiting
-process throws `FMI::Utils::Timeout`. Waiting workers poll Redis every
-`poll_interval_ms`.
+The waiting process blocks until promotion is observed — there is no library-side
+deadline (the wait is unbounded by design; the orchestrator owns liveness, see
+`limits-and-failure-modes.md`). Waiting workers poll Redis every `poll_interval_ms`.
 
 ## What Epochs Do Not Solve
 

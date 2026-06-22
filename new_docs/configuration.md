@@ -13,7 +13,6 @@ control_backend = Redis
 control_host = 127.0.0.1
 control_port = 6379
 poll_interval_ms = 1000
-reconfigure_timeout_ms = 10000
 preferred_data_backend = ""
 state_transfer = none
 images_dir = /tmp/fmi-criu-images
@@ -43,7 +42,6 @@ is read by the current parser.
     "control_host": "127.0.0.1",
     "control_port": 6379,
     "poll_interval_ms": 25,
-    "reconfigure_timeout_ms": 250,
     "preferred_data_backend": "Direct",
     "state_transfer": "none"
   }
@@ -51,8 +49,9 @@ is read by the current parser.
 ```
 
 `poll_interval_ms` controls how often a worker polls Redis while waiting for
-orchestrator promotion. `reconfigure_timeout_ms` is the wall-clock deadline for
-that wait.
+orchestrator promotion. There is no library-side deadline on that wait — it is
+unbounded by design (see `limits-and-failure-modes.md`); the orchestrator owns
+detecting and resolving a migration that never completes.
 
 ## CRIU Example
 

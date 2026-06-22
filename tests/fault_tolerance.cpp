@@ -128,4 +128,37 @@ BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
     control_plane.clear_job_state();
 }
 
+// The wait for epoch promotion is unbounded: there is no library-side timeout. A replacement
+// that is promoted well after the former reconfigure_timeout_ms (250 ms in this config) would
+// have thrown FMI::Utils::Timeout under the old bounded wait; now it must keep waiting and join.
+BOOST_AUTO_TEST_CASE(transparent_migration_wait_for_promotion_is_unbounded) {
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
+
+    FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a");
+    FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b");
+
+    control_plane.request_migration(1);
+
+    std::future<std::string> replacement_comm_name = std::async(std::launch::async, [&]() {
+        FMI::Communicator replacement(1, 2, ft_config_path, comm_name, 128, "worker-c");
+        return replacement.get_comm_name();
+    });
+
+    // Delay promotion past the former bounded deadline; the replacement must still be waiting,
+    // not failed. (Under the old wall-clock wait this 600 ms gap would have thrown Timeout.)
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    BOOST_CHECK(replacement_comm_name.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+    control_plane.promote_epoch(1);
+
+    BOOST_CHECK_EQUAL(replacement_comm_name.get(), comm_name + "@epoch=1");
+    control_plane.clear_job_state();
+}
+
 BOOST_AUTO_TEST_SUITE_END();

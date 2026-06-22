@@ -44,12 +44,13 @@ namespace FMI {
 
             if (control_plane->is_rank_pending(peer_id)) {
                 // A replacement rank waits for the orchestrator to promote and clear pending.
-                bool cleared = FMI::Utils::poll_until(
+                // Unbounded by the same contract as the survivor reconfigure wait: only the
+                // orchestrator can clear pending / promote the epoch, so a migration that never
+                // completes is its responsibility to detect and resolve, not a library timeout.
+                // See docs/fault-tolerance.md.
+                FMI::Utils::poll_until(
                         [&]() { return !control_plane->is_rank_pending(peer_id); },
-                        ft_config.reconfigure_timeout_ms, ft_config.poll_interval_ms);
-                if (!cleared) {
-                    throw FMI::Utils::Timeout();
-                }
+                        0, ft_config.poll_interval_ms);
                 current_epoch = control_plane->epoch();
             }
 

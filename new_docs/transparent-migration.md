@@ -73,8 +73,9 @@ epoch is greater than the stored epoch. Survivors blocked in
 promoted epoch. The data-plane rendezvous on epoch-qualified names is the
 barrier that proves all ranks reached the same communication generation.
 
-If promotion is not observed within `reconfigure_timeout_ms`, the waiting
-process throws `FMI::Utils::Timeout`. Polling uses `poll_interval_ms`.
+The waiting process blocks until promotion is observed — the wait is unbounded by
+design (no library-side deadline; the orchestrator owns detecting/resolving a
+stuck migration, see `limits-and-failure-modes.md`). Polling uses `poll_interval_ms`.
 
 ## Migrating Rank Behavior
 

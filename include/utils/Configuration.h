@@ -14,7 +14,6 @@ namespace FMI::Utils {
         std::string control_host = "127.0.0.1";
         unsigned int control_port = 6379;
         unsigned int poll_interval_ms = 1000;
-        unsigned int reconfigure_timeout_ms = 10000;
         std::string preferred_data_backend;
 
         // Selects how a migrated rank's application state is handled at the migration quiesce

@@ -57,7 +57,6 @@
     "control_host": "fmi-redis",
     "control_port": 6379,
     "poll_interval_ms": 50,
-    "reconfigure_timeout_ms": 5000,
     "preferred_data_backend": "Redis"
   }
 }

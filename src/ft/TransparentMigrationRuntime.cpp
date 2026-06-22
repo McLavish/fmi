@@ -53,7 +53,7 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
 void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     auto observed = control_plane->epoch();
     if (observed > active_epoch) {
-        wait_for_promotion_and_reconfigure(config.reconfigure_timeout_ms);
+        wait_for_promotion_and_reconfigure();
         return;
     }
 
@@ -75,7 +75,7 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     }
 
     // Survivor: park until the orchestrator promotes the epoch, then rebuild channels in place.
-    wait_for_promotion_and_reconfigure(config.reconfigure_timeout_ms);
+    wait_for_promotion_and_reconfigure();
 }
 
 void FMI::FT::TransparentMigrationRuntime::exit_operation() {
@@ -110,20 +110,21 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
 
     // Block until restored and promoted. The rank agent dumps this process here and restores
     // it; the restored image resumes in this same loop, observes epoch N+1, and reconfigures
-    // exactly like a survivor — carrying preserved application memory. Unbounded: the dump /
-    // restore span must not race a wall-clock deadline.
-    wait_for_promotion_and_reconfigure(0);
+    // exactly like a survivor — carrying preserved application memory.
+    wait_for_promotion_and_reconfigure();
 #endif
 }
 
-void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure(unsigned int timeout_ms) {
+void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure() {
+    // Unbounded wait: the library never promotes its own epoch, so a waiting rank can only
+    // wait for the external actor (orchestrator or rank agent) to do it. A migration that
+    // never completes is the orchestrator's responsibility to detect and resolve, not a
+    // condition the library times out on. (Redis connectivity failures still surface as
+    // exceptions from the control-plane client; only the "promotion never arrives" case waits.)
     std::uint64_t observed = active_epoch;
-    bool promoted = FMI::Utils::poll_until(
+    FMI::Utils::poll_until(
             [this, &observed]() { observed = control_plane->epoch(); return observed > active_epoch; },
-            timeout_ms, config.poll_interval_ms);
-    if (!promoted) {
-        throw FMI::Utils::Timeout();
-    }
+            0, config.poll_interval_ms);
 
     active_epoch = observed;
     control_plane->register_rank(active_epoch, peer_id, worker_id, FMI::FT::RankState::Active);

@@ -43,9 +43,13 @@ namespace FMI::FT {
         // the CRIU path are all read from `config` where needed (see checkpoint_and_wait_for_restore).
 
         //! Wait for the orchestrator to promote the epoch, then rebuild channels in place.
-        //! timeout_ms == 0 disables the wall-clock deadline (used across a CRIU dump/restore,
-        //! where the external rank agent controls completion).
-        void wait_for_promotion_and_reconfigure(unsigned int timeout_ms);
+        //! The wait is unbounded by design: the library never promotes its own epoch — an
+        //! external actor (the orchestrator for state_transfer="none", the rank agent for
+        //! "criu") always does — so the only honest thing a waiting rank can do is wait. A
+        //! stuck migration (dead orchestrator/agent, failed restore) is therefore not a
+        //! library-detected error; detecting and resolving it (abort the job, or promote a
+        //! replacement) is the orchestrator's responsibility. See docs/fault-tolerance.md.
+        void wait_for_promotion_and_reconfigure();
 
         //! CRIU state-transfer quiesce point for the migration target: release transport,
         //! publish a restorable image entry, and block until restored + promoted. The process

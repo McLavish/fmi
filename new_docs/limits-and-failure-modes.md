@@ -30,9 +30,15 @@ are deliberate v1 design boundaries.
 - A rank blocked inside a channel receive or collective cannot migrate until it
   returns to an operation boundary.
 - Replacement construction can block until epoch promotion.
-- Promotion waiting times out after `reconfigure_timeout_ms`.
+- Waiting for epoch promotion is **unbounded**: the library has no deadline on it.
+  The library never promotes its own epoch, so a waiting rank can only wait for the
+  external actor (orchestrator or rank agent) to do it. A migration that never
+  completes is the orchestrator's responsibility to detect (e.g. the rank agent's
+  non-zero exit) and resolve (abort, retry, or promote a replacement) — not a
+  library timeout. (Redis connectivity failures still surface as exceptions.)
 - `promote_epoch()` is compare-and-set guarded and only advances the epoch.
-- There is no automatic failure detection or liveness-triggered recovery.
+- There is no automatic failure detection or liveness-triggered recovery in the
+  library; liveness is the orchestrator's responsibility (see above).
 - Old transport objects can remain in Redis/S3 until cleanup/finalize, but
   epoch naming prevents new-epoch operations from matching them.
 
@@ -54,8 +60,9 @@ are deliberate v1 design boundaries.
 
 - Use stable, unique `comm_name` values per job.
 - In transparent migration, pass explicit worker IDs from the orchestrator.
-- Keep `reconfigure_timeout_ms` comfortably above expected Redis and
-  scheduling jitter.
+- Because promotion waits are unbounded, the orchestrator must own liveness:
+  watch the rank agent's exit status (and/or the control-plane epoch/rank state)
+  and abort or relaunch on a stuck migration so survivors are not parked forever.
 - Keep `poll_interval_ms` low enough for the desired migration responsiveness
   without creating excessive control-plane traffic.
 - Clear Redis job state between manual test runs if reusing a communicator

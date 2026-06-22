@@ -91,7 +91,6 @@ post-restore write is not fatal).
     "images_dir": "/tmp/fmi-criu-images",
     "poll_ms": 50,
     "quiesce_timeout_ms": 60000,
-    "reconfigure_timeout_ms": 60000,
     "host_id": "local-criu-host"
   }
 }
@@ -122,12 +121,26 @@ no shell quoting, so individual flags must not contain spaces.
 - one targeted rank per migration; no in-flight-collective preservation
 - no Python binding for the CRIU path (the demo is C++)
 - the rank agent is the migration authority and must complete `migrate_rank` (dump → restore →
-  `promote_epoch`). v1 has no rank-agent-failure recovery: if it dies between restore and epoch
-  promotion, survivors eventually hit `reconfigure_timeout_ms` and fail. Run the rank agent under
-  process supervision for planned migrations.
-- `reconfigure_timeout_ms` (the survivor wait) must comfortably exceed the dump + restore time;
-  size it for your largest process image (the runbook uses 60 s). The migrated rank itself waits
-  unbounded across the checkpoint, so only survivors are exposed to this deadline.
+  `promote_epoch`). The library does **not** time this out: survivors (and a joining replacement)
+  wait for epoch promotion indefinitely — see "Liveness" below. If the agent dies between restore
+  and promotion the job will wait forever, so run the rank agent under process supervision and let
+  the orchestrator act on its non-zero exit (abort the job, or promote a replacement).
+
+## Liveness: who owns a stuck migration
+
+The library never promotes its own epoch — an external actor always does (the orchestrator for
+`state_transfer="none"`, the rank agent for `"criu"`). So a rank waiting at an operation boundary,
+or a replacement waiting to join, **waits for epoch promotion indefinitely**; there is no
+`reconfigure_timeout_ms` or any other library-side deadline on it. This is deliberate: a flat
+wall-clock timeout cannot distinguish a slow-but-healthy migration (a large CRIU image) from a
+dead one, and the library is not the actor that can resolve either.
+
+Detecting and resolving a migration that never completes is the **orchestrator's** responsibility.
+It already has the signals: `migrate_rank` / the `fmi-rank-agent` CLI exit non-zero on a failed
+dump/restore, and the orchestrator can read epoch/rank state from the control plane. On failure it
+chooses the policy — abort the job, retry, or promote a fresh (stateless) replacement to unblock
+survivors. (Redis connectivity failures are unaffected: those still surface as exceptions from the
+control-plane client; only the "promotion never arrives" case waits.)
 
 ## Triggering a migration
 
