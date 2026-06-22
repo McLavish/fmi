@@ -26,14 +26,17 @@ namespace FMI::Utils {
         //                      build with FMI_ENABLE_CRIU=ON.
         std::string state_transfer = "none";
 
-        // CRIU settings. Used by the CRIU-backed state-transfer path (state_transfer="criu")
-        // and by the experimental whole-job CRIU code. images_dir/poll_ms/quiesce_timeout_ms
-        // govern checkpoint image placement and the quiesce handshake; host_id overrides the
-        // detected hostname for same-host scoping.
-        std::string images_dir = "/tmp/fmi-criu-images";
-        unsigned int poll_ms = 100;
-        unsigned int quiesce_timeout_ms = 10000;
-        std::string host_id;
+        // CRIU-mechanism-only settings (used solely on the state_transfer="criu" path); grouped
+        // so they don't intermix with the migration-protocol knobs above. images_dir/poll_ms/
+        // quiesce_timeout_ms govern checkpoint image placement and the rank-agent quiesce
+        // handshake; host_id overrides the detected hostname for same-host scoping. Parsed from a
+        // nested "criu" object under "fault_tolerance".
+        struct Criu {
+            std::string images_dir = "/tmp/fmi-criu-images";
+            unsigned int poll_ms = 100;
+            unsigned int quiesce_timeout_ms = 10000;
+            std::string host_id;
+        } criu;
     };
 
     //! Configuration parser for the FMI JSON configuration file

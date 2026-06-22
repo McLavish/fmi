@@ -147,10 +147,12 @@ namespace {
                "    \"poll_interval_ms\": 25,\n"
                "    \"preferred_data_backend\": \"Direct\",\n"
                "    \"state_transfer\": \"criu\",\n"
-            << "    \"images_dir\": \"" << images_dir.string() << "\",\n"
-               "    \"poll_ms\": 25,\n"
-               "    \"quiesce_timeout_ms\": 2000,\n"
-            << "    \"host_id\": \"" << host_id << "\"\n"
+               "    \"criu\": {\n"
+            << "      \"images_dir\": \"" << images_dir.string() << "\",\n"
+               "      \"poll_ms\": 25,\n"
+               "      \"quiesce_timeout_ms\": 2000,\n"
+            << "      \"host_id\": \"" << host_id << "\"\n"
+               "    }\n"
                "  }\n"
                "}\n";
         out.close();
@@ -640,6 +642,25 @@ BOOST_AUTO_TEST_CASE(rank_agent_cleanup_removes_images_and_state) {
 
     control_plane.clear_criu_state();
     control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+// Guards the config nesting: the rank agent's images_dir/poll_ms/quiesce_timeout_ms/host_id come
+// from the nested fault_tolerance.criu.* block. A regression here would silently fall back to
+// defaults (e.g. quiesce_timeout_ms 10000 instead of the configured value), which the agent tests
+// would not catch (a larger-than-needed timeout still passes). No Redis needed — parse only.
+BOOST_AUTO_TEST_CASE(criu_config_knobs_parse_from_nested_block) {
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("criu-cfg");
+    auto images_dir = temp_dir / "imgs";
+    auto config_path = write_criu_config(temp_dir / "fmi.json", images_dir, "stable-host", true, false);
+
+    FMI::Utils::Configuration cfg(config_path.string());
+    auto ft = cfg.get_fault_tolerance_config();
+    BOOST_CHECK_EQUAL(ft.criu.images_dir, images_dir.string());
+    BOOST_CHECK_EQUAL(ft.criu.poll_ms, 25u);
+    BOOST_CHECK_EQUAL(ft.criu.quiesce_timeout_ms, 2000u);
+    BOOST_CHECK_EQUAL(ft.criu.host_id, "stable-host");
+
     fs::remove_all(temp_dir);
 }
 

@@ -88,10 +88,12 @@ post-restore write is not fatal).
     "poll_interval_ms": 50,
     "preferred_data_backend": "Direct",
     "state_transfer": "criu",
-    "images_dir": "/tmp/fmi-criu-images",
-    "poll_ms": 50,
-    "quiesce_timeout_ms": 60000,
-    "host_id": "local-criu-host"
+    "criu": {
+      "images_dir": "/tmp/fmi-criu-images",
+      "poll_ms": 50,
+      "quiesce_timeout_ms": 60000,
+      "host_id": "local-criu-host"
+    }
   }
 }
 ```

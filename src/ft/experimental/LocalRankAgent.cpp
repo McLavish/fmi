@@ -42,7 +42,7 @@ void FMI::FT::LocalRankAgent::ensure_migration_mode() const {
 }
 
 void FMI::FT::LocalRankAgent::cleanup() {
-    auto images_path = fs::path(config.images_dir) / comm_name;
+    auto images_path = fs::path(config.criu.images_dir) / comm_name;
     if (fs::exists(images_path)) {
         fs::remove_all(images_path);
     }
@@ -94,7 +94,7 @@ std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
             }
         }
         return false;
-    }, config.quiesce_timeout_ms, config.poll_ms);
+    }, config.criu.quiesce_timeout_ms, config.criu.poll_ms);
 
     return found ? migrate_rank(target) : 0;
 }
@@ -112,7 +112,7 @@ FMI::FT::CriuRankInfo FMI::FT::LocalRankAgent::wait_for_ready_rank(FMI::Utils::p
             }
         }
         return false;
-    }, config.quiesce_timeout_ms, config.poll_ms);
+    }, config.criu.quiesce_timeout_ms, config.criu.poll_ms);
 
     if (!found) {
         throw FMI::Utils::Timeout();
@@ -122,7 +122,7 @@ FMI::FT::CriuRankInfo FMI::FT::LocalRankAgent::wait_for_ready_rank(FMI::Utils::p
 
 std::string FMI::FT::LocalRankAgent::rank_image_dir(std::uint64_t target_epoch,
                                                         FMI::Utils::peer_num rank) const {
-    return (fs::path(config.images_dir) / comm_name / ("epoch-" + std::to_string(target_epoch)) /
+    return (fs::path(config.criu.images_dir) / comm_name / ("epoch-" + std::to_string(target_epoch)) /
             ("rank-" + std::to_string(rank))).string();
 }
 

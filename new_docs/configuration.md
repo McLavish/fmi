@@ -15,10 +15,10 @@ control_port = 6379
 poll_interval_ms = 1000
 preferred_data_backend = ""
 state_transfer = none
-images_dir = /tmp/fmi-criu-images
-poll_ms = 100
-quiesce_timeout_ms = 10000
-host_id = ""
+criu.images_dir = /tmp/fmi-criu-images   # nested under "criu"
+criu.poll_ms = 100
+criu.quiesce_timeout_ms = 10000
+criu.host_id = ""
 ```
 
 There is no FT `mode` selector. FT is turned on with `enabled`; the single
@@ -64,10 +64,12 @@ detecting and resolving a migration that never completes.
     "control_host": "127.0.0.1",
     "control_port": 6379,
     "preferred_data_backend": "Direct",
-    "images_dir": "/tmp/fmi-criu-images",
-    "poll_ms": 25,
-    "quiesce_timeout_ms": 2000,
-    "host_id": "optional-stable-host-id"
+    "criu": {
+      "images_dir": "/tmp/fmi-criu-images",
+      "poll_ms": 25,
+      "quiesce_timeout_ms": 2000,
+      "host_id": "optional-stable-host-id"
+    }
   }
 }
 ```

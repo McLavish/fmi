@@ -12,8 +12,8 @@ namespace FMI::FT {
     //! Resolve the host identifier for a CRIU rank/agent: the configured override if set,
     //! otherwise the system hostname.
     inline std::string resolve_host_id(const FMI::Utils::FaultToleranceConfig& config) {
-        if (!config.host_id.empty()) {
-            return config.host_id;
+        if (!config.criu.host_id.empty()) {
+            return config.criu.host_id;
         }
 
         char hostname[256] = {0};

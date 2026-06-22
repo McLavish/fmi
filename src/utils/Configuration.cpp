@@ -55,10 +55,13 @@ namespace FMI::Utils {
         config.poll_interval_ms = ft_tree.get("poll_interval_ms", config.poll_interval_ms);
         config.preferred_data_backend = ft_tree.get("preferred_data_backend", config.preferred_data_backend);
         config.state_transfer = ft_tree.get("state_transfer", config.state_transfer);
-        config.images_dir = ft_tree.get("images_dir", config.images_dir);
-        config.poll_ms = ft_tree.get("poll_ms", config.poll_ms);
-        config.quiesce_timeout_ms = ft_tree.get("quiesce_timeout_ms", config.quiesce_timeout_ms);
-        config.host_id = ft_tree.get("host_id", config.host_id);
+        // CRIU-mechanism knobs live under a nested "criu" object. Absent (non-criu configs) -> defaults.
+        if (auto criu_tree = ft_tree.get_child_optional("criu")) {
+            config.criu.images_dir = criu_tree->get("images_dir", config.criu.images_dir);
+            config.criu.poll_ms = criu_tree->get("poll_ms", config.criu.poll_ms);
+            config.criu.quiesce_timeout_ms = criu_tree->get("quiesce_timeout_ms", config.criu.quiesce_timeout_ms);
+            config.criu.host_id = criu_tree->get("host_id", config.criu.host_id);
+        }
         return config;
     }
 }

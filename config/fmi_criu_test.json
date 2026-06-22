@@ -57,8 +57,10 @@
     "control_port": 6379,
     "poll_interval_ms": 25,
     "preferred_data_backend": "Direct",
-    "images_dir": "/tmp/fmi-criu-images",
-    "poll_ms": 25,
-    "quiesce_timeout_ms": 2000
+    "criu": {
+      "images_dir": "/tmp/fmi-criu-images",
+      "poll_ms": 25,
+      "quiesce_timeout_ms": 2000
+    }
   }
 }
