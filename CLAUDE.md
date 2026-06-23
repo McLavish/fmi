@@ -96,8 +96,10 @@ need live infrastructure:** Redis-backed cases need a running Redis; `Direct` ca
 The CRIU tests are designed to run against a *mock* `criu` binary because real
 checkpoint/restore needs kernel capabilities usually unavailable in dev environments.
 
-Standalone demos (also under `tests/`, built as separate executables): `ft_migration_demo`.
-The experimental `transparent_state_transfer_demo` is built only with `FMI_ENABLE_CRIU=ON`.
+The one standalone demo is the experimental `transparent_state_transfer_demo`, which ships with
+its runbook (`runbooks/local-criu-state-transfer/transparent_state_transfer_demo.cpp`, built via
+that directory's own `CMakeLists.txt`) rather than under `tests/`. It is built only as a
+top-level project with `FMI_ENABLE_CRIU=ON`, and is driven by `runbooks/local-criu-state-transfer/run-demo.sh`.
 
 ## Running things
 
@@ -167,7 +169,8 @@ fault tolerance layered around the user API.
   checkpointed/restored so memory is preserved transparently. The CRIU path is driven by the
   host-local `LocalRankAgent` (`fmi-rank-agent`), reuses the
   `prepare_channels_for_checkpoint` hook + the survivor reconfigure path, and is verified in
-  `runbooks/local-criu-state-transfer/` (rootless criu) with `tests/transparent_state_transfer_demo.cpp`.
+  `runbooks/local-criu-state-transfer/` (rootless criu) with that runbook's
+  `transparent_state_transfer_demo.cpp`.
     Shared criu-invocation code lives in `ft/experimental/CriuExec`.
   - **Epoch fencing invariant** (`PLANS.md`): under FT, every backend-visible name —
     `Direct` pairing names, `Redis`/`S3` object names, per-instance operation counters — is

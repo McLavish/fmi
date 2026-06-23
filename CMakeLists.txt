@@ -114,3 +114,9 @@ endif()
 if (FMI_BUILD_TOOLS)
     add_subdirectory(tools)
 endif()
+
+# The CRIU transparent state-transfer demo ships with its runbook, not under tests/. Build it
+# only as a top-level project with the experimental CRIU support on (the runbook drives it).
+if (FMI_ENABLE_CRIU AND NOT hasParent)
+    add_subdirectory(runbooks/local-criu-state-transfer)
+endif()

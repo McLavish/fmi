@@ -18,7 +18,7 @@ REPO_ROOT="$(cd "${RUNBOOK_DIR}/../.." && pwd)"
 BUILD_DIR="${FMI_BUILD_DIR:-${REPO_ROOT}/build-unified-criu}"
 CONFIG="${RUNBOOK_DIR}/fmi.json"
 
-DEMO="${BUILD_DIR}/tests/transparent_state_transfer_demo"
+DEMO="${BUILD_DIR}/runbooks/local-criu-state-transfer/transparent_state_transfer_demo"
 AGENT="${BUILD_DIR}/tools/fmi-rank-agent"
 NUM_PEERS=2
 COMM_NAME="${COMM_NAME:-criu-stx-$(date +%s)}"

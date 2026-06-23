@@ -11,7 +11,8 @@ rootless CRIU cannot dump/restore.
 
 ## What it proves
 
-Two ranks run a collective workload (`tests/transparent_state_transfer_demo.cpp`):
+Two ranks run a collective workload
+(`runbooks/local-criu-state-transfer/transparent_state_transfer_demo.cpp`):
 
 1. phase-1 `allreduce`,
 2. each rank mutates a local `state` variable (`state += 100`) — memory that lives only in the

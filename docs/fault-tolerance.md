@@ -112,8 +112,8 @@ no shell quoting, so individual flags must not contain spaces.
 
 #### Demo and runbook
 
-- C++ demo: `tests/transparent_state_transfer_demo.cpp` (a plain `FMI::Communicator` whose
-  post-migration `allreduce` proves state survived).
+- C++ demo: `runbooks/local-criu-state-transfer/transparent_state_transfer_demo.cpp` (a plain
+  `FMI::Communicator` whose post-migration `allreduce` proves state survived).
 - Verified end-to-end runbook (rootless criu 4.2): `runbooks/local-criu-state-transfer/`.
 
 #### v1 limitations

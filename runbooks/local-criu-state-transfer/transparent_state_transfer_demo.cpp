@@ -1,4 +1,4 @@
-#include "../include/fmi.h"
+#include <fmi.h>
 
 #include <chrono>
 #include <cstdlib>

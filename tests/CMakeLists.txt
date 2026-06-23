@@ -12,7 +12,5 @@ add_executable (Boost_Tests_run ${FMI_TEST_SOURCES})
 target_link_libraries (Boost_Tests_run ${Boost_LIBRARIES} FMI OpenMP::OpenMP_CXX)
 target_compile_definitions (Boost_Tests_run PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}>)
 
-if(FMI_ENABLE_CRIU)
-    add_executable (transparent_state_transfer_demo transparent_state_transfer_demo.cpp)
-    target_link_libraries (transparent_state_transfer_demo FMI)
-endif()
+# The CRIU transparent state-transfer demo is not a test; it lives with its runbook and is
+# built from runbooks/local-criu-state-transfer/ (see the top-level CMakeLists.txt).
