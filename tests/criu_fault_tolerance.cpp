@@ -232,6 +232,14 @@ namespace {
                "      ;;\n"
                "  esac\n"
                "done\n"
+               // Optional failure injection: when FMI_MOCK_FAIL_MODE matches this invocation, exit
+               // non-zero before writing any marker, so a test can assert that a failed dump/restore
+               // aborts the migration without promoting the epoch.
+               "fail_mode=\"${FMI_MOCK_FAIL_MODE:-}\"\n"
+               "if [ -n \"$fail_mode\" ] && [ \"$mode\" = \"$fail_mode\" ]; then\n"
+               "  echo \"mock criu forced failure for $mode\" >&2\n"
+               "  exit 1\n"
+               "fi\n"
                // Optional ordering gate: when FMI_MOCK_GATE_MODE matches this invocation, signal
                // "entered" and block (bounded) until the test drops a "proceed" file. Lets a test
                // freeze the agent mid-step to observe the dump<restore<promote ordering.
@@ -735,6 +743,171 @@ BOOST_AUTO_TEST_CASE(request_migrations_marks_every_rank_pending) {
         }
     }
     BOOST_CHECK_EQUAL(pending_count, 3);
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(migrate_ranks_dumps_restores_all_and_promotes_once) {
+    // The batch executor checkpoints a whole set in one epoch cut: every rank gets a dump +
+    // restore, and the epoch advances exactly once for the whole set.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("batch");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("batch-job");
+    if (!redis_available(config_path.string(), comm_name, 3)) {
+        BOOST_TEST_MESSAGE("Skipping batch migrate test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 3);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    // All three ranks reach their quiesce point on this host for epoch 1.
+    for (FMI::Utils::peer_num rank = 0; rank < 3; rank++) {
+        control_plane.criu_register_rank(rank, 4000 + rank, host_id, "Direct");
+        control_plane.criu_mark_rank_quiesced(rank, 4000 + rank, host_id, "Direct", 1);
+    }
+
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 3);
+    auto promoted = agent.migrate_ranks({0, 1, 2});
+
+    BOOST_CHECK_EQUAL(promoted, 1U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
+    for (FMI::Utils::peer_num rank = 0; rank < 3; rank++) {
+        auto dir = images_dir / comm_name / "epoch-1" / ("rank-" + std::to_string(rank));
+        BOOST_CHECK(fs::exists(dir / "dump.marker"));
+        BOOST_CHECK(fs::exists(dir / "restore.marker"));
+    }
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(migrate_ranks_does_not_promote_when_a_rank_never_quiesces) {
+    // Consistent cut: the batch must wait for EVERY target to quiesce before any dump. If one
+    // never becomes ready, the whole batch times out and the epoch is NOT promoted (the
+    // orchestrator detects the non-zero exit; survivors are never reconfigured to a half-cut).
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("batch-timeout");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("batch-timeout-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping batch timeout test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    // Only rank 0 quiesces; rank 1 never does.
+    control_plane.criu_register_rank(0, 4000, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(0, 4000, host_id, "Direct", 1);
+
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    BOOST_CHECK_THROW(agent.migrate_ranks({0, 1}), FMI::Utils::Timeout);
+
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
+    BOOST_CHECK(!fs::exists(images_dir / comm_name / "epoch-1"));
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(migrate_ranks_does_not_promote_when_dump_or_restore_fails) {
+    // If any rank's criu dump/restore fails, the batch must abort without promoting — a partial
+    // checkpoint must never advance the epoch.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("batch-fail");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("batch-fail-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping batch failure test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    for (FMI::Utils::peer_num rank = 0; rank < 2; rank++) {
+        control_plane.criu_register_rank(rank, 4000 + rank, host_id, "Direct");
+        control_plane.criu_mark_rank_quiesced(rank, 4000 + rank, host_id, "Direct", 1);
+    }
+
+    ScopedEnv fail("FMI_MOCK_FAIL_MODE", "restore");  // every restore fails
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    BOOST_CHECK_THROW(agent.migrate_ranks({0, 1}), std::exception);
+
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(migrate_local_targets_only_host_local_ranks) {
+    // "migrate all local": the agent discovers from the registry which ranks run on its host and
+    // migrates exactly those, leaving ranks advertised on other hosts untouched.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("local");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("local-job");
+    if (!redis_available(config_path.string(), comm_name, 3)) {
+        BOOST_TEST_MESSAGE("Skipping migrate_local test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 3);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    // Ranks 0,1 are local (this host); rank 2 is advertised on another host.
+    control_plane.criu_register_rank(0, 4000, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(0, 4000, host_id, "Direct", 1);
+    control_plane.criu_register_rank(1, 4001, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(1, 4001, host_id, "Direct", 1);
+    control_plane.criu_register_rank(2, 4002, "some-other-host", "Direct");
+    control_plane.criu_mark_rank_quiesced(2, 4002, "some-other-host", "Direct", 1);
+
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 3);
+    auto promoted = agent.migrate_local();
+
+    BOOST_CHECK_EQUAL(promoted, 1U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
+    // Locals migrated, remote rank left alone.
+    BOOST_CHECK(fs::exists(images_dir / comm_name / "epoch-1" / "rank-0" / "restore.marker"));
+    BOOST_CHECK(fs::exists(images_dir / comm_name / "epoch-1" / "rank-1" / "restore.marker"));
+    BOOST_CHECK(!fs::exists(images_dir / comm_name / "epoch-1" / "rank-2"));
 
     control_plane.clear_criu_state();
     control_plane.clear_job_state();

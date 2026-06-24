@@ -4,9 +4,13 @@
 #include "../../../include/ft/experimental/HostId.h"
 #include "../../../include/utils/Configuration.h"
 
+#include <algorithm>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -46,30 +50,88 @@ void FMI::FT::LocalRankAgent::cleanup() {
 }
 
 std::uint64_t FMI::FT::LocalRankAgent::migrate_rank(FMI::Utils::peer_num rank) const {
+    // A single-rank migration is just the degenerate batch — one code path for both.
+    return migrate_ranks({rank});
+}
+
+std::uint64_t FMI::FT::LocalRankAgent::migrate_ranks(const std::vector<FMI::Utils::peer_num>& ranks) const {
+    if (ranks.empty()) {
+        return control_plane->epoch();
+    }
+
     std::uint64_t current_epoch = control_plane->epoch();
     std::uint64_t target_epoch = current_epoch + 1;
 
-    // Wait until the targeted rank has reached its quiesce point and published a restorable
-    // image entry (pid + QUIESCED) on this host.
-    auto rank_info = wait_for_ready_rank(rank, target_epoch);
+    // Consistent cut: wait for EVERY target to reach its quiesce point on this host before
+    // dumping any of them, so the single epoch promotion below releases them all together.
+    auto ready = wait_for_ready_ranks(ranks, target_epoch);
 
-    auto dir = rank_image_dir(target_epoch, rank);
-    fs::create_directories(dir);
+    std::vector<std::string> dirs(ready.size());
+    for (std::size_t i = 0; i < ready.size(); i++) {
+        dirs[i] = rank_image_dir(target_epoch, ready[i].rank);
+        fs::create_directories(dirs[i]);
+    }
 
-    // Dump terminates and reaps the (criu-ptraced) target, freeing its pid for restore.
-    dump_rank(rank_info.pid, dir);
-    // Recreate the process from its image: same pid, same memory, control flow resumes inside
-    // the rank's promotion-wait loop.
-    restore_rank(dir);
+    // Parallel checkpoint: one thread per rank running ONLY criu dump+restore + filesystem work.
+    // The control plane (one mutex-guarded Redis connection) is never touched here — all of
+    // that stays on this thread (the waits above, the mark-running + promote below) — so the
+    // workers share no mutable state beyond their own slot in `errors`.
+    std::vector<std::exception_ptr> errors(ready.size());
+    std::vector<std::thread> workers;
+    workers.reserve(ready.size());
+    for (std::size_t i = 0; i < ready.size(); i++) {
+        workers.emplace_back([this, i, &ready, &dirs, &errors]() {
+            try {
+                // Dump terminates and reaps the (criu-ptraced) target, freeing its pid for restore;
+                // restore recreates the process at the same pid with its memory, resuming inside
+                // the rank's promotion-wait loop.
+                dump_rank(ready[i].pid, dirs[i]);
+                restore_rank(dirs[i]);
+            } catch (...) {
+                errors[i] = std::current_exception();
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    // If any rank failed to checkpoint, abort the whole cut WITHOUT promoting — a partial
+    // checkpoint must never advance the epoch (the orchestrator owns failure handling).
+    for (const auto& error : errors) {
+        if (error) {
+            std::rethrow_exception(error);
+        }
+    }
 
-    // The restored rank no longer needs its checkpoint-ready marker; clear it so a watch loop
-    // does not treat the entry as a fresh request.
-    control_plane->criu_mark_rank_running(rank, rank_info.pid, host_id, rank_info.backend);
+    // Clear each restored rank's checkpoint-ready marker so a watch loop does not re-trigger.
+    for (const auto& info : ready) {
+        control_plane->criu_mark_rank_running(info.rank, info.pid, host_id, info.backend);
+    }
 
-    // Promote the epoch last: survivors and the restored rank both observe N+1 and reconfigure
-    // their channels under the new epoch-qualified communicator name.
+    // Promote the epoch once for the whole set: survivors and every restored rank observe N+1
+    // and reconfigure their channels under the new epoch-qualified communicator name.
     control_plane->promote_epoch(target_epoch);
     return target_epoch;
+}
+
+std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
+    // Discover which ranks run on this host from the CRIU registry (each rank advertises its
+    // host_id when its migration runtime is constructed). criu_rank_info() returns one entry per
+    // registered rank, so no de-duplication is needed.
+    std::vector<FMI::Utils::peer_num> locals;
+    for (const auto& info : control_plane->criu_rank_info()) {
+        if (info.host_id == host_id) {
+            locals.push_back(info.rank);
+        }
+    }
+    if (locals.empty()) {
+        return 0;
+    }
+
+    // Mark the whole local set for migration atomically, then batch-migrate it. request_migrations
+    // is idempotent, so it is harmless if the orchestrator already marked these ranks pending.
+    control_plane->request_migrations(locals);
+    return migrate_ranks(locals);
 }
 
 std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
@@ -95,19 +157,25 @@ std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
     return found ? migrate_rank(target) : 0;
 }
 
-FMI::FT::CriuRankInfo FMI::FT::LocalRankAgent::wait_for_ready_rank(FMI::Utils::peer_num rank,
-                                                                       std::uint64_t target_epoch) const {
-    CriuRankInfo ready;
-    bool found = FMI::Utils::poll_until([this, rank, target_epoch, &ready]() {
-        for (const auto& info : control_plane->criu_rank_info()) {
-            if (info.rank == rank && info.host_id == host_id &&
-                info.state == CriuRankState::Quiesced && info.quiesced_generation == target_epoch &&
-                info.pid > 0) {
-                ready = info;
-                return true;
+std::vector<FMI::FT::CriuRankInfo> FMI::FT::LocalRankAgent::wait_for_ready_ranks(
+        const std::vector<FMI::Utils::peer_num>& ranks, std::uint64_t target_epoch) const {
+    std::vector<CriuRankInfo> ready;
+    bool found = FMI::Utils::poll_until([this, &ranks, target_epoch, &ready]() {
+        auto infos = control_plane->criu_rank_info();
+        std::vector<CriuRankInfo> matched;
+        for (auto rank : ranks) {
+            auto it = std::find_if(infos.begin(), infos.end(), [this, rank, target_epoch](const CriuRankInfo& info) {
+                return info.rank == rank && info.host_id == host_id &&
+                       info.state == CriuRankState::Quiesced && info.quiesced_generation == target_epoch &&
+                       info.pid > 0;
+            });
+            if (it == infos.end()) {
+                return false;  // not all ranks ready yet
             }
+            matched.push_back(*it);
         }
-        return false;
+        ready = std::move(matched);
+        return true;
     }, config.criu.quiesce_timeout_ms, config.criu.poll_ms);
 
     if (!found) {
