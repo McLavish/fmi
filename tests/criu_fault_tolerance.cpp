@@ -664,6 +664,45 @@ BOOST_AUTO_TEST_CASE(criu_config_knobs_parse_from_nested_block) {
     fs::remove_all(temp_dir);
 }
 
+BOOST_AUTO_TEST_CASE(runtime_advertises_host_in_criu_registry_on_construction) {
+    // For "migrate all local", the host-local agent must learn which ranks run on its host
+    // BEFORE they quiesce. So a criu-mode runtime publishes a Running CRIU registry entry
+    // carrying its host_id at construction (not only at the later quiesce point, which is too
+    // late for discovery).
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("advertise");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    std::string comm_name = unique_comm_name("advertise-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping host-advertise test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    auto config = FMI::Utils::Configuration(config_path.string()).get_fault_tolerance_config();
+    auto control_plane = std::make_shared<FMI::FT::ControlPlane>(config_path.string(), comm_name, 2);
+    control_plane->clear_criu_state();
+    control_plane->clear_job_state();
+
+    FMI::FT::TransparentMigrationRuntime runtime(
+            0, "worker-0", "", 0, config, control_plane, comm_name,
+            [](const std::string&) {}, []() {});
+
+    bool advertised = false;
+    for (const auto& info : control_plane->criu_rank_info()) {
+        if (info.rank == 0 && info.state == FMI::FT::CriuRankState::Running &&
+            info.host_id == host_id && info.pid > 0) {
+            advertised = true;
+        }
+    }
+    BOOST_CHECK(advertised);
+
+    control_plane->clear_criu_state();
+    control_plane->clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_CASE(request_migrations_marks_every_rank_pending) {
     // Batch trigger: the orchestrator marks a whole set of ranks for migration in one call.
     // Asserted via the directory state (MIGRATION_PENDING) for each registered member; the

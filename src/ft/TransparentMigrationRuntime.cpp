@@ -50,6 +50,18 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         if (previous != SIG_DFL && previous != SIG_ERR) {
             std::signal(SIGPIPE, previous);
         }
+
+        // Advertise this rank's host in the CRIU registry now, at construction, so the
+        // host-local rank agent can discover which ranks run on its host BEFORE they reach
+        // their quiesce point — the prerequisite for driving "migrate all local". The quiesce
+        // path (checkpoint_and_wait_for_restore) later re-marks the same entry QUIESCED for the
+        // target epoch. Guarded on a live control plane: some unit tests construct the runtime
+        // with a null control plane to exercise the construction-time checks above.
+        if (this->control_plane != nullptr) {
+            this->control_plane->criu_register_rank(
+                    this->peer_id, static_cast<int>(getpid()),
+                    resolve_host_id(config), config.preferred_data_backend);
+        }
 #else
         throw std::runtime_error(
                 "fault_tolerance.state_transfer=\"criu\" requires a build with FMI_ENABLE_CRIU=ON");
