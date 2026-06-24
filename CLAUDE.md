@@ -112,7 +112,7 @@ READMEs are verified step-by-step runbooks. JSON config templates live in `confi
 The experimental CRIU rank agent CLI is built only with `FMI_ENABLE_CRIU=ON`:
 
 ```text
-fmi-rank-agent {migrate|watch|cleanup} <comm_name> <num_peers> <config> [rank]
+fmi-rank-agent {migrate|migrate-local|watch|cleanup} <comm_name> <num_peers> <config> [rank]
 ```
 
 ## Architecture

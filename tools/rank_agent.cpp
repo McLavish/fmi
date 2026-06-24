@@ -9,6 +9,11 @@
 //       Migrate one explicit logical rank: wait for it to reach its checkpoint-ready quiesce
 //       point, criu dump + restore its process image, then promote the epoch.
 //
+//   fmi-rank-agent migrate-local <comm_name> <num_peers> <config>
+//       Migrate every rank running on this host in one epoch cut: discover the host-local ranks
+//       from the CRIU registry, request their migration, wait for all to quiesce, then criu
+//       dump + restore them in parallel and promote the epoch once.
+//
 //   fmi-rank-agent watch <comm_name> <num_peers> <config>
 //       Wait for any rank to be marked for migration (request_migration) and migrate it.
 //
@@ -16,7 +21,8 @@
 //       Remove this communicator's CRIU image tree and clear its CRIU control-plane state.
 int main(int argc, char** argv) {
     if (argc < 5) {
-        std::cerr << "usage: fmi-rank-agent <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]"
+        std::cerr << "usage: fmi-rank-agent <migrate|migrate-local|watch|cleanup> <comm_name> "
+                     "<num_peers> <config> [rank]"
                   << std::endl;
         return 1;
     }
@@ -37,6 +43,15 @@ int main(int argc, char** argv) {
             auto rank = static_cast<FMI::Utils::peer_num>(std::stoul(argv[5]));
             std::cout << "migrated_rank=" << rank << " promoted_epoch=" << agent.migrate_rank(rank)
                       << std::endl;
+            return 0;
+        }
+        if (command == "migrate-local") {
+            auto epoch = agent.migrate_local();
+            if (epoch == 0) {
+                std::cout << "migrated_ranks=none" << std::endl;
+                return 0;
+            }
+            std::cout << "promoted_epoch=" << epoch << std::endl;
             return 0;
         }
         if (command == "watch") {
