@@ -664,4 +664,42 @@ BOOST_AUTO_TEST_CASE(criu_config_knobs_parse_from_nested_block) {
     fs::remove_all(temp_dir);
 }
 
+BOOST_AUTO_TEST_CASE(request_migrations_marks_every_rank_pending) {
+    // Batch trigger: the orchestrator marks a whole set of ranks for migration in one call.
+    // Asserted via the directory state (MIGRATION_PENDING) for each registered member; the
+    // pending-set membership the rank side consumes is exercised by the end-to-end demo.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("req-migrations");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    std::string comm_name = unique_comm_name("req-migrations-job");
+    if (!redis_available(config_path.string(), comm_name, 3)) {
+        BOOST_TEST_MESSAGE("Skipping request_migrations test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 3);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    // Register three ACTIVE members at epoch 0 (no collective issued -> no rendezvous needed).
+    FMI::Communicator rank0(0, 3, config_path.string(), comm_name, 128, "worker-0");
+    FMI::Communicator rank1(1, 3, config_path.string(), comm_name, 128, "worker-1");
+    FMI::Communicator rank2(2, 3, config_path.string(), comm_name, 128, "worker-2");
+
+    control_plane.request_migrations({0, 1, 2});
+
+    int pending_count = 0;
+    for (const auto& entry : control_plane.directory_snapshot(0)) {
+        if (entry.state == FMI::FT::RankState::MigrationPending) {
+            pending_count++;
+        }
+    }
+    BOOST_CHECK_EQUAL(pending_count, 3);
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_SUITE_END();

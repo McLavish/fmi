@@ -300,6 +300,33 @@ void FMI::FT::ControlPlane::request_migration(FMI::Utils::peer_num rank) {
 #endif
 }
 
+void FMI::FT::ControlPlane::request_migrations(const std::vector<FMI::Utils::peer_num>& ranks) const {
+#if FMI_ENABLE_REDIS
+    if (ranks.empty()) {
+        return;
+    }
+    ensure_job();
+    auto current_epoch = epoch();
+    // One Lua EVAL so the SADD-into-pending and the per-rank state HSET flip together for the
+    // whole set — the rank side observes either none or all of this batch, never a partial set.
+    static const std::string script =
+            "for i = 2, #ARGV do "
+            "redis.call('SADD', KEYS[1], ARGV[i]) "
+            "redis.call('HSET', KEYS[2], ARGV[i], ARGV[1]) "
+            "end "
+            "return #ARGV - 1";
+    std::vector<std::string> args = {"EVAL", script, "2", impl->pending_key(),
+                                     impl->states_key(current_epoch),
+                                     state_to_string(RankState::MigrationPending)};
+    for (auto rank : ranks) {
+        args.push_back(std::to_string(rank));
+    }
+    impl->command(args);
+#else
+    (void) ranks;
+#endif
+}
+
 void FMI::FT::ControlPlane::set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const {
 #if FMI_ENABLE_REDIS
     impl->command({"HSET", impl->placement_key(epoch), std::to_string(rank), placement});

@@ -30,6 +30,12 @@ namespace FMI::FT {
         //! Request a migration for the logical rank.
         void request_migration(FMI::Utils::peer_num rank);
 
+        //! Request migration for a set of ranks in one atomic step, so the whole target set
+        //! becomes pending together (no window where some ranks are pending and others are not,
+        //! which a watcher/agent could act on mid-batch). Used to drive batch / "migrate all
+        //! local" migrations. No-op for an empty set.
+        void request_migrations(const std::vector<FMI::Utils::peer_num>& ranks) const;
+
         [[nodiscard]] std::string placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
         [[nodiscard]] std::vector<RankDirectoryEntry> directory_snapshot(std::uint64_t epoch) const;
 
