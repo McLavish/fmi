@@ -89,6 +89,30 @@ Useful overrides: `COMM_NAME`, `WINDOW_MS` (migration window after phase 1), `FM
 `FMI_CRIU_EXTRA_ARGS` (extra criu flags). Per-rank logs are written to
 `runbooks/local-criu-state-transfer/.last-run-rank{0,1}.log`.
 
+## Migrate all local ranks (parallel checkpointing)
+
+`run-demo-all.sh` exercises **`fmi-rank-agent migrate-local`**: instead of one targeted rank, it
+checkpoints *every rank running on this host in a single epoch cut*. The agent discovers the
+host-local ranks from the CRIU registry (each rank advertises its `host_id` when its migration
+runtime is constructed), requests their migration, waits for **all** of them to quiesce (a
+consistent cut), `criu dump`/`restore`s them **in parallel**, then promotes the epoch **once**.
+
+```bash
+# 3 ranks, all migrated at once (privileged criu by default; rootless via FMI_CRIU_EXTRA_ARGS)
+NUM_PEERS=3 bash runbooks/local-criu-state-transfer/run-demo-all.sh
+# rootless:
+FMI_CRIU_EXTRA_ARGS="--unprivileged" NUM_PEERS=3 bash runbooks/local-criu-state-transfer/run-demo-all.sh
+```
+
+This is the **no-survivor** case — every rank is checkpointed and restored, so all of them are
+detached criu children at the end (the driver polls each rank's log for the result line). With
+3 ranks, phase-2 must equal `num_peers*(num_peers+1)/2 + 100*num_peers` = **306** (ranks
+contribute 101, 102, 103). Per-rank logs are written to `.last-run-all-rank{0,1,2}.log`.
+
+Same-host scope: because every rank shares the configured `host_id`, "all local" is the whole
+communicator. Migrating ranks that are split across *multiple hosts* (where each host's agent
+migrates its own subset and a single coordinated promote spans all hosts) is future work.
+
 ## Privileged Docker fallback
 
 If rootless CRIU cannot dump/restore on your host (older kernel, restricted seccomp, TCP
@@ -107,8 +131,9 @@ docker run --rm -it --privileged --name fmi-criu \
 
 - Same host only (criu restores the process on the host that dumped it).
 - `Direct` is the only supported data backend; `Redis` is the control plane.
-- One targeted rank per migration; in-flight collectives are not preserved (migration happens
-  only at operation boundaries).
+- A single migration cut targets one rank (`migrate`) or all host-local ranks (`migrate-local`),
+  always on one host; in-flight collectives are not preserved (migration happens only at operation
+  boundaries). Multi-host batch migration is not yet supported.
 - No Python binding for the CRIU path (the demo is C++).
 - No rank-agent-failure recovery in the library: the rank agent must complete dump → restore →
   `promote_epoch`. Survivor ranks wait for promotion **indefinitely** — there is no library-side
