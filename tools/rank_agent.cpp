@@ -41,6 +41,11 @@ int main(int argc, char** argv) {
                 return 1;
             }
             auto rank = static_cast<FMI::Utils::peer_num>(std::stoul(argv[5]));
+            if (rank >= num_peers) {
+                std::cerr << "rank " << rank << " is out of range for num_peers=" << num_peers
+                          << std::endl;
+                return 1;
+            }
             std::cout << "migrated_rank=" << rank << " promoted_epoch=" << agent.migrate_rank(rank)
                       << std::endl;
             return 0;
@@ -48,8 +53,11 @@ int main(int argc, char** argv) {
         if (command == "migrate-local") {
             auto epoch = agent.migrate_local();
             if (epoch == 0) {
-                std::cout << "migrated_ranks=none" << std::endl;
-                return 0;
+                // Distinct non-zero exit so an orchestrator can tell "no host-local ranks were
+                // discovered" (a placement/registration problem) apart from a successful migration
+                // (exit 0) and from a fatal error (exit 1).
+                std::cerr << "no host-local ranks found to migrate" << std::endl;
+                return 2;
             }
             std::cout << "promoted_epoch=" << epoch << std::endl;
             return 0;
