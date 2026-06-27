@@ -23,7 +23,8 @@ namespace FMI::FT {
             std::shared_ptr<FMI::FT::ControlPlane> control_plane,
             std::string base_comm_name,
             std::function<void(const std::string&)> reconfigure_callback,
-            std::function<void()> prepare_for_checkpoint = {});
+            std::function<void()> prepare_for_checkpoint = {},
+            std::function<void()> finalize_channels = {});
 
         void enter_operation() override;
         void exit_operation() override;
@@ -38,6 +39,7 @@ namespace FMI::FT {
         std::string base_comm_name;
         std::function<void(const std::string&)> reconfigure_callback;
         std::function<void()> prepare_for_checkpoint;
+        std::function<void()> finalize_channels;
 
         // How a migrated rank's state is handled, the data backend name, and host identity used by
         // the CRIU path are all read from `config` where needed (see checkpoint_and_wait_for_restore).

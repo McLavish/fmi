@@ -20,7 +20,8 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         std::shared_ptr<FMI::FT::ControlPlane> control_plane,
         std::string base_comm_name,
         std::function<void(const std::string&)> reconfigure_callback,
-        std::function<void()> prepare_for_checkpoint) :
+        std::function<void()> prepare_for_checkpoint,
+        std::function<void()> finalize_channels) :
         peer_id(peer_id),
         worker_id(std::move(worker_id)),
         placement(std::move(placement)),
@@ -29,7 +30,8 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         control_plane(std::move(control_plane)),
         base_comm_name(std::move(base_comm_name)),
         reconfigure_callback(std::move(reconfigure_callback)),
-        prepare_for_checkpoint(std::move(prepare_for_checkpoint)) {
+        prepare_for_checkpoint(std::move(prepare_for_checkpoint)),
+        finalize_channels(std::move(finalize_channels)) {
     if (config.state_transfer == "criu") {
 #ifdef FMI_ENABLE_CRIU
         // CRIU freezes the whole process image, so every data-plane channel the policy might
@@ -106,6 +108,16 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
         }
         // Default (state_transfer == "none"): quiesce and exit; a fresh replacement recomputes.
         control_plane->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
+        // std::exit does not unwind, so ~Communicator (which finalizes channels) never runs.
+        // Finalize here so a Redis/S3 data plane deletes this rank's epoch-N objects instead of
+        // leaking them on every migration. Best-effort: we are terminating regardless.
+        if (finalize_channels) {
+            try {
+                finalize_channels();
+            } catch (...) {
+                // ignore — the rank is exiting
+            }
+        }
         std::exit(0);
     }
 

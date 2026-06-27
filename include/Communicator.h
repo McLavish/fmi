@@ -231,6 +231,7 @@ namespace FMI {
         void enter_operation();
         void exit_operation();
         void prepare_channels_for_checkpoint();
+        void finalize_channels();
         void build_channels(const std::string& effective_comm_name);
     };
 }

@@ -68,7 +68,8 @@ namespace FMI {
                     peer_id, resolved_worker_id, placement, active_epoch,
                     ft_config, control_plane, comm_name,
                     [this](const std::string& new_name) { reconfigure_to_epoch(new_name); },
-                    [this]() { prepare_channels_for_checkpoint(); });
+                    [this]() { prepare_channels_for_checkpoint(); },
+                    [this]() { finalize_channels(); });
         } else {
             this->comm_name = comm_name;
             build_channels(this->comm_name);
@@ -116,6 +117,10 @@ namespace FMI {
         if (operation_runtime != nullptr) {
             operation_runtime->shutdown();
         }
+        finalize_channels();
+    }
+
+    void Communicator::finalize_channels() {
         for (auto const& [name, channel] : channels) {
             channel->finalize();
         }
