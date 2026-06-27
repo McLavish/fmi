@@ -455,16 +455,25 @@ void FMI::FT::ControlPlane::set_rank_state(std::uint64_t epoch, FMI::Utils::peer
 
 void FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
 #if FMI_ENABLE_REDIS
+    // When the promotion advances the epoch, also reclaim the per-epoch hashes of the epoch we
+    // are leaving (the in-script `current`): members/states/placement. They are never read after
+    // promotion — every backend-visible name is epoch-qualified and survivors join_epoch into the
+    // new epoch — so without this they accumulate in Redis for the lifetime of the job. Building
+    // the keys from `current` (not next-1) makes the cleanup correct regardless of step size.
+    // ARGV[1]=next epoch, ARGV[2]=epoch-key prefix, ARGV[3..5]=the three per-epoch suffixes.
     static const std::string script =
             "local current = redis.call('HGET', KEYS[1], 'current_epoch') "
             "if not current then current = '0' end "
             "if tonumber(ARGV[1]) > tonumber(current) then "
             "redis.call('HSET', KEYS[1], 'current_epoch', ARGV[1]) "
             "redis.call('DEL', KEYS[2]) "
+            "redis.call('DEL', ARGV[2]..current..ARGV[3], ARGV[2]..current..ARGV[4], ARGV[2]..current..ARGV[5]) "
             "return 1 "
             "end "
             "return 0";
-    impl->command({"EVAL", script, "2", impl->meta_key(), impl->pending_key(), std::to_string(next_epoch)});
+    impl->command({"EVAL", script, "2", impl->meta_key(), impl->pending_key(),
+                   std::to_string(next_epoch), impl->prefix() + "epoch:", ":members", ":states",
+                   ":placement"});
 #endif
 }
 

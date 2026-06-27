@@ -161,4 +161,30 @@ BOOST_AUTO_TEST_CASE(transparent_migration_wait_for_promotion_is_unbounded) {
     control_plane.clear_job_state();
 }
 
+// Promoting the epoch reclaims the per-epoch hashes of the epoch being left, so a long-running
+// job with many migrations does not accumulate member/state/placement hashes in Redis.
+BOOST_AUTO_TEST_CASE(transparent_migration_promotion_reclaims_old_epoch) {
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
+
+    FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a", "vm");
+    FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b", "vm");
+
+    // Epoch 0's directory (members/states/placement) is populated before promotion.
+    BOOST_REQUIRE_EQUAL(control_plane.directory_snapshot(0).size(), 2u);
+
+    control_plane.promote_epoch(1);
+
+    // Advancing to epoch 1 deletes the epoch-0 hashes, so its directory is now empty.
+    BOOST_CHECK(control_plane.directory_snapshot(0).empty());
+
+    control_plane.clear_job_state();
+}
+
 BOOST_AUTO_TEST_SUITE_END();
