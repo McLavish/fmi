@@ -385,10 +385,12 @@ BOOST_AUTO_TEST_CASE(rank_agent_promotes_epoch_only_after_dump_and_restore) {
     control_plane.criu_register_rank(0, target_pid, host_id, "Direct");
     control_plane.criu_mark_rank_quiesced(0, target_pid, host_id, "Direct", 1);
 
-    // Freeze the mock criu when it reaches the restore step.
+    // Freeze the mock criu when it reaches the restore step. ScopedEnv (not raw setenv) so that a
+    // failing assertion or the worker exception rethrown below cannot leak the armed gate into
+    // later CRIU cases — a leaked gate would block every subsequent mock restore for its full wait.
     auto gate_dir = temp_dir / "gate";
-    setenv("FMI_MOCK_GATE_MODE", "restore", 1);
-    setenv("FMI_MOCK_GATE_DIR", gate_dir.string().c_str(), 1);
+    ScopedEnv gate_mode("FMI_MOCK_GATE_MODE", "restore");
+    ScopedEnv gate_dir_env("FMI_MOCK_GATE_DIR", gate_dir.string().c_str());
 
     FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
     std::exception_ptr worker_error;
@@ -431,8 +433,6 @@ BOOST_AUTO_TEST_CASE(rank_agent_promotes_epoch_only_after_dump_and_restore) {
     BOOST_CHECK_EQUAL(promoted, 1U);
     BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
 
-    unsetenv("FMI_MOCK_GATE_MODE");
-    unsetenv("FMI_MOCK_GATE_DIR");
     control_plane.clear_criu_state();
     control_plane.clear_job_state();
     fs::remove_all(temp_dir);
