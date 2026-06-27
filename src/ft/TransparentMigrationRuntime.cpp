@@ -72,6 +72,12 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
 }
 
 void FMI::FT::TransparentMigrationRuntime::enter_operation() {
+    if (control_plane == nullptr) {
+        // A null control plane is only ever used by construction-time unit tests, which never run
+        // an operation. Reaching here means a runtime was wired without coordination — fail loudly
+        // instead of dereferencing null.
+        throw std::logic_error("TransparentMigrationRuntime::enter_operation requires a control plane");
+    }
     auto observed = control_plane->epoch();
     if (observed > active_epoch) {
         wait_for_promotion_and_reconfigure();
@@ -130,10 +136,10 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
         prepare_for_checkpoint();
     }
 
-    // Publish a restorable image entry the rank agent can find: pid + host + QUIESCED for the
-    // target epoch. Reuses the CRIU rank registry (single-rank scope).
+    // Mark the registry entry (already advertised at construction) QUIESCED for the target epoch,
+    // so the rank agent can find a restorable image: pid + host + QUIESCED. No re-register here —
+    // mark_quiesced would immediately overwrite it.
     int pid = static_cast<int>(getpid());
-    control_plane->criu_register_rank(peer_id, pid, host_id, backend_name);
     control_plane->criu_mark_rank_quiesced(peer_id, pid, host_id, backend_name, target_epoch);
     control_plane->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
 
