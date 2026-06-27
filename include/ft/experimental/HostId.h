@@ -16,8 +16,10 @@ namespace FMI::FT {
             return config.criu.host_id;
         }
 
+        // Pass sizeof-1 so the final byte stays NUL even on a libc that truncates a too-long name
+        // without terminating it (POSIX leaves that case unspecified); the buffer is zero-init.
         char hostname[256] = {0};
-        if (gethostname(hostname, sizeof(hostname)) != 0) {
+        if (gethostname(hostname, sizeof(hostname) - 1) != 0) {
             throw std::runtime_error("Could not determine host_id");
         }
         return hostname;
