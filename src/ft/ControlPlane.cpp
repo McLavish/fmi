@@ -284,7 +284,10 @@ void FMI::FT::ControlPlane::ensure_job() const {
 
 std::uint64_t FMI::FT::ControlPlane::epoch() const {
 #if FMI_ENABLE_REDIS
-    ensure_job();
+    // No ensure_job() here: the constructor already ensures the job, and epoch() is on the hot path
+    // (every Communicator operation reads it via enter_operation). Re-ensuring on each call adds ~3
+    // Redis round-trips per operation for no benefit. request_migration(s) still call ensure_job()
+    // explicitly, so the lazy-create guarantee for external callers is preserved.
     return impl->hget_u64(impl->meta_key(), "current_epoch");
 #else
     return 0;
