@@ -27,8 +27,6 @@ namespace {
         return (fs::path(__FILE__).parent_path().parent_path() / "config" / name).lexically_normal().string();
     }
 
-    const std::string criu_config_path = repo_config_path("fmi_criu_test.json");
-
     std::string unique_comm_name(const std::string& prefix = "criu-ft-tests") {
         auto now = std::chrono::system_clock::now().time_since_epoch();
         auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
@@ -53,20 +51,6 @@ namespace {
             BOOST_TEST_MESSAGE(std::string("redis_available exception: ") + e.what());
             return false;
         }
-    }
-
-    template<typename Predicate>
-    void wait_until(Predicate&& predicate,
-                    std::chrono::milliseconds timeout = std::chrono::milliseconds(2000),
-                    std::chrono::milliseconds poll = std::chrono::milliseconds(25)) {
-        auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (predicate()) {
-                return;
-            }
-            std::this_thread::sleep_for(poll);
-        }
-        BOOST_FAIL("Timed out waiting for asynchronous condition");
     }
 
     std::string bool_string(bool value) {

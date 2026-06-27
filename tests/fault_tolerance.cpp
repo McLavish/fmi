@@ -128,9 +128,9 @@ BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
     control_plane.clear_job_state();
 }
 
-// The wait for epoch promotion is unbounded: there is no library-side timeout. A replacement
-// that is promoted well after the former reconfigure_timeout_ms (250 ms in this config) would
-// have thrown FMI::Utils::Timeout under the old bounded wait; now it must keep waiting and join.
+// The wait for epoch promotion is unbounded: there is no library-side timeout. A replacement that
+// is promoted long after it began waiting (here, 600 ms) would have thrown FMI::Utils::Timeout
+// under the old bounded wait; now it must keep waiting and join.
 BOOST_AUTO_TEST_CASE(transparent_migration_wait_for_promotion_is_unbounded) {
     std::string comm_name = unique_comm_name();
     if (!redis_available(comm_name)) {
