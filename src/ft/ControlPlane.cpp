@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #endif
 
 namespace {
@@ -189,6 +190,25 @@ struct FMI::FT::ControlPlane::Impl {
         auto value = hget(key, field);
         return value ? std::stoi(*value) : fallback;
     }
+
+    //! HGETALL returning a field->value map (empty when the key is missing). Collapses the
+    //! per-field round-trips in directory_snapshot / criu_rank_info into one command per hash.
+    std::unordered_map<std::string, std::string> hgetall(const std::string& key) {
+        std::unordered_map<std::string, std::string> fields;
+        auto reply = command({"HGETALL", key});
+        if (reply->type != REDIS_REPLY_ARRAY) {
+            return fields;
+        }
+        for (std::size_t i = 0; i + 1 < reply->elements; i += 2) {
+            auto* field = reply->element[i];
+            auto* value = reply->element[i + 1];
+            if (field == nullptr || field->str == nullptr || value == nullptr || value->str == nullptr) {
+                continue;
+            }
+            fields.emplace(field->str, value->str);
+        }
+        return fields;
+    }
 #endif
 
     [[nodiscard]] std::string prefix() const {
@@ -356,27 +376,20 @@ std::string FMI::FT::ControlPlane::placement_for_rank(std::uint64_t epoch, FMI::
 std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::ControlPlane::directory_snapshot(std::uint64_t epoch) const {
 #if FMI_ENABLE_REDIS
     std::vector<FMI::FT::RankDirectoryEntry> ranks;
-    auto reply = impl->command({"HKEYS", impl->members_key(epoch)});
-    if (reply->type != REDIS_REPLY_ARRAY) {
-        return ranks;
-    }
-    for (std::size_t i = 0; i < reply->elements; i++) {
-        auto* rank_reply = reply->element[i];
-        if (rank_reply == nullptr || rank_reply->str == nullptr) {
-            continue;
-        }
-        auto rank_id = static_cast<FMI::Utils::peer_num>(std::stoul(rank_reply->str));
+    // Three HGETALLs (members/states/placement) instead of HKEYS + three HGETs per rank. The
+    // members hash defines membership and already carries each rank's worker_id as its value.
+    auto members = impl->hgetall(impl->members_key(epoch));
+    auto states = impl->hgetall(impl->states_key(epoch));
+    auto placement = impl->hgetall(impl->placement_key(epoch));
+    for (const auto& [rank_str, worker_id] : members) {
         FMI::FT::RankDirectoryEntry info;
-        info.rank = rank_id;
-
-        if (auto worker = impl->hget(impl->members_key(epoch), std::to_string(rank_id))) {
-            info.worker_id = *worker;
+        info.rank = static_cast<FMI::Utils::peer_num>(std::stoul(rank_str));
+        info.worker_id = worker_id;
+        if (auto it = states.find(rank_str); it != states.end()) {
+            info.state = rank_state_from_string(it->second);
         }
-        if (auto state = impl->hget(impl->states_key(epoch), std::to_string(rank_id))) {
-            info.state = rank_state_from_string(*state);
-        }
-        if (auto placement = impl->hget(impl->placement_key(epoch), std::to_string(rank_id))) {
-            info.placement = *placement;
+        if (auto it = placement.find(rank_str); it != placement.end()) {
+            info.placement = it->second;
         }
         ranks.push_back(info);
     }
@@ -548,15 +561,30 @@ std::vector<FMI::FT::CriuRankInfo> FMI::FT::ControlPlane::criu_rank_info() const
         FMI::FT::CriuRankInfo info;
         info.rank = rank_id;
 
-        const auto& rank_key = impl->criu_rank_key(rank_id);
-        info.pid = impl->hget_int(rank_key, "pid", info.pid);
-        info.host_id = impl->hget(rank_key, "host_id").value_or(info.host_id);
-        info.backend = impl->hget(rank_key, "backend").value_or(info.backend);
-        if (auto state = impl->hget(rank_key, "state")) {
+        // One HGETALL per rank instead of six HGETs. Missing fields keep the struct defaults.
+        auto fields = impl->hgetall(impl->criu_rank_key(rank_id));
+        auto field = [&fields](const std::string& name) -> const std::string* {
+            auto it = fields.find(name);
+            return it != fields.end() ? &it->second : nullptr;
+        };
+        if (const auto* pid = field("pid")) {
+            info.pid = std::stoi(*pid);
+        }
+        if (const auto* host = field("host_id")) {
+            info.host_id = *host;
+        }
+        if (const auto* backend = field("backend")) {
+            info.backend = *backend;
+        }
+        if (const auto* state = field("state")) {
             info.state = criu_rank_state_from_string(*state);
         }
-        info.quiesced_generation = impl->hget_u64(rank_key, "quiesced_generation", info.quiesced_generation);
-        info.last_heartbeat_ms = impl->hget_u64(rank_key, "last_heartbeat_ms", info.last_heartbeat_ms);
+        if (const auto* generation = field("quiesced_generation")) {
+            info.quiesced_generation = std::stoull(*generation);
+        }
+        if (const auto* heartbeat = field("last_heartbeat_ms")) {
+            info.last_heartbeat_ms = std::stoull(*heartbeat);
+        }
         ranks.push_back(info);
     }
 
