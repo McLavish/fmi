@@ -292,12 +292,8 @@ std::uint64_t FMI::FT::ControlPlane::epoch() const {
 }
 
 void FMI::FT::ControlPlane::request_migration(FMI::Utils::peer_num rank) {
-#if FMI_ENABLE_REDIS
-    ensure_job();
-    auto current_epoch = epoch();
-    impl->command({"SADD", impl->pending_key(), std::to_string(rank)});
-    set_rank_state(current_epoch, rank, RankState::MigrationPending);
-#endif
+    // The single-rank request is just the degenerate batch — one atomic code path for both.
+    request_migrations({rank});
 }
 
 void FMI::FT::ControlPlane::request_migrations(const std::vector<FMI::Utils::peer_num>& ranks) const {
@@ -306,18 +302,23 @@ void FMI::FT::ControlPlane::request_migrations(const std::vector<FMI::Utils::pee
         return;
     }
     ensure_job();
-    auto current_epoch = epoch();
-    // One Lua EVAL so the SADD-into-pending and the per-rank state HSET flip together for the
-    // whole set — the rank side observes either none or all of this batch, never a partial set.
+    // One Lua EVAL so the whole batch flips together (the rank side observes either none or all of
+    // it) AND so the request binds atomically to the epoch current at EVAL time: the script reads
+    // current_epoch itself and builds the states key in-script, so a concurrent promote_epoch can
+    // never make us write state into a stale epoch's hash. KEYS[1]=pending, KEYS[2]=meta;
+    // ARGV[1]=state, ARGV[2]=states-key prefix, ARGV[3]=states-key suffix, ARGV[4..]=ranks.
     static const std::string script =
-            "for i = 2, #ARGV do "
+            "local epoch = redis.call('HGET', KEYS[2], 'current_epoch') "
+            "if not epoch then epoch = '0' end "
+            "local states = ARGV[2] .. epoch .. ARGV[3] "
+            "for i = 4, #ARGV do "
             "redis.call('SADD', KEYS[1], ARGV[i]) "
-            "redis.call('HSET', KEYS[2], ARGV[i], ARGV[1]) "
+            "redis.call('HSET', states, ARGV[i], ARGV[1]) "
             "end "
-            "return #ARGV - 1";
-    std::vector<std::string> args = {"EVAL", script, "2", impl->pending_key(),
-                                     impl->states_key(current_epoch),
-                                     state_to_string(RankState::MigrationPending)};
+            "return #ARGV - 3";
+    std::vector<std::string> args = {"EVAL", script, "2", impl->pending_key(), impl->meta_key(),
+                                     state_to_string(RankState::MigrationPending),
+                                     impl->prefix() + "epoch:", ":states"};
     for (auto rank : ranks) {
         args.push_back(std::to_string(rank));
     }
