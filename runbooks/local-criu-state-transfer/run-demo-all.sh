@@ -44,6 +44,10 @@ fail() { echo "[driver] FAIL: $*" >&2; exit 1; }
 [ -x "${AGENT}" ] || fail "rank agent not found: ${AGENT}"
 command -v criu >/dev/null 2>&1 || fail "criu not on PATH"
 redis ping >/dev/null 2>&1 || fail "Redis not reachable"
+# The Direct data plane needs a tcpunchd rendezvous server. Without it ranks still reach ACTIVE
+# (a Redis-only write) and then hang at the first Direct allreduce, so check it up front.
+(exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null \
+    || fail "tcpunchd not reachable on 127.0.0.1:10000 (Direct rendezvous) — start it: ${REPO_ROOT}/extern/TCPunch/server/build/tcpunchd 10000"
 
 log "comm_name=${COMM_NAME} num_peers=${NUM_PEERS} window_ms=${WINDOW_MS} criu_extra='${FMI_CRIU_EXTRA_ARGS:-}'"
 
