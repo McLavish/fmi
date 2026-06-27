@@ -79,6 +79,14 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     }
 
     if (!control_plane->has_pending_migration()) {
+        // The pending set is cleared only by promote_epoch (which bumps the epoch and DELs the
+        // set in one atomic step). So an empty set here can mean a promotion raced in between the
+        // epoch() read above and this check; re-read the (monotonic) epoch to catch it, otherwise
+        // a survivor would run this operation on stale epoch-N channels that can never rendezvous
+        // with the N+1 replacement.
+        if (control_plane->epoch() > active_epoch) {
+            wait_for_promotion_and_reconfigure();
+        }
         return;
     }
 
