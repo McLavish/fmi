@@ -914,4 +914,52 @@ BOOST_AUTO_TEST_CASE(migrate_local_targets_only_host_local_ranks) {
     fs::remove_all(temp_dir);
 }
 
+BOOST_AUTO_TEST_CASE(migrate_local_skips_ranks_quiesced_at_a_stale_epoch) {
+    // A rank left Quiesced for an epoch that has already passed (a leftover from a prior migration
+    // that did not complete) must not poison "migrate all local": migrate_local skips it and still
+    // migrates the genuinely-ready local ranks, instead of timing out the whole batch on a rank
+    // that will never re-quiesce at the new target.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("stale");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("stale-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping stale-epoch migrate_local test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    // Advance to epoch 1 so a rank can be placed Quiesced at a now-stale generation.
+    control_plane.promote_epoch(1);
+
+    // Rank 0 is ready for the upcoming target (epoch 2); rank 1 is parked Quiesced for epoch 1,
+    // which has already passed, so it can never become ready at the new target.
+    control_plane.criu_register_rank(0, 5000, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(0, 5000, host_id, "Direct", 2);
+    control_plane.criu_register_rank(1, 5001, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(1, 5001, host_id, "Direct", 1);
+
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    auto promoted = agent.migrate_local();
+
+    BOOST_CHECK_EQUAL(promoted, 2U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 2U);
+    // The ready rank was migrated; the stale rank was skipped and did not block the batch.
+    BOOST_CHECK(fs::exists(images_dir / comm_name / "epoch-2" / "rank-0" / "restore.marker"));
+    BOOST_CHECK(!fs::exists(images_dir / comm_name / "epoch-2" / "rank-1"));
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_SUITE_END();

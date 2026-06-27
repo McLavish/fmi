@@ -118,11 +118,20 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
     // Discover which ranks run on this host from the CRIU registry (each rank advertises its
     // host_id when its migration runtime is constructed). criu_rank_info() returns one entry per
     // registered rank, so no de-duplication is needed.
+    auto current_epoch = control_plane->epoch();
     std::vector<FMI::Utils::peer_num> locals;
     for (const auto& info : control_plane->criu_rank_info()) {
-        if (info.host_id == host_id) {
-            locals.push_back(info.rank);
+        if (info.host_id != host_id) {
+            continue;
         }
+        // Skip a rank parked Quiesced for an epoch that has already passed (<= current): a leftover
+        // from a prior migration that did not complete. It will never re-quiesce at the new target
+        // (current+1), so including it would time out the whole batch in wait_for_ready_ranks. A
+        // rank Quiesced at the upcoming target is a legitimate, already-ready candidate and is kept.
+        if (info.state == CriuRankState::Quiesced && info.quiesced_generation <= current_epoch) {
+            continue;
+        }
+        locals.push_back(info.rank);
     }
     if (locals.empty()) {
         return 0;
