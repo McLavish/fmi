@@ -1,0 +1,3 @@
+# Runtime-generated artifacts from local-two-machines.sh
+.fmi-machine-*.json
+.last-rank*.log
