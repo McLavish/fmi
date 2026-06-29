@@ -1,3 +1,35 @@
+diff --git a/client/tcpunch.cpp b/client/tcpunch.cpp
+index 0b12634..cb3154f 100644
+--- a/client/tcpunch.cpp
++++ b/client/tcpunch.cpp
+@@ -6,6 +6,7 @@
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
++#include <netdb.h>
+ #include <pthread.h>
+ #include <cerrno>
+ #include <string>
+@@ -94,7 +95,18 @@ int pair(const std::string& pairing_name, const std::string& server_address, int
+     }
+ 
+     server_data.sin_family = AF_INET;
+-    server_data.sin_addr.s_addr = inet_addr(server_address.c_str());
++    // Resolve the rendezvous address. getaddrinfo accepts both dotted-decimal IPs and hostnames
++    // (e.g. a Kubernetes Service name like "fmi-tcpunch"); the previous inet_addr() only accepted
++    // numeric IPs and silently turned any hostname into INADDR_NONE.
++    struct addrinfo addr_hints{};
++    struct addrinfo* addr_result = nullptr;
++    addr_hints.ai_family = AF_INET;
++    addr_hints.ai_socktype = SOCK_STREAM;
++    if (getaddrinfo(server_address.c_str(), nullptr, &addr_hints, &addr_result) != 0 || addr_result == nullptr) {
++        error_exit("Could not resolve rendezvous server address: " + server_address);
++    }
++    server_data.sin_addr = ((struct sockaddr_in*)addr_result->ai_addr)->sin_addr;
++    freeaddrinfo(addr_result);
+     server_data.sin_port = htons(port);
+ 
+     if (connect(socket_rendezvous, (struct sockaddr *)&server_data, sizeof(server_data)) != 0) {
 diff --git a/server/hole_punching_server.cpp b/server/hole_punching_server.cpp
 index 90fadf2..824ac6f 100644
 --- a/server/hole_punching_server.cpp

@@ -36,6 +36,10 @@ metadata:
   name: fmi-tcpunch
   namespace: fmi-criu
 spec:
+  # Headless: fmi-tcpunch resolves straight to the rendezvous pod IP, so ranks connect to it
+  # directly (the rendezvous sees their real pod source addresses) and then hole-punch
+  # pod-to-pod, with no kube-proxy SNAT in the middle.
+  clusterIP: None
   selector:
     app: fmi-tcpunch
   ports:
