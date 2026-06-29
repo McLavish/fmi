@@ -29,8 +29,10 @@ REPO_ROOT="$(cd "${RUNBOOK_DIR}/../.." && pwd)"
 BUILD_DIR="${FMI_BUILD_DIR:-${REPO_ROOT}/build-unified-criu}"
 TEMPLATE="${RUNBOOK_DIR}/fmi-machine.json.tmpl"
 
-DEMO="${BUILD_DIR}/runbooks/local-criu-state-transfer/transparent_state_transfer_demo"
-AGENT="${BUILD_DIR}/tools/fmi-rank-agent"
+# Binary locations default to a host cmake build tree, but can be overridden (e.g. when this
+# script runs inside the demo container, where the binaries are staged elsewhere).
+DEMO="${FMI_DEMO_BIN:-${BUILD_DIR}/runbooks/local-criu-state-transfer/transparent_state_transfer_demo}"
+AGENT="${FMI_AGENT_BIN:-${BUILD_DIR}/tools/fmi-rank-agent}"
 
 NUM_PEERS="${NUM_PEERS:-8}"
 RANKS_PER_MACHINE="${RANKS_PER_MACHINE:-4}"
