@@ -109,7 +109,9 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_ranks(const std::vector<FMI::Util
     }
 
     // Promote the epoch once for the whole set: survivors and every restored rank observe N+1
-    // and reconfigure their channels under the new epoch-qualified communicator name.
+    // and reconfigure their channels under the new epoch-qualified communicator name. A false
+    // return means another actor already advanced the epoch to (at least) the target; the
+    // restored ranks are released by that promotion just the same.
     control_plane->promote_epoch(target_epoch);
     return target_epoch;
 }

@@ -156,7 +156,8 @@ C++:
 FMI::FT::ControlPlane control_plane("config/fmi.json", comm_name, world_size);
 control_plane.request_migration(rank_to_move);   // mark the rank for migration
 // ... for state_transfer="criu" a fmi-rank-agent promotes the epoch;
-//     for state_transfer="none" the orchestrator launches a replacement and calls
+//     for state_transfer="none" the orchestrator waits until the target shows
+//     QUIESCED in directory_snapshot(epoch()), launches a replacement, and calls
 //     control_plane.promote_epoch(control_plane.epoch() + 1);
 ```
 
@@ -167,9 +168,16 @@ import fmi
 
 control_plane = fmi.FTControlPlane("config/fmi.json", comm_name, world_size)
 control_plane.request_migration(rank_to_move)
-# control_plane.promote_epoch()  # advance to the next epoch
+# ... wait until directory_snapshot(control_plane.epoch()) shows the target QUIESCED ...
+# control_plane.promote_epoch()  # advance to the next epoch (returns False if already promoted)
 # control_plane.directory_snapshot(epoch)  # inspect rank states/placements
 ```
+
+Promotion is **gated on quiescence**: `promote_epoch` throws (and changes nothing) while any
+pending rank has not marked itself `QUIESCED` in the current epoch. An orchestrator that promotes
+too early therefore gets a loud, retryable error instead of the silent alternative — clearing the
+pending set before the target reached its quiesce point, after which the target's next operation
+would rejoin the new epoch as a survivor right next to its replacement.
 
 ## Operational requirements
 

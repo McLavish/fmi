@@ -64,7 +64,9 @@ string. FMI stores this string but does not interpret it.
 `ControlPlane::request_migration(rank)` does two things:
 
 - adds `rank` to the `pending` set
-- sets that rank's state in the current epoch to `MIGRATION_PENDING`
+- sets that rank's state in the current epoch to `MIGRATION_PENDING` — unless
+  the rank already reached `QUIESCED`, which is preserved (re-requesting a rank
+  that already quiesced must not knock it back to pending)
 
 There is no scheduler or failure detector in the library. An external
 orchestrator is expected to request migration, arrange replacement execution,
@@ -73,17 +75,26 @@ and promote the epoch.
 ## Epoch Promotion
 
 `ControlPlane::promote_epoch(next_epoch)` is the single writer path for
-`current_epoch`. Workers never call it.
+`current_epoch`. Workers never call it. It returns `true` when the call
+performed the promotion and `false` when the epoch was already `>= next_epoch`.
 
 Promotion runs as one Lua `EVAL` script:
 
 - read `meta[current_epoch]`
-- if `next_epoch > current_epoch`, write `current_epoch = next_epoch`
-- delete the `pending` set in the same script
-- otherwise leave Redis unchanged
+- if `next_epoch <= current_epoch`, leave Redis unchanged and return `false`
+- **quiescence gate**: if any rank in the `pending` set is not `QUIESCED` in
+  the current epoch's state hash, fail with an error and change nothing
+- write `current_epoch = next_epoch`
+- delete the `pending` set and the previous epoch's hashes in the same script
 
-This prevents stale orchestrator calls from moving the epoch backward while
-still making repeated promotion requests harmless.
+This prevents stale orchestrator calls from moving the epoch backward, makes
+repeated promotion requests harmless, and makes the protocol's ordering
+requirement impossible to violate: promoting past an un-quiesced target would
+clear the pending set — the only signal telling that rank it is a migration
+target — so its next operation would rejoin the new epoch as a survivor next to
+its freshly launched replacement (two live processes owning one logical rank).
+The gate turns that silent corruption into a loud, retryable error; the
+orchestrator promotes after observing `QUIESCED` in `directory_snapshot`.
 
 ## CRIU Keys
 

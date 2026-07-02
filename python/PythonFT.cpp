@@ -8,8 +8,8 @@ void FMI::Utils::PythonFTControlPlane::request_migration(FMI::Utils::peer_num ra
     control_plane->request_migration(rank);
 }
 
-void FMI::Utils::PythonFTControlPlane::promote_epoch() {
-    control_plane->promote_epoch(control_plane->epoch() + 1);
+bool FMI::Utils::PythonFTControlPlane::promote_epoch() {
+    return control_plane->promote_epoch(control_plane->epoch() + 1);
 }
 
 void FMI::Utils::PythonFTControlPlane::clear_job_state() {

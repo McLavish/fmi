@@ -20,7 +20,9 @@ namespace FMI::Utils {
         PythonFTControlPlane(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers);
 
         void request_migration(FMI::Utils::peer_num rank);
-        void promote_epoch();
+        //! Promote to the next epoch. Returns False when the epoch was already promoted by
+        //! another actor. Throws while any pending rank has not quiesced (see ControlPlane).
+        bool promote_epoch();
         void clear_job_state();
         [[nodiscard]] std::uint64_t epoch() const;
         std::string placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank);

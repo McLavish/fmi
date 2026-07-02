@@ -579,8 +579,11 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     // Rank 0 joins the directory as an ACTIVE member at epoch 0.
     FMI::Communicator rank0(0, 2, config_path.string(), comm_name, 128, "worker-0");
 
-    // Mark it for migration and publish its checkpoint-ready image for epoch 1.
+    // Mark it for migration and simulate its full quiesce: the epoch-state QUIESCED mark (which
+    // promote_epoch's gate requires) followed by the checkpoint-ready image entry for epoch 1 —
+    // the same order the rank-side runtime writes them.
     control_plane.request_migration(0);
+    control_plane.mark_rank_quiesced(0, 0);
     auto host_id = current_host_id();
     const int target_pid = 4242;
     control_plane.criu_register_rank(0, target_pid, host_id, "Direct");
@@ -875,12 +878,17 @@ BOOST_AUTO_TEST_CASE(migrate_local_targets_only_host_local_ranks) {
     control_plane.clear_criu_state();
     control_plane.clear_job_state();
 
-    // Ranks 0,1 are local (this host); rank 2 is advertised on another host.
+    // Ranks 0,1 are local (this host); rank 2 is advertised on another host. Each simulated rank
+    // also carries the epoch-state QUIESCED mark that promote_epoch's gate requires (migrate_local
+    // adds the locals to the pending set before promoting).
     control_plane.criu_register_rank(0, 4000, host_id, "Direct");
+    control_plane.mark_rank_quiesced(0, 0);
     control_plane.criu_mark_rank_quiesced(0, 4000, host_id, "Direct", 1);
     control_plane.criu_register_rank(1, 4001, host_id, "Direct");
+    control_plane.mark_rank_quiesced(0, 1);
     control_plane.criu_mark_rank_quiesced(1, 4001, host_id, "Direct", 1);
     control_plane.criu_register_rank(2, 4002, "some-other-host", "Direct");
+    control_plane.mark_rank_quiesced(0, 2);
     control_plane.criu_mark_rank_quiesced(2, 4002, "some-other-host", "Direct", 1);
 
     FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 3);
@@ -926,8 +934,11 @@ BOOST_AUTO_TEST_CASE(migrate_local_skips_ranks_quiesced_at_a_stale_epoch) {
     control_plane.promote_epoch(1);
 
     // Rank 0 is ready for the upcoming target (epoch 2); rank 1 is parked Quiesced for epoch 1,
-    // which has already passed, so it can never become ready at the new target.
+    // which has already passed, so it can never become ready at the new target. Rank 0 also
+    // carries the epoch-1 QUIESCED state mark that promote_epoch's gate requires once
+    // migrate_local marks it pending.
     control_plane.criu_register_rank(0, 5000, host_id, "Direct");
+    control_plane.mark_rank_quiesced(1, 0);
     control_plane.criu_mark_rank_quiesced(0, 5000, host_id, "Direct", 2);
     control_plane.criu_register_rank(1, 5001, host_id, "Direct");
     control_plane.criu_mark_rank_quiesced(1, 5001, host_id, "Direct", 1);

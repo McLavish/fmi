@@ -42,8 +42,20 @@ namespace FMI::FT {
         //! Remove all FT metadata associated with this communicator name.
         void clear_job_state();
 
-        //! Promote the epoch to next_epoch if it advances the current epoch.
-        void promote_epoch(std::uint64_t next_epoch) const;
+        //! Promote the epoch to next_epoch if it advances the current epoch. Returns true when
+        //! this call performed the promotion, false when the epoch was already >= next_epoch.
+        //!
+        //! Promotion is gated on quiescence: it throws (without changing anything) while any
+        //! pending-migration rank has not marked itself QUIESCED in the current epoch. This makes
+        //! the ordering requirement of the protocol impossible to violate: promoting before the
+        //! target rank reached its quiesce point would otherwise let the old process rejoin the
+        //! new epoch as a survivor next to its replacement (two processes owning one logical rank).
+        bool promote_epoch(std::uint64_t next_epoch) const;
+
+        //! Mark @p rank QUIESCED in @p epoch's state hash: the rank-side quiesce marker that
+        //! promote_epoch's gate waits for. Called by the migration runtime at the quiesce point;
+        //! public so orchestrators/tests driving the protocol externally can simulate a rank.
+        void mark_rank_quiesced(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
 
         //! Write placement for a rank in a given epoch.
         void set_placement(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& placement) const;

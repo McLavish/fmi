@@ -107,7 +107,9 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
             return;
         }
         // Default (state_transfer == "none"): quiesce and exit; a fresh replacement recomputes.
-        control_plane->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
+        // The QUIESCED marker is what promote_epoch's gate waits for, so the orchestrator can
+        // only promote after this write — the exiting process can never race its replacement.
+        control_plane->mark_rank_quiesced(active_epoch, peer_id);
         // std::exit does not unwind, so ~Communicator (which finalizes channels) never runs.
         // Finalize here so a Redis/S3 data plane deletes this rank's epoch-N objects instead of
         // leaking them on every migration. Best-effort: we are terminating regardless.
@@ -148,12 +150,17 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
         prepare_for_checkpoint();
     }
 
-    // Mark the registry entry (already advertised at construction) QUIESCED for the target epoch,
-    // so the rank agent can find a restorable image: pid + host + QUIESCED. No re-register here —
-    // mark_quiesced would immediately overwrite it.
+    // Mark this rank QUIESCED in the epoch states hash FIRST: promote_epoch's gate reads it, and
+    // the CRIU registry entry below is the agent's trigger to dump and later promote. Writing the
+    // registry entry first would open a window where the agent dumps (killing this process
+    // mid-sequence) and then promotes against a states hash that still says MIGRATION_PENDING.
+    control_plane->mark_rank_quiesced(active_epoch, peer_id);
+
+    // Then mark the registry entry (already advertised at construction) QUIESCED for the target
+    // epoch, so the rank agent can find a restorable image: pid + host + QUIESCED. No re-register
+    // here — mark_quiesced would immediately overwrite it.
     int pid = static_cast<int>(getpid());
     control_plane->criu_mark_rank_quiesced(peer_id, pid, host_id, backend_name, target_epoch);
-    control_plane->set_rank_state(active_epoch, peer_id, FMI::FT::RankState::Quiesced);
 
     // Block until restored and promoted. The rank agent dumps this process here and restores
     // it; the restored image resumes in this same loop, observes epoch N+1, and reconfigures

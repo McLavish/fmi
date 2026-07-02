@@ -111,9 +111,11 @@ BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
         return replacement.get_comm_name();
     });
 
-    // Give the replacement thread a moment to enter its constructor spin loop,
-    // then promote epoch 1 externally as the centralized orchestrator.
+    // Give the replacement thread a moment to enter its constructor spin loop. The orchestrator
+    // may only promote once the target has quiesced (promote_epoch enforces this), so mark the
+    // target QUIESCED — in production the target rank writes this itself at its quiesce point.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    control_plane.mark_rank_quiesced(0, 1);
     control_plane.promote_epoch(1);
 
     std::string rep_name = replacement_comm_name.get();
@@ -155,6 +157,7 @@ BOOST_AUTO_TEST_CASE(transparent_migration_wait_for_promotion_is_unbounded) {
     // not failed. (Under the old wall-clock wait this 600 ms gap would have thrown Timeout.)
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
     BOOST_CHECK(replacement_comm_name.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+    control_plane.mark_rank_quiesced(0, 1);
     control_plane.promote_epoch(1);
 
     BOOST_CHECK_EQUAL(replacement_comm_name.get(), comm_name + "@epoch=1");
@@ -183,6 +186,37 @@ BOOST_AUTO_TEST_CASE(transparent_migration_promotion_reclaims_old_epoch) {
 
     // Advancing to epoch 1 deletes the epoch-0 hashes, so its directory is now empty.
     BOOST_CHECK(control_plane.directory_snapshot(0).empty());
+
+    control_plane.clear_job_state();
+}
+
+// Promotion is gated on quiescence: while a pending rank has not marked itself QUIESCED,
+// promote_epoch must refuse (throw) and change nothing. Promoting past an un-quiesced target
+// clears the pending set — the only signal telling that rank it is a migration target — so its
+// next operation would rejoin the new epoch as a survivor next to its replacement.
+BOOST_AUTO_TEST_CASE(transparent_migration_promotion_gated_on_quiescence) {
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
+
+    control_plane.request_migration(1);
+
+    // Target still MIGRATION_PENDING: promotion refuses and the epoch stays put.
+    BOOST_CHECK_THROW(control_plane.promote_epoch(1), std::runtime_error);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
+
+    // Once the target quiesces the same promotion succeeds...
+    control_plane.mark_rank_quiesced(0, 1);
+    BOOST_CHECK(control_plane.promote_epoch(1));
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
+
+    // ...and re-promoting to an already-reached epoch is a no-op (false), not an error.
+    BOOST_CHECK(!control_plane.promote_epoch(1));
 
     control_plane.clear_job_state();
 }

@@ -298,20 +298,27 @@ void FMI::FT::ControlPlane::request_migrations(const std::vector<FMI::Utils::pee
     // One Lua EVAL so the whole batch flips together (the rank side observes either none or all of
     // it) AND so the request binds atomically to the epoch current at EVAL time: the script reads
     // current_epoch itself and builds the states key in-script, so a concurrent promote_epoch can
-    // never make us write state into a stale epoch's hash. KEYS[1]=pending, KEYS[2]=meta;
-    // ARGV[1]=state, ARGV[2]=states-key prefix, ARGV[3]=states-key suffix, ARGV[4..]=ranks.
+    // never make us write state into a stale epoch's hash. A rank that already reached QUIESCED
+    // keeps that state: re-requesting it (migrate_local re-requests ranks the orchestrator may
+    // have marked earlier) must not knock it back to MIGRATION_PENDING, or promote_epoch's
+    // quiescence gate would wait forever on a rank that is already parked. KEYS[1]=pending,
+    // KEYS[2]=meta; ARGV[1]=pending state, ARGV[2]=states-key prefix, ARGV[3]=states-key suffix,
+    // ARGV[4]=the QUIESCED wire string, ARGV[5..]=ranks.
     static const std::string script =
             "local epoch = redis.call('HGET', KEYS[2], 'current_epoch') "
             "if not epoch then epoch = '0' end "
             "local states = ARGV[2] .. epoch .. ARGV[3] "
-            "for i = 4, #ARGV do "
+            "for i = 5, #ARGV do "
             "redis.call('SADD', KEYS[1], ARGV[i]) "
+            "if redis.call('HGET', states, ARGV[i]) ~= ARGV[4] then "
             "redis.call('HSET', states, ARGV[i], ARGV[1]) "
             "end "
-            "return #ARGV - 3";
+            "end "
+            "return #ARGV - 4";
     std::vector<std::string> args = {"EVAL", script, "2", impl->pending_key(), impl->meta_key(),
                                      to_string(RankState::MigrationPending),
-                                     impl->prefix() + "epoch:", ":states"};
+                                     impl->prefix() + "epoch:", ":states",
+                                     to_string(RankState::Quiesced)};
     for (auto rank : ranks) {
         args.push_back(std::to_string(rank));
     }
@@ -439,28 +446,49 @@ void FMI::FT::ControlPlane::set_rank_state(std::uint64_t epoch, FMI::Utils::peer
 #endif
 }
 
-void FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
+bool FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
 #if FMI_ENABLE_REDIS
+    // Quiescence gate: refuse to promote (via error_reply -> exception) while any pending rank
+    // has not marked itself QUIESCED in the epoch being left. Promotion atomically clears the
+    // pending set, so promoting past an un-quiesced target would erase the only signal telling
+    // that rank it is a migration target — its next operation would rejoin the new epoch as a
+    // survivor next to its replacement (two live processes owning one logical rank).
+    //
     // When the promotion advances the epoch, also reclaim the per-epoch hashes of the epoch we
     // are leaving (the in-script `current`): members/states/placement. They are never read after
     // promotion — every backend-visible name is epoch-qualified and survivors join_epoch into the
     // new epoch — so without this they accumulate in Redis for the lifetime of the job. Building
     // the keys from `current` (not next-1) makes the cleanup correct regardless of step size.
-    // ARGV[1]=next epoch, ARGV[2]=epoch-key prefix, ARGV[3..5]=the three per-epoch suffixes.
+    // KEYS[1]=meta, KEYS[2]=pending; ARGV[1]=next epoch, ARGV[2]=epoch-key prefix,
+    // ARGV[3..5]=the three per-epoch suffixes, ARGV[6]=the QUIESCED wire string.
     static const std::string script =
             "local current = redis.call('HGET', KEYS[1], 'current_epoch') "
             "if not current then current = '0' end "
-            "if tonumber(ARGV[1]) > tonumber(current) then "
+            "if tonumber(ARGV[1]) <= tonumber(current) then return 0 end "
+            "local states = ARGV[2]..current..ARGV[4] "
+            "local pending = redis.call('SMEMBERS', KEYS[2]) "
+            "for i = 1, #pending do "
+            "if redis.call('HGET', states, pending[i]) ~= ARGV[6] then "
+            "return redis.error_reply('cannot promote epoch ' .. ARGV[1] .. ': rank ' .. pending[i] "
+            ".. ' is marked for migration but has not quiesced') "
+            "end "
+            "end "
             "redis.call('HSET', KEYS[1], 'current_epoch', ARGV[1]) "
             "redis.call('DEL', KEYS[2]) "
             "redis.call('DEL', ARGV[2]..current..ARGV[3], ARGV[2]..current..ARGV[4], ARGV[2]..current..ARGV[5]) "
-            "return 1 "
-            "end "
-            "return 0";
-    impl->command({"EVAL", script, "2", impl->meta_key(), impl->pending_key(),
-                   std::to_string(next_epoch), impl->prefix() + "epoch:", ":members", ":states",
-                   ":placement"});
+            "return 1";
+    auto reply = impl->command({"EVAL", script, "2", impl->meta_key(), impl->pending_key(),
+                                std::to_string(next_epoch), impl->prefix() + "epoch:", ":members",
+                                ":states", ":placement", to_string(RankState::Quiesced)});
+    return reply->integer == 1;
+#else
+    (void) next_epoch;
+    return false;
 #endif
+}
+
+void FMI::FT::ControlPlane::mark_rank_quiesced(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
+    set_rank_state(epoch, rank, RankState::Quiesced);
 }
 
 #ifdef FMI_ENABLE_CRIU
