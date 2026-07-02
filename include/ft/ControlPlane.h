@@ -34,6 +34,11 @@ namespace FMI::FT {
         //! becomes pending together (no window where some ranks are pending and others are not,
         //! which a watcher/agent could act on mid-batch). Used to drive batch / "migrate all
         //! local" migrations. No-op for an empty set.
+        //!
+        //! One cut at a time: throws while a rank outside the requested set is already pending —
+        //! epoch promotion releases one global cut, so overlapping cuts from two requesters would
+        //! silently drop each other at promotion. Re-requesting already-pending ranks (or a
+        //! superset of them) is idempotent; retry after the in-flight cut promotes.
         void request_migrations(const std::vector<FMI::Utils::peer_num>& ranks) const;
 
         [[nodiscard]] std::string placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const;

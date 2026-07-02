@@ -68,6 +68,14 @@ string. FMI stores this string but does not interpret it.
   the rank already reached `QUIESCED`, which is preserved (re-requesting a rank
   that already quiesced must not knock it back to pending)
 
+Requests are scoped to **one migration cut at a time**: while a rank outside
+the requested set is pending, the request fails with an error. Promotion
+releases one global cut, so two overlapping cuts (say, two hosts evacuating
+concurrently) would silently drop each other's migrations — the first
+promotion clears the whole pending set. Re-requesting already-pending ranks,
+or a superset of them, is idempotent; a rejected requester retries after the
+in-flight cut promotes.
+
 There is no scheduler or failure detector in the library. An external
 orchestrator is expected to request migration, arrange replacement execution,
 and promote the epoch.

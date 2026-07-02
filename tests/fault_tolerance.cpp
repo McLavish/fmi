@@ -221,4 +221,34 @@ BOOST_AUTO_TEST_CASE(transparent_migration_promotion_gated_on_quiescence) {
     control_plane.clear_job_state();
 }
 
+// One migration cut at a time: while ranks of one cut are pending, requesting a rank outside
+// that set must be rejected loudly. Epoch promotion releases one global cut, so two overlapping
+// cuts (e.g. two hosts evacuating concurrently) would silently drop each other's migrations:
+// the first promotion clears the whole pending set, including the second cut's not-yet-quiesced
+// ranks. Idempotent re-requests (same ranks, or a superset) stay allowed.
+BOOST_AUTO_TEST_CASE(transparent_migration_rejects_overlapping_cut) {
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
+
+    control_plane.request_migration(0);
+    // Re-requesting the pending rank, or a superset containing it, is the same cut: allowed.
+    BOOST_CHECK_NO_THROW(control_plane.request_migrations({0, 1}));
+    // A disjoint request while the cut is in flight is a different cut: rejected.
+    BOOST_CHECK_THROW(control_plane.request_migrations({0}), std::runtime_error);
+
+    // Completing the cut (quiesce + promote) clears the pending set; new cuts are accepted again.
+    control_plane.mark_rank_quiesced(0, 0);
+    control_plane.mark_rank_quiesced(0, 1);
+    BOOST_CHECK(control_plane.promote_epoch(1));
+    BOOST_CHECK_NO_THROW(control_plane.request_migration(0));
+
+    control_plane.clear_job_state();
+}
+
 BOOST_AUTO_TEST_SUITE_END();

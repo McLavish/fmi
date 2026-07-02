@@ -140,7 +140,9 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
     }
 
     // Mark the whole local set for migration atomically, then batch-migrate it. request_migrations
-    // is idempotent, so it is harmless if the orchestrator already marked these ranks pending.
+    // is idempotent for ranks the orchestrator already marked pending, but throws if a DIFFERENT
+    // cut is in flight (a pending rank outside this host's set) — evacuating two hosts must be
+    // serialized by the orchestrator, one epoch cut at a time.
     control_plane->request_migrations(locals);
     return migrate_ranks(locals);
 }

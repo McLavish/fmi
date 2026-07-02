@@ -179,6 +179,11 @@ too early therefore gets a loud, retryable error instead of the silent alternati
 pending set before the target reached its quiesce point, after which the target's next operation
 would rejoin the new epoch as a survivor right next to its replacement.
 
+Migration requests are scoped to **one cut at a time**: `request_migration(s)` throws while a
+rank outside the requested set is already pending. Promotion releases one global cut, so two
+overlapping cuts (e.g. two hosts evacuating concurrently) would drop each other's migrations.
+Serialize cuts in the orchestrator: request, quiesce, promote — then start the next cut.
+
 ## Operational requirements
 
 For the CRIU path you need, on the target Linux host:

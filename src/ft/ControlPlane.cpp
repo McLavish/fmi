@@ -298,13 +298,28 @@ void FMI::FT::ControlPlane::request_migrations(const std::vector<FMI::Utils::pee
     // One Lua EVAL so the whole batch flips together (the rank side observes either none or all of
     // it) AND so the request binds atomically to the epoch current at EVAL time: the script reads
     // current_epoch itself and builds the states key in-script, so a concurrent promote_epoch can
-    // never make us write state into a stale epoch's hash. A rank that already reached QUIESCED
-    // keeps that state: re-requesting it (migrate_local re-requests ranks the orchestrator may
-    // have marked earlier) must not knock it back to MIGRATION_PENDING, or promote_epoch's
-    // quiescence gate would wait forever on a rank that is already parked. KEYS[1]=pending,
-    // KEYS[2]=meta; ARGV[1]=pending state, ARGV[2]=states-key prefix, ARGV[3]=states-key suffix,
-    // ARGV[4]=the QUIESCED wire string, ARGV[5..]=ranks.
+    // never make us write state into a stale epoch's hash.
+    //
+    // One cut at a time: if the pending set already holds a rank OUTSIDE the requested set, a
+    // different migration cut is in flight and this request is rejected (error). Epoch promotion
+    // is a single global cut — were two cuts allowed to overlap, the first promotion would clear
+    // the second cut's pending marks and silently drop its migrations. Re-requesting a subset of
+    // ranks that are already pending stays idempotent (migrate_local re-requests ranks the
+    // orchestrator may have marked earlier), and a rank that already reached QUIESCED keeps that
+    // state — knocking it back to MIGRATION_PENDING would make promote_epoch's quiescence gate
+    // wait forever on a rank that is already parked.
+    // KEYS[1]=pending, KEYS[2]=meta; ARGV[1]=pending state, ARGV[2]=states-key prefix,
+    // ARGV[3]=states-key suffix, ARGV[4]=the QUIESCED wire string, ARGV[5..]=ranks.
     static const std::string script =
+            "local requested = {} "
+            "for i = 5, #ARGV do requested[ARGV[i]] = true end "
+            "local pending = redis.call('SMEMBERS', KEYS[1]) "
+            "for i = 1, #pending do "
+            "if not requested[pending[i]] then "
+            "return redis.error_reply('cannot request migration: rank ' .. pending[i] "
+            ".. ' is already pending from another migration cut') "
+            "end "
+            "end "
             "local epoch = redis.call('HGET', KEYS[2], 'current_epoch') "
             "if not epoch then epoch = '0' end "
             "local states = ARGV[2] .. epoch .. ARGV[3] "
