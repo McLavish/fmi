@@ -5,15 +5,58 @@
 #include "../../../include/utils/Configuration.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
+
+namespace {
+    //! Files beyond the criu image dir that must travel with a rank (paths criu re-opens on
+    //! restore, e.g. its log file): FMI_CRIU_EXTRA_FILES holds whitespace-separated path
+    //! templates where "{rank}" expands to the rank id.
+    std::vector<std::string> extra_files_for_rank(FMI::Utils::peer_num rank) {
+        std::vector<std::string> files;
+        const char* env = std::getenv("FMI_CRIU_EXTRA_FILES");
+        if (env == nullptr) {
+            return files;
+        }
+        std::istringstream stream(env);
+        std::string token;
+        while (stream >> token) {
+            const std::string placeholder = "{rank}";
+            for (std::size_t pos = token.find(placeholder); pos != std::string::npos;
+                 pos = token.find(placeholder, pos)) {
+                token.replace(pos, placeholder.size(), std::to_string(rank));
+            }
+            files.push_back(token);
+        }
+        return files;
+    }
+
+    //! Absolute path -> the "/"-relative form tar stores, so archives unpack at "/" back onto
+    //! the exact dumped paths.
+    std::string root_relative(const std::string& path) {
+        return fs::absolute(path).lexically_normal().relative_path().string();
+    }
+
+    std::string read_file_bytes(const fs::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            throw std::runtime_error("Could not read " + path.string());
+        }
+        std::ostringstream bytes;
+        bytes << in.rdbuf();
+        return bytes.str();
+    }
+}
 
 FMI::FT::LocalRankAgent::LocalRankAgent(std::string config_path, std::string comm_name,
                                                  FMI::Utils::peer_num num_peers) :
@@ -119,7 +162,7 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_ranks(const std::vector<FMI::Util
     return target_epoch;
 }
 
-std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
+std::vector<FMI::Utils::peer_num> FMI::FT::LocalRankAgent::discover_local_ranks() const {
     // Discover which ranks run on this host from the CRIU registry (each rank advertises its
     // host_id when its migration runtime is constructed). criu_rank_info() returns one entry per
     // registered rank, so no de-duplication is needed.
@@ -138,6 +181,11 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
         }
         locals.push_back(info.rank);
     }
+    return locals;
+}
+
+std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
+    auto locals = discover_local_ranks();
     if (locals.empty()) {
         return 0;
     }
@@ -148,6 +196,102 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
     // serialized by the orchestrator, one epoch cut at a time.
     control_plane->request_migrations(locals);
     return migrate_ranks(locals);
+}
+
+FMI::FT::EvacuationResult FMI::FT::LocalRankAgent::evacuate_local() const {
+    auto locals = discover_local_ranks();
+    if (locals.empty()) {
+        return {};
+    }
+    control_plane->request_migrations(locals);
+
+    std::uint64_t target_epoch = control_plane->epoch() + 1;
+    auto ready = wait_for_ready_ranks(locals, target_epoch);
+
+    std::vector<std::string> dirs(ready.size());
+    for (std::size_t i = 0; i < ready.size(); i++) {
+        dirs[i] = rank_image_dir(target_epoch, ready[i].rank);
+        fs::create_directories(dirs[i]);
+    }
+
+    // Parallel dump+pack: like migrate_ranks, the worker threads run ONLY criu + filesystem
+    // work; the control plane (one mutex-guarded Redis connection) is touched exclusively from
+    // this thread, after the join.
+    std::vector<std::string> blobs(ready.size());
+    std::vector<std::exception_ptr> errors(ready.size());
+    std::vector<std::thread> workers;
+    workers.reserve(ready.size());
+    for (std::size_t i = 0; i < ready.size(); i++) {
+        workers.emplace_back([this, i, &ready, &dirs, &blobs, &errors]() {
+            try {
+                dump_rank(ready[i].pid, dirs[i]);
+                blobs[i] = pack_rank_image(dirs[i], ready[i].rank);
+            } catch (...) {
+                errors[i] = std::current_exception();
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    // Any failure aborts the whole cut before anything is staged: a partial image set must
+    // never look consumable to the restore side (and the epoch is not promoted here anyway).
+    for (const auto& error : errors) {
+        if (error) {
+            std::rethrow_exception(error);
+        }
+    }
+
+    for (std::size_t i = 0; i < ready.size(); i++) {
+        control_plane->criu_image_put(target_epoch, ready[i].rank, blobs[i]);
+    }
+    return {target_epoch, locals};
+}
+
+FMI::FT::RestoreResult FMI::FT::LocalRankAgent::restore_remote(FMI::Utils::peer_num rank) const {
+    // Images are staged for the epoch the cut will promote to; promotion has not happened yet
+    // when restores run, so that target is still current+1.
+    std::uint64_t target_epoch = control_plane->epoch() + 1;
+    auto blob = control_plane->criu_image_get(target_epoch, rank);
+
+    auto dir = fs::path(rank_image_dir(target_epoch, rank));
+    fs::create_directories(dir.parent_path());
+    auto archive = dir.string() + ".tar.gz";
+    {
+        std::ofstream out(archive, std::ios::binary | std::ios::trunc);
+        if (!out.write(blob.data(), static_cast<std::streamsize>(blob.size()))) {
+            throw std::runtime_error("Could not write staged image archive to " + archive);
+        }
+    }
+    // Unpack at / so the image dir AND every shipped extra file (paths criu re-opens on
+    // restore) land at their exact dumped locations on this host.
+    FMI::FT::run_process({"tar", "-xzf", archive, "-C", "/"});
+    fs::remove(archive);
+    if (!fs::exists(dir)) {
+        throw std::runtime_error("Staged archive for rank " + std::to_string(rank) +
+                                 " did not contain image directory " + dir.string());
+    }
+
+    restore_rank(dir.string());
+
+    // criu recreates the process at its dumped pid, so the registry entry (written at the
+    // quiesce point on the dump host) still names the right pid — only the host moves.
+    auto infos = control_plane->criu_rank_info();
+    auto it = std::find_if(infos.begin(), infos.end(),
+                           [rank](const CriuRankInfo& info) { return info.rank == rank; });
+    if (it == infos.end()) {
+        throw std::runtime_error("Rank " + std::to_string(rank) + " has no CRIU registry entry");
+    }
+    control_plane->criu_mark_rank_running(rank, it->pid, host_id, it->backend);
+    return {it->pid, host_id};
+}
+
+std::uint64_t FMI::FT::LocalRankAgent::promote_next() const {
+    std::uint64_t target_epoch = control_plane->epoch() + 1;
+    // A false return means another actor already advanced the epoch to (at least) the target;
+    // the parked ranks are released by that promotion just the same.
+    control_plane->promote_epoch(target_epoch);
+    return target_epoch;
 }
 
 std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
@@ -216,9 +360,34 @@ std::string FMI::FT::LocalRankAgent::rank_image_dir(std::uint64_t target_epoch,
             ("rank-" + std::to_string(rank))).string();
 }
 
+std::string FMI::FT::LocalRankAgent::pack_rank_image(const std::string& dir,
+                                                     FMI::Utils::peer_num rank) const {
+    // Archive paths are stored /-relative so the restore host unpacks at "/" and criu finds the
+    // image dir and every re-opened file at its dumped absolute path. The archive itself is a
+    // sibling of the rank dir (never inside it).
+    std::vector<std::string> args = {"tar", "-czf", dir + ".tar.gz", "-C", "/", root_relative(dir)};
+    for (const auto& file : extra_files_for_rank(rank)) {
+        if (!fs::exists(file)) {
+            // Fail the evacuation now, while nothing is staged or promoted: shipping an image
+            // without a file criu will re-open would only fail later, on the restore host.
+            throw std::runtime_error("FMI_CRIU_EXTRA_FILES entry does not exist for rank " +
+                                     std::to_string(rank) + ": " + file);
+        }
+        args.push_back(root_relative(file));
+    }
+    FMI::FT::run_process(args);
+
+    auto blob = read_file_bytes(dir + ".tar.gz");
+    fs::remove(dir + ".tar.gz");
+    return blob;
+}
+
 void FMI::FT::LocalRankAgent::dump_rank(int pid, const std::string& dir) const {
     // --tcp-close: the rank still holds its Redis control-plane connection; tell criu to close
     //   it on restore (the ControlPlane reconnects lazily) instead of trying to repair it.
+    // --manage-cgroups=ignore: don't record cgroup membership — a cross-host restore runs in a
+    //   pod whose cgroup paths don't exist on the dump host, and the restored task simply stays
+    //   in the restorer's cgroup (also correct for the same-host in-place path).
     // No --leave-stopped: criu ptrace-seizes, dumps, then kills and reaps the task, freeing the
     //   pid so the immediate restore can reclaim it.
     // Operator flags (FMI_CRIU_EXTRA_ARGS) are appended inside run_criu.
@@ -228,7 +397,8 @@ void FMI::FT::LocalRankAgent::dump_rank(int pid, const std::string& dir) const {
             "-D", dir,
             "-o", "dump.log",
             "--shell-job",
-            "--tcp-close"
+            "--tcp-close",
+            "--manage-cgroups=ignore"
     });
 }
 
@@ -242,6 +412,7 @@ void FMI::FT::LocalRankAgent::restore_rank(const std::string& dir) const {
             "-o", "restore.log",
             "--shell-job",
             "--tcp-close",
+            "--manage-cgroups=ignore",
             "--restore-detached"
     });
 }

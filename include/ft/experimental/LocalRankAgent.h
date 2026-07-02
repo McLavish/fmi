@@ -11,6 +11,19 @@
 #include <vector>
 
 namespace FMI::FT {
+    //! Outcome of staging a host's ranks for cross-host restore: the epoch the images were
+    //! staged for (0 when no local ranks were found) and the ranks in the cut.
+    struct EvacuationResult {
+        std::uint64_t staged_epoch = 0;
+        std::vector<FMI::Utils::peer_num> ranks;
+    };
+
+    //! Outcome of restoring a staged rank on this host.
+    struct RestoreResult {
+        int pid = 0;
+        std::string host_id;
+    };
+
     //! Host-local driver for CRIU-backed single-rank transparent migration (same-host v1).
     //!
     //! It bridges the transparent-migration control plane (Redis) to criu: when a targeted
@@ -41,6 +54,26 @@ namespace FMI::FT {
         //! them via migrate_ranks. Returns the promoted epoch, or 0 if no local ranks are found.
         std::uint64_t migrate_local() const;
 
+        //! Cross-host dump half: discover this host's ranks, request their migration as one cut,
+        //! wait for all of them to quiesce, criu-dump each in parallel, then pack every rank's
+        //! image (plus its FMI_CRIU_EXTRA_FILES, "{rank}"-templated paths that criu will reopen
+        //! on restore) and stage the archives in the control plane. Does NOT restore and does NOT
+        //! promote — restore_remote agents on other hosts consume the staged images, and the
+        //! orchestrator promotes once all of them report success. A dump/pack failure aborts the
+        //! whole cut without staging a partial set.
+        EvacuationResult evacuate_local() const;
+
+        //! Cross-host restore half: fetch the staged image for @p rank (staged for epoch
+        //! current+1), unpack it at / so criu finds every dumped path, criu-restore the process
+        //! (it resumes parked in its promotion-wait loop), and re-advertise the rank in the CRIU
+        //! registry as Running on THIS host. Does NOT promote. Throws when no image is staged.
+        RestoreResult restore_remote(FMI::Utils::peer_num rank) const;
+
+        //! Promote the communicator to epoch current+1, releasing every parked rank. The
+        //! orchestrator-facing final step of a cross-host migration, gated (in the control
+        //! plane) on all pending ranks having quiesced. Returns the target epoch.
+        std::uint64_t promote_next() const;
+
         //! Watch the migration request set and migrate the first pending rank that becomes
         //! ready on this host. Returns the promoted epoch, or 0 if no request appears within
         //! the quiesce timeout. Convenience wrapper around migrate_rank for the CLI.
@@ -58,9 +91,15 @@ namespace FMI::FT {
         //! FMI::Utils::Timeout if not all become ready within the quiesce timeout.
         [[nodiscard]] std::vector<CriuRankInfo> wait_for_ready_ranks(
                 const std::vector<FMI::Utils::peer_num>& ranks, std::uint64_t target_epoch) const;
+        //! Discover the ranks advertised on this host that are eligible for a new cut (skipping
+        //! leftovers parked Quiesced for an epoch that has already passed).
+        [[nodiscard]] std::vector<FMI::Utils::peer_num> discover_local_ranks() const;
         [[nodiscard]] std::string rank_image_dir(std::uint64_t target_epoch, FMI::Utils::peer_num rank) const;
         void dump_rank(int pid, const std::string& dir) const;
         void restore_rank(const std::string& dir) const;
+        //! Pack a dumped rank's image dir plus its FMI_CRIU_EXTRA_FILES into a /-relative
+        //! tar.gz archive and return its bytes.
+        [[nodiscard]] std::string pack_rank_image(const std::string& dir, FMI::Utils::peer_num rank) const;
 
         std::string config_path;
         std::string comm_name;
