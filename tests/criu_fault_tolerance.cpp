@@ -1025,4 +1025,215 @@ BOOST_AUTO_TEST_CASE(migrate_local_skips_ranks_quiesced_at_a_stale_epoch) {
     fs::remove_all(temp_dir);
 }
 
+BOOST_AUTO_TEST_CASE(criu_image_blob_round_trip_is_binary_safe) {
+    // Cross-host shipping stores gzipped tar archives in Redis: the bytes must survive verbatim
+    // (embedded NULs and all), and fetching a rank nobody staged must fail loudly rather than
+    // hand the restore side an empty image.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("img-blob");
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", temp_dir / "images",
+                                         current_host_id(), true, false);
+    std::string comm_name = unique_comm_name("img-blob-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping image blob test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    std::string blob("\x1f\x8b\x00binary\x00payload\xff\xfe", 22);
+    control_plane.criu_image_put(1, 0, blob);
+    auto fetched = control_plane.criu_image_get(1, 0);
+    BOOST_CHECK_EQUAL(fetched.size(), blob.size());
+    BOOST_CHECK(fetched == blob);
+
+    BOOST_CHECK_THROW(control_plane.criu_image_get(1, 1), std::runtime_error);
+
+    // clear_criu_state's criu:* sweep reclaims staged images along with the registry.
+    control_plane.clear_criu_state();
+    BOOST_CHECK_THROW(control_plane.criu_image_get(1, 0), std::runtime_error);
+
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(evacuate_local_stages_images_without_restoring_or_promoting) {
+    // The cross-host dump half: every host-local rank is dumped and its image (plus the
+    // FMI_CRIU_EXTRA_FILES it will re-open on restore) staged in the control plane — but no
+    // restore runs on this host and the epoch is NOT promoted; both belong to the restore side
+    // and the orchestrator.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("evac");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("evac-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping evacuate_local test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    // Each rank has a file criu would re-open on restore (its log); it must travel in the blob.
+    auto logs_dir = temp_dir / "logs";
+    fs::create_directories(logs_dir);
+    std::ofstream(logs_dir / "rank-0.log") << "log of rank 0";
+    std::ofstream(logs_dir / "rank-1.log") << "log of rank 1";
+    ScopedEnv extra_files("FMI_CRIU_EXTRA_FILES", (logs_dir / "rank-{rank}.log").string().c_str());
+
+    for (FMI::Utils::peer_num rank = 0; rank < 2; rank++) {
+        control_plane.criu_register_rank(rank, 4000 + rank, host_id, "Direct");
+        control_plane.criu_mark_rank_quiesced(rank, 4000 + rank, host_id, "Direct", 1);
+    }
+
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    auto result = agent.evacuate_local();
+
+    BOOST_CHECK_EQUAL(result.staged_epoch, 1U);
+    BOOST_CHECK_EQUAL(result.ranks.size(), 2U);
+    // Dumped but never restored here, and the epoch is untouched.
+    for (FMI::Utils::peer_num rank = 0; rank < 2; rank++) {
+        auto dir = images_dir / comm_name / "epoch-1" / ("rank-" + std::to_string(rank));
+        BOOST_CHECK(fs::exists(dir / "dump.marker"));
+        BOOST_CHECK(!fs::exists(dir / "restore.marker"));
+        BOOST_CHECK(!control_plane.criu_image_get(1, rank).empty());
+    }
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(evacuate_local_fails_fast_when_an_extra_file_is_missing) {
+    // Shipping an image without a file criu will re-open would only fail later, on the restore
+    // host, after the cut is staged. The dump side must fail before staging anything instead.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("evac-missing");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("evac-missing-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping evacuate missing-file test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    ScopedEnv extra_files("FMI_CRIU_EXTRA_FILES",
+                          (temp_dir / "nope" / "rank-{rank}.log").string().c_str());
+    control_plane.criu_register_rank(0, 4000, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(0, 4000, host_id, "Direct", 1);
+
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    BOOST_CHECK_THROW(agent.evacuate_local(), std::runtime_error);
+
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
+    BOOST_CHECK_THROW(control_plane.criu_image_get(1, 0), std::runtime_error);
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
+BOOST_AUTO_TEST_CASE(restore_remote_unpacks_marks_running_on_new_host_and_promote_releases) {
+    // The cross-host restore half + the orchestrator's promote: a staged rank is fetched on a
+    // DIFFERENT host (different host_id, pristine filesystem), unpacked back onto its dumped
+    // paths, criu-restored, and re-advertised as Running on the new host — all before the epoch
+    // moves. promote_next then releases the cut exactly once.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("restore-remote");
+    auto images_dir = temp_dir / "images";
+    auto host_id = current_host_id();
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, host_id, true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("restore-remote-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping restore_remote test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    auto logs_dir = temp_dir / "logs";
+    fs::create_directories(logs_dir);
+    std::ofstream(logs_dir / "rank-0.log") << "pre-migration log content";
+    ScopedEnv extra_files("FMI_CRIU_EXTRA_FILES", (logs_dir / "rank-{rank}.log").string().c_str());
+
+    // Both ranks quiesce (registry for the cut, epoch-state for promote's gate) and the cut is
+    // staged by the dump-side agent.
+    for (FMI::Utils::peer_num rank = 0; rank < 2; rank++) {
+        std::ofstream(logs_dir / ("rank-" + std::to_string(rank) + ".log"))
+                << "pre-migration log content";
+        control_plane.criu_register_rank(rank, 4000 + rank, host_id, "Direct");
+        control_plane.mark_rank_quiesced(0, rank);
+        control_plane.criu_mark_rank_quiesced(rank, 4000 + rank, host_id, "Direct", 1);
+    }
+    FMI::FT::LocalRankAgent dump_agent(config_path.string(), comm_name, 2);
+    auto staged = dump_agent.evacuate_local();
+    BOOST_CHECK_EQUAL(staged.staged_epoch, 1U);
+
+    // Simulate arriving on a fresh host: nothing of the dump survives locally except what the
+    // staged archive carries. (Same absolute paths on both hosts, as in the real deployment.)
+    fs::remove_all(images_dir);
+    fs::remove_all(logs_dir);
+
+    auto remote_config = write_criu_config(temp_dir / "fmi-remote.json", images_dir,
+                                           "fake-serverless-pod", true, false);
+    FMI::FT::LocalRankAgent restore_agent(remote_config.string(), comm_name, 2);
+    auto restored = restore_agent.restore_remote(0);
+
+    BOOST_CHECK_EQUAL(restored.pid, 4000);
+    BOOST_CHECK_EQUAL(restored.host_id, "fake-serverless-pod");
+    // The archive brought back the image dir AND the extra file, and mock criu restore ran.
+    auto rank0_dir = images_dir / comm_name / "epoch-1" / "rank-0";
+    BOOST_CHECK(fs::exists(rank0_dir / "dump.marker"));
+    BOOST_CHECK(fs::exists(rank0_dir / "restore.marker"));
+    {
+        std::ifstream log(logs_dir / "rank-0.log");
+        std::string content((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
+        BOOST_CHECK_EQUAL(content, "pre-migration log content");
+    }
+    // The registry now names the new host, and the epoch has still not moved.
+    bool running_on_new_host = false;
+    for (const auto& info : control_plane.criu_rank_info()) {
+        if (info.rank == 0) {
+            running_on_new_host = info.state == FMI::FT::CriuRankState::Running &&
+                                  info.host_id == "fake-serverless-pod" && info.pid == 4000;
+        }
+    }
+    BOOST_CHECK(running_on_new_host);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 0U);
+
+    // Restore the second rank of the cut, then the orchestrator promotes once.
+    restore_agent.restore_remote(1);
+    BOOST_CHECK_EQUAL(restore_agent.promote_next(), 1U);
+    BOOST_CHECK_EQUAL(control_plane.epoch(), 1U);
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_SUITE_END();
