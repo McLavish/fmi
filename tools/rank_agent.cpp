@@ -29,10 +29,12 @@ int main(int argc, char** argv) {
 
     std::string command = argv[1];
     std::string comm_name = argv[2];
-    FMI::Utils::peer_num num_peers = static_cast<FMI::Utils::peer_num>(std::stoul(argv[3]));
     std::string config_path = argv[4];
 
     try {
+        // Parse inside the try so a non-numeric <num_peers> exits through the same
+        // "fatal: ..." path as every other error instead of std::terminate.
+        auto num_peers = static_cast<FMI::Utils::peer_num>(std::stoul(argv[3]));
         FMI::FT::LocalRankAgent agent(config_path, comm_name, num_peers);
 
         if (command == "migrate") {

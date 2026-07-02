@@ -18,8 +18,7 @@ namespace fs = std::filesystem;
 FMI::FT::LocalRankAgent::LocalRankAgent(std::string config_path, std::string comm_name,
                                                  FMI::Utils::peer_num num_peers) :
         config_path(std::move(config_path)),
-        comm_name(std::move(comm_name)),
-        num_peers(num_peers) {
+        comm_name(std::move(comm_name)) {
     FMI::Utils::Configuration configuration(this->config_path);
     config = configuration.get_fault_tolerance_config();
     // Validate the full configuration before opening the Redis control-plane connection.

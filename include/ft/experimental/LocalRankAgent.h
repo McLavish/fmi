@@ -64,7 +64,6 @@ namespace FMI::FT {
 
         std::string config_path;
         std::string comm_name;
-        FMI::Utils::peer_num num_peers;
         FMI::Utils::FaultToleranceConfig config;
         std::string host_id;
         std::shared_ptr<FMI::FT::ControlPlane> control_plane;

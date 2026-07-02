@@ -77,8 +77,12 @@ binding for CRIU rank agent operations.
 The host-local rank agent is a C++ tool:
 
 ```text
-fmi-rank-agent <migrate|watch|cleanup> <comm_name> <num_peers> <config> [rank]
+fmi-rank-agent <migrate|migrate-local|watch|cleanup> <comm_name> <num_peers> <config> [rank]
 ```
+
+`migrate-local` migrates every rank advertised on this host in one epoch cut
+(see `LocalRankAgent::migrate_local`); the other subcommands operate on a
+single rank.
 
 It is built from `tools/rank_agent.cpp` when tools and CRIU support are
 enabled.

@@ -64,13 +64,7 @@ namespace FMI {
             control_plane->join_epoch(active_epoch, peer_id, resolved_worker_id, placement);
 
             this->comm_name = FMI::FT::epoch_comm_name(comm_name, active_epoch);
-            build_channels(this->comm_name);
-
-            double gib_second_price = config.get_faas_price();
-            double faas_price = (double) faas_memory / 1024. * gib_second_price;
-            std::string preferred = ft_config.preferred_data_backend;
-            set_channel_policy(std::make_shared<FMI::Utils::ChannelPolicy>(
-                    channels, faas_price, channel_hint, preferred));
+            build_channels(config);
 
             operation_runtime = std::make_shared<FMI::FT::TransparentMigrationRuntime>(
                     peer_id, resolved_worker_id, placement, active_epoch,
@@ -80,25 +74,21 @@ namespace FMI {
                     [this]() { finalize_channels(); });
         } else {
             this->comm_name = comm_name;
-            build_channels(this->comm_name);
-
-            double gib_second_price = config.get_faas_price();
-            double faas_price = (double) faas_memory / 1024. * gib_second_price;
-            set_channel_policy(std::make_shared<FMI::Utils::ChannelPolicy>(
-                    channels, faas_price, channel_hint));
+            build_channels(config);
         }
+
+        double faas_price = (double) faas_memory / 1024. * config.get_faas_price();
+        set_channel_policy(std::make_shared<FMI::Utils::ChannelPolicy>(
+                channels, faas_price, channel_hint,
+                ft_config.enabled ? ft_config.preferred_data_backend : ""));
     }
 
-    void Communicator::build_channels(const std::string&) {
-        // this->comm_name must be set before calling this; register_channel propagates it to each channel
-        Utils::Configuration config(config_path);
+    void Communicator::build_channels(Utils::Configuration& config) {
+        // this->comm_name must be set before calling this; register_channel propagates it to each
+        // channel. get_active_channels() already filters out disabled backends.
         for (auto const& [backend_name, params] : config.get_active_channels()) {
-            auto backend_params = params.first;
-            auto model_params = params.second;
-            if (backend_params.find("enabled")->second == "true") {
-                register_channel(backend_name,
-                    Comm::Channel::get_channel(backend_name, backend_params, model_params));
-            }
+            register_channel(backend_name,
+                Comm::Channel::get_channel(backend_name, params.first, params.second));
         }
     }
 
@@ -108,7 +98,8 @@ namespace FMI {
         }
         channels.clear();
         this->comm_name = new_comm_name;
-        build_channels(new_comm_name);
+        Utils::Configuration config(config_path);
+        build_channels(config);
         // PLANS.md step 4 seam: if CRIU state transfer is integrated into transparent
         // migration, restored rank state must be available before rebuilt channels are used.
         // ChannelPolicy holds a reference to the channels map; it sees the rebuilt entries automatically
