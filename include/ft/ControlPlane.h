@@ -83,6 +83,13 @@ namespace FMI::FT {
         void criu_mark_rank_quiesced(FMI::Utils::peer_num rank, int pid, const std::string& host_id, const std::string& backend,
                                      std::uint64_t generation) const;
         [[nodiscard]] std::vector<CriuRankInfo> criu_rank_info() const;
+
+        //! Stage a rank's packed checkpoint image (an opaque archive blob) for @p epoch, so an
+        //! agent on another host can fetch and restore it: dump-side half of a cross-host
+        //! migration. Overwrites any previously staged image for the same (epoch, rank).
+        void criu_image_put(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& blob) const;
+        //! Fetch a staged checkpoint image. Throws when no image is staged for (epoch, rank).
+        [[nodiscard]] std::string criu_image_get(std::uint64_t epoch, FMI::Utils::peer_num rank) const;
 #endif
 
     private:

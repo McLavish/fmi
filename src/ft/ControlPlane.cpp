@@ -221,6 +221,16 @@ struct FMI::FT::ControlPlane::Impl {
     [[nodiscard]] std::string criu_rank_key(Utils::peer_num rank) const {
         return criu_prefix() + "rank:" + std::to_string(rank);
     }
+
+    //! One hash for all staged image blobs (field "<epoch>:<rank>"), so clear_criu_state's
+    //! criu:* pattern sweep reclaims them together with the registry.
+    [[nodiscard]] std::string criu_images_key() const {
+        return criu_prefix() + "images";
+    }
+
+    [[nodiscard]] static std::string criu_image_field(std::uint64_t epoch, Utils::peer_num rank) {
+        return std::to_string(epoch) + ":" + std::to_string(rank);
+    }
 #endif
 };
 
@@ -573,6 +583,31 @@ void FMI::FT::ControlPlane::criu_mark_rank_running(FMI::Utils::peer_num rank, in
 void FMI::FT::ControlPlane::criu_mark_rank_quiesced(FMI::Utils::peer_num rank, int pid, const std::string& host_id,
                                                    const std::string& backend, std::uint64_t generation) const {
     criu_write_rank(rank, pid, host_id, backend, CriuRankState::Quiesced, true, generation);
+}
+
+void FMI::FT::ControlPlane::criu_image_put(std::uint64_t epoch, FMI::Utils::peer_num rank,
+                                          const std::string& blob) const {
+#if FMI_ENABLE_REDIS
+    ensure_criu_registry();
+    impl->command({"HSET", impl->criu_images_key(), Impl::criu_image_field(epoch, rank), blob});
+#else
+    (void) epoch; (void) rank; (void) blob;
+#endif
+}
+
+std::string FMI::FT::ControlPlane::criu_image_get(std::uint64_t epoch, FMI::Utils::peer_num rank) const {
+#if FMI_ENABLE_REDIS
+    auto reply = impl->command({"HGET", impl->criu_images_key(), Impl::criu_image_field(epoch, rank)});
+    if (reply->type == REDIS_REPLY_NIL || reply->str == nullptr) {
+        throw std::runtime_error("No staged CRIU image for rank " + std::to_string(rank) +
+                                 " at epoch " + std::to_string(epoch));
+    }
+    // The archive is binary: size via reply->len, never strlen semantics.
+    return {reply->str, reply->len};
+#else
+    (void) epoch; (void) rank;
+    return {};
+#endif
 }
 
 std::vector<FMI::FT::CriuRankInfo> FMI::FT::ControlPlane::criu_rank_info() const {
