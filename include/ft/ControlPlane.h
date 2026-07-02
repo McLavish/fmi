@@ -92,8 +92,18 @@ namespace FMI::FT {
         friend class FMI::Communicator;
         friend class TransparentMigrationRuntime;
 
+        //! What an operation boundary needs to know, read atomically in one Redis round-trip:
+        //! the current epoch and the pending set (its cardinality plus this rank's membership).
+        //! Atomicity matters — promotion bumps the epoch and clears the pending set in one
+        //! script, so a snapshot can never pair a stale epoch with an already-cleared set.
+        struct OperationSnapshot {
+            std::uint64_t epoch = 0;
+            bool any_pending = false;
+            bool self_pending = false;
+        };
+        [[nodiscard]] OperationSnapshot observe_operation(FMI::Utils::peer_num rank) const;
+
         void ensure_job() const;
-        [[nodiscard]] bool has_pending_migration() const;
         [[nodiscard]] bool is_rank_pending(FMI::Utils::peer_num rank) const;
         void register_rank(std::uint64_t epoch, FMI::Utils::peer_num rank, const std::string& worker_id, RankState state) const;
         void set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, RankState state) const;

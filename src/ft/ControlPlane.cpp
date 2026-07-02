@@ -429,12 +429,29 @@ void FMI::FT::ControlPlane::clear_criu_state() {
 }
 #endif
 
-bool FMI::FT::ControlPlane::has_pending_migration() const {
+FMI::FT::ControlPlane::OperationSnapshot FMI::FT::ControlPlane::observe_operation(FMI::Utils::peer_num rank) const {
 #if FMI_ENABLE_REDIS
-    auto reply = impl->command({"SCARD", impl->pending_key()});
-    return reply->integer > 0;
+    // One script = one round-trip on the per-operation hot path, and an atomic pairing of the
+    // epoch with the pending set (promotion updates both in a single script on its side).
+    static const std::string script =
+            "local epoch = redis.call('HGET', KEYS[1], 'current_epoch') "
+            "if not epoch then epoch = '0' end "
+            "return {epoch, redis.call('SCARD', KEYS[2]), redis.call('SISMEMBER', KEYS[2], ARGV[1])}";
+    auto reply = impl->command({"EVAL", script, "2", impl->meta_key(), impl->pending_key(),
+                                std::to_string(rank)});
+    OperationSnapshot snapshot;
+    if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
+        auto* epoch = reply->element[0];
+        if (epoch != nullptr && epoch->str != nullptr) {
+            snapshot.epoch = std::stoull(epoch->str);
+        }
+        snapshot.any_pending = reply->element[1] != nullptr && reply->element[1]->integer > 0;
+        snapshot.self_pending = reply->element[2] != nullptr && reply->element[2]->integer == 1;
+    }
+    return snapshot;
 #else
-    return false;
+    (void) rank;
+    return {};
 #endif
 }
 

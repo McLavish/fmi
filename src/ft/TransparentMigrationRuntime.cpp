@@ -80,25 +80,23 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
         // instead of dereferencing null.
         throw std::logic_error("TransparentMigrationRuntime::enter_operation requires a control plane");
     }
-    auto observed = control_plane->epoch();
-    if (observed > active_epoch) {
+    // One atomic control-plane snapshot per operation boundary: the epoch and the pending set
+    // are read in a single script, so a concurrent promotion (which bumps the epoch and clears
+    // the set in one script on its side) can never slip between the two reads — and the steady
+    // state costs exactly one Redis round-trip instead of three.
+    auto snapshot = control_plane->observe_operation(peer_id);
+    if (snapshot.epoch > active_epoch) {
+        // A cut completed since our last boundary: rejoin at the new epoch first. If this rank
+        // is also pending for a NEWER cut, the next boundary's snapshot handles it.
         wait_for_promotion_and_reconfigure();
         return;
     }
 
-    if (!control_plane->has_pending_migration()) {
-        // The pending set is cleared only by promote_epoch (which bumps the epoch and DELs the
-        // set in one atomic step). So an empty set here can mean a promotion raced in between the
-        // epoch() read above and this check; re-read the (monotonic) epoch to catch it, otherwise
-        // a survivor would run this operation on stale epoch-N channels that can never rendezvous
-        // with the N+1 replacement.
-        if (control_plane->epoch() > active_epoch) {
-            wait_for_promotion_and_reconfigure();
-        }
+    if (!snapshot.any_pending) {
         return;
     }
 
-    if (control_plane->is_rank_pending(peer_id)) {
+    if (snapshot.self_pending) {
         // This rank is the migration target.
         if (config.state_transfer == "criu") {
             // Preserve application state: checkpoint this process and let the rank agent
