@@ -604,6 +604,56 @@ BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     fs::remove_all(temp_dir);
 }
 
+BOOST_AUTO_TEST_CASE(watch_once_skips_pending_rank_on_another_host) {
+    // Candidate selection must be host-scoped: the agent can only dump processes on its own
+    // host. Without the filter, a lower-numbered pending rank advertised on another host is
+    // always selected first (directory_snapshot is rank-sorted) and times out in
+    // wait_for_ready_ranks, starving the local request queued behind it.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("watch-foreign");
+    auto images_dir = temp_dir / "images";
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", images_dir, current_host_id(), true, false);
+    auto mock_bin_dir = temp_dir / "bin";
+    write_mock_criu(mock_bin_dir);
+
+    std::string comm_name = unique_comm_name("watch-foreign-job");
+    if (!redis_available(config_path.string(), comm_name, 2)) {
+        BOOST_TEST_MESSAGE("Skipping foreign-host watch test because Redis is unavailable");
+        fs::remove_all(temp_dir);
+        return;
+    }
+
+    ScopedPathPrefix path_guard(mock_bin_dir);
+    FMI::FT::ControlPlane control_plane(config_path.string(), comm_name, 2);
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+
+    // Both ranks join the directory, are marked for migration in one cut, and quiesce.
+    FMI::Communicator rank0(0, 2, config_path.string(), comm_name, 128, "worker-0");
+    FMI::Communicator rank1(1, 2, config_path.string(), comm_name, 128, "worker-1");
+    control_plane.request_migrations({0, 1});
+    control_plane.mark_rank_quiesced(0, 0);
+    control_plane.mark_rank_quiesced(0, 1);
+
+    // Rank 0 — the lower-numbered candidate — lives on another host; rank 1 is local and ready.
+    auto host_id = current_host_id();
+    control_plane.criu_register_rank(0, 4000, "some-other-host", "Direct");
+    control_plane.criu_mark_rank_quiesced(0, 4000, "some-other-host", "Direct", 1);
+    control_plane.criu_register_rank(1, 4001, host_id, "Direct");
+    control_plane.criu_mark_rank_quiesced(1, 4001, host_id, "Direct", 1);
+
+    FMI::FT::LocalRankAgent agent(config_path.string(), comm_name, 2);
+    auto promoted = agent.watch_once();
+
+    BOOST_CHECK_EQUAL(promoted, 1U);
+    // The local rank was migrated; the foreign one is left to its own host's agent.
+    BOOST_CHECK(fs::exists(images_dir / comm_name / "epoch-1" / "rank-1" / "restore.marker"));
+    BOOST_CHECK(!fs::exists(images_dir / comm_name / "epoch-1" / "rank-0"));
+
+    control_plane.clear_criu_state();
+    control_plane.clear_job_state();
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_CASE(rank_agent_cleanup_removes_images_and_state) {
     // Repeated migrations accumulate per-epoch image trees; cleanup() must reclaim them and clear
     // the CRIU control-plane state (the agent previously had no cleanup path at all).

@@ -10,6 +10,7 @@
 #include <memory>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -150,7 +151,10 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_local() const {
 std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
     // request_migration marks the targeted rank MIGRATION_PENDING (and it stays so until it
     // reaches its quiesce point and flips to QUIESCED). Either state means a migration of this
-    // rank is in progress at the current epoch.
+    // rank is in progress at the current epoch. Only ranks advertised on THIS host in the CRIU
+    // registry are candidates: the agent can only dump a local process, and selecting a foreign
+    // host's target would time out in wait_for_ready_ranks while a local request starves behind
+    // it (directory_snapshot is rank-sorted, so a lower-numbered foreign rank would always win).
     //
     // This relies on a criu-configured comm only ever writing QUIESCED for a migration target:
     // survivors block in wait_for_promotion_and_reconfigure (no state write) and the exit-based
@@ -158,8 +162,15 @@ std::uint64_t FMI::FT::LocalRankAgent::watch_once() {
     // QUIESCED for another reason, this scan would need to disambiguate.
     FMI::Utils::peer_num target = 0;
     bool found = FMI::Utils::poll_until([this, &target]() {
+        std::unordered_set<FMI::Utils::peer_num> local_ranks;
+        for (const auto& info : control_plane->criu_rank_info()) {
+            if (info.host_id == host_id) {
+                local_ranks.insert(info.rank);
+            }
+        }
         for (const auto& entry : control_plane->directory_snapshot(control_plane->epoch())) {
-            if (entry.state == RankState::MigrationPending || entry.state == RankState::Quiesced) {
+            if ((entry.state == RankState::MigrationPending || entry.state == RankState::Quiesced) &&
+                local_ranks.count(entry.rank) != 0) {
                 target = entry.rank;
                 return true;
             }
