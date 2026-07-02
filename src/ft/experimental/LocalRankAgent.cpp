@@ -24,6 +24,9 @@ FMI::FT::LocalRankAgent::LocalRankAgent(std::string config_path, std::string com
     config = configuration.get_fault_tolerance_config();
     // Validate the full configuration before opening the Redis control-plane connection.
     ensure_migration_mode();
+    // The whole enabled channel set must be checkpoint-safe, not just the preferred backend
+    // (mirrors the Communicator-side check; see require_checkpoint_safe_channels).
+    FMI::FT::require_checkpoint_safe_channels(configuration);
     host_id = FMI::FT::resolve_host_id(config);
     control_plane = std::make_shared<FMI::FT::ControlPlane>(this->config_path, this->comm_name, num_peers);
 }

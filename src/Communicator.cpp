@@ -1,6 +1,7 @@
 #include "../include/Communicator.h"
 #include "../include/ft/TransparentMigrationRuntime.h"
 #include "../include/ft/ControlPlane.h"
+#include "../include/ft/experimental/CriuRequirements.h"
 
 #include <chrono>
 #include <utility>
@@ -29,6 +30,13 @@ namespace FMI {
             if (backends.find(ft_config.preferred_data_backend) == backends.end()) {
                 throw std::runtime_error("Preferred data backend " + ft_config.preferred_data_backend + " is not enabled");
             }
+        }
+        if (ft_config.enabled && ft_config.state_transfer == "criu") {
+            // Checkpoint safety covers the whole enabled channel set, not just the preferred
+            // backend: every enabled backend is instantiated below and would be captured in the
+            // criu image. Checked here, before the control plane connects, so a bad config fails
+            // fast on both the rank side and the agent side (LocalRankAgent enforces the same).
+            FMI::FT::require_checkpoint_safe_channels(config);
         }
 
         if (ft_config.enabled) {

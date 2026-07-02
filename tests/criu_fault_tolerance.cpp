@@ -552,6 +552,24 @@ BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_direct_data_backend) {
                     [](const std::string&) {}, []() {}));
 }
 
+BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_extra_enabled_backends) {
+    // Checkpoint safety covers the whole ENABLED channel set, not just preferred_data_backend:
+    // build_channels instantiates every enabled backend and only Direct releases its sockets in
+    // prepare_for_checkpoint, so an extra enabled Redis/S3 channel would ride into the criu
+    // image with a live socket. Both entry points must refuse such a config at construction —
+    // before touching the control plane, so no Redis is needed here.
+    auto temp_dir = fs::temp_directory_path() / unique_comm_name("extra-backend");
+    auto config_path = write_criu_config(temp_dir / "fmi-criu.json", temp_dir / "images",
+                                         current_host_id(), true, /*enable_data_redis=*/true);
+
+    BOOST_CHECK_THROW(FMI::Communicator(0, 2, config_path.string(), "extra-backend-comm"),
+                      std::runtime_error);
+    BOOST_CHECK_THROW(FMI::FT::LocalRankAgent(config_path.string(), "extra-backend-comm", 2),
+                      std::runtime_error);
+
+    fs::remove_all(temp_dir);
+}
+
 BOOST_AUTO_TEST_CASE(watch_once_migrates_the_pending_member_rank) {
     // watch_once's unique job is candidate selection: scan the rank directory for a rank in
     // MigrationPending/Quiesced and migrate the first one. directory_snapshot only returns
