@@ -43,36 +43,6 @@ namespace {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
     }
 
-    std::string state_to_string(FMI::FT::RankState state) {
-        switch (state) {
-            case FMI::FT::RankState::Active:
-                return "ACTIVE";
-            case FMI::FT::RankState::MigrationPending:
-                return "MIGRATION_PENDING";
-            case FMI::FT::RankState::Quiesced:
-                return "QUIESCED";
-            case FMI::FT::RankState::Replaced:
-                return "REPLACED";
-        }
-        throw std::runtime_error("Unknown rank state");
-    }
-
-    FMI::FT::RankState rank_state_from_string(const std::string& state) {
-        if (state == "ACTIVE") {
-            return FMI::FT::RankState::Active;
-        }
-        if (state == "MIGRATION_PENDING") {
-            return FMI::FT::RankState::MigrationPending;
-        }
-        if (state == "QUIESCED") {
-            return FMI::FT::RankState::Quiesced;
-        }
-        if (state == "REPLACED") {
-            return FMI::FT::RankState::Replaced;
-        }
-        throw std::runtime_error("Unknown rank state string: " + state);
-    }
-
 #ifdef FMI_ENABLE_CRIU
     std::string state_to_string(FMI::FT::CriuRankState state) {
         switch (state) {
@@ -340,7 +310,7 @@ void FMI::FT::ControlPlane::request_migrations(const std::vector<FMI::Utils::pee
             "end "
             "return #ARGV - 3";
     std::vector<std::string> args = {"EVAL", script, "2", impl->pending_key(), impl->meta_key(),
-                                     state_to_string(RankState::MigrationPending),
+                                     to_string(RankState::MigrationPending),
                                      impl->prefix() + "epoch:", ":states"};
     for (auto rank : ranks) {
         args.push_back(std::to_string(rank));
@@ -386,7 +356,7 @@ std::vector<FMI::FT::RankDirectoryEntry> FMI::FT::ControlPlane::directory_snapsh
         info.rank = static_cast<FMI::Utils::peer_num>(std::stoul(rank_str));
         info.worker_id = worker_id;
         if (auto it = states.find(rank_str); it != states.end()) {
-            info.state = rank_state_from_string(it->second);
+            info.state = FMI::FT::rank_state_from_string(it->second);
         }
         if (auto it = placement.find(rank_str); it != placement.end()) {
             info.placement = it->second;
@@ -459,13 +429,13 @@ void FMI::FT::ControlPlane::register_rank(std::uint64_t epoch, FMI::Utils::peer_
                                          FMI::FT::RankState state) const {
 #if FMI_ENABLE_REDIS
     impl->command({"HSET", impl->members_key(epoch), std::to_string(rank), worker_id});
-    impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), state_to_string(state)});
+    impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), to_string(state)});
 #endif
 }
 
 void FMI::FT::ControlPlane::set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, FMI::FT::RankState state) const {
 #if FMI_ENABLE_REDIS
-    impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), state_to_string(state)});
+    impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), to_string(state)});
 #endif
 }
 

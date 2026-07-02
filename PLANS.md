@@ -99,7 +99,6 @@ Use Redis to manage these states per logical rank:
 - `ACTIVE`
 - `MIGRATION_PENDING`
 - `QUIESCED`
-- `REPLACED`
 
 Flow:
 

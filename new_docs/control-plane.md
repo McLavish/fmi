@@ -55,7 +55,6 @@ strings are:
 - `ACTIVE`
 - `MIGRATION_PENDING`
 - `QUIESCED`
-- `REPLACED`
 
 `epoch:<N>:placement` is a hash from logical rank to an optional placement
 string. FMI stores this string but does not interpret it.

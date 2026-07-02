@@ -4,22 +4,43 @@
 #include "../utils/Common.h"
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace FMI::FT {
-    enum class Event : std::uint8_t {
-        None,
-        MigrateSelf,
-        Reconfigured
-    };
-
     enum class RankState : std::uint8_t {
         Active,
         MigrationPending,
-        Quiesced,
-        Replaced
+        Quiesced
     };
+
+    //! Wire format of RankState in the Redis control plane. Shared by the C++ control plane and
+    //! the Python binding so the strings can never drift apart.
+    inline std::string to_string(RankState state) {
+        switch (state) {
+            case RankState::Active:
+                return "ACTIVE";
+            case RankState::MigrationPending:
+                return "MIGRATION_PENDING";
+            case RankState::Quiesced:
+                return "QUIESCED";
+        }
+        throw std::runtime_error("Unknown rank state");
+    }
+
+    inline RankState rank_state_from_string(const std::string& state) {
+        if (state == "ACTIVE") {
+            return RankState::Active;
+        }
+        if (state == "MIGRATION_PENDING") {
+            return RankState::MigrationPending;
+        }
+        if (state == "QUIESCED") {
+            return RankState::Quiesced;
+        }
+        throw std::runtime_error("Unknown rank state string: " + state);
+    }
 
     struct RankDirectoryEntry {
         FMI::Utils::peer_num rank = 0;
