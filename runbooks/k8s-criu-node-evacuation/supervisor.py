@@ -58,6 +58,19 @@ def main():
     # A migrated rank is killed/restored by criu; never relaunch it, just auto-reap the zombie.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
+    # Cross-host restore recreates each rank at its DUMPED pid, so those pids must be free in
+    # the fresh restore pod (whose own pids stay tiny). Start this machine's ranks in a high pid
+    # band. Needs CAP_SYS_ADMIN (the machine pods run privileged); best-effort elsewhere — the
+    # same-host local harness restores after the dump freed the pid anyway.
+    pid_base = env("PID_BASE", "3000")
+    try:
+        with open("/proc/sys/kernel/ns_last_pid", "w") as f:
+            f.write(pid_base)
+        print(f"[supervisor] set ns_last_pid={pid_base} (rank pids start above it)", flush=True)
+    except OSError as exc:
+        print(f"[supervisor] warning: could not set ns_last_pid ({exc}); "
+              f"cross-host restore may hit a pid collision on the restore host", flush=True)
+
     log_files = []
     for peer_id in range(base_peer_id, base_peer_id + ranks_here):
         log_path = os.path.join(log_dir, f"rank-{peer_id}.log")

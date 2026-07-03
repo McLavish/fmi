@@ -1,9 +1,12 @@
 # CRIU node-evacuation demo image.
 #
 # Ships the FMI rank agent (fmi-rank-agent), the transparent_state_transfer_demo worker, a
-# robust tcpunchd, and criu, so one image can serve every role in the demo: the per-machine
-# pods (run workers + are exec'd into to drive `migrate-local`), the tcpunchd rendezvous, and
-# the orchestrator Job. CRIU forces the Direct data plane, hence tcpunchd ships here too.
+# robust tcpunchd, and criu, so one image serves every role in the demo: the per-machine pods
+# (run workers + are exec'd into to drive `evacuate-local`), the fmi-restore Knative Service
+# (restore_server.py + `restore-remote`), the tcpunchd rendezvous, and the orchestrator Job.
+# One image for dump AND restore side is not just convenience — criu restore re-opens the
+# worker's executable and shared libraries by path, so both sides must be byte-identical.
+# CRIU forces the Direct data plane, hence tcpunchd ships here too.
 #
 # Build context is the repo root:
 #   docker build -f runbooks/k8s-criu-node-evacuation/Dockerfile -t fmi-criu-evac:dev .
@@ -61,6 +64,7 @@ RUN mkdir -p /opt/fmi/bin /opt/fmi/app \
     && cp /src/runbooks/k8s-criu-node-evacuation/fmi-machine.json.tmpl /opt/fmi/app/ \
     && cp /src/runbooks/k8s-criu-node-evacuation/local-two-machines.sh /opt/fmi/app/ \
     && cp /src/runbooks/k8s-criu-node-evacuation/supervisor.py /opt/fmi/app/ \
+    && cp /src/runbooks/k8s-criu-node-evacuation/restore_server.py /opt/fmi/app/ \
     && cp /src/runbooks/k8s-criu-node-evacuation/orchestrator.py /opt/fmi/app/ \
     && rm -rf /src
 
