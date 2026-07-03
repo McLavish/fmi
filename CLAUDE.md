@@ -13,7 +13,7 @@ optimization hint (`fast` vs `cheap`). It also adds one Redis-coordinated transp
 migration protocol on top of the base messaging layer.
 
 The canonical working tree on this machine is `/home/luca/fmi`. Note that some checked-in
-docs/runbooks (`docs/fault-tolerance.md`, `runbooks/*/README.md`) reference paths like
+runbooks (e.g. `runbooks/aws-python311-s3/README.md`) reference paths like
 `/home/luca/fmi-original/fmi/...` or instruct `cd fmi` — those reflect other deployment
 layouts; here the repo root *is* `/home/luca/fmi`.
 
@@ -25,6 +25,11 @@ Always init submodules first — `extern/TCPunch` (the `Direct` backend depends 
 ```bash
 git submodule update --init --recursive
 ```
+
+`extern/TCPunch` points at the `McLavish/TCPunch` fork, which carries two fixes the FT
+runbooks rely on: `tcpunchd` ignores SIGPIPE instead of crashing, and the client resolves
+the rendezvous host via `getaddrinfo` (upstream accepted only literal IPs, so K8s Service
+DNS names failed).
 
 Standard full build (with tests):
 
@@ -93,13 +98,16 @@ with `FMI_ENABLE_CRIU=ON`, `CriuFaultTolerance` (`criu_fault_tolerance.cpp`). **
 need live infrastructure:** Redis-backed cases need a running Redis; `Direct` cases need a
 `tcpunchd` rendezvous server on port 10000
 (`./extern/TCPunch/server/build*/tcpunchd 10000`); S3 cases need AWS credentials + a bucket.
+A `Direct` case that logs `ACTIVE` and then throws a `std::string` exception before pairing
+means the TCPunch client could not reach the rendezvous server.
 The CRIU tests are designed to run against a *mock* `criu` binary because real
 checkpoint/restore needs kernel capabilities usually unavailable in dev environments.
 
 The one standalone demo is the experimental `transparent_state_transfer_demo`, which ships with
 its runbook (`runbooks/local-criu-state-transfer/transparent_state_transfer_demo.cpp`, built via
 that directory's own `CMakeLists.txt`) rather than under `tests/`. It is built only as a
-top-level project with `FMI_ENABLE_CRIU=ON`, and is driven by `runbooks/local-criu-state-transfer/run-demo.sh`.
+top-level project with `FMI_ENABLE_CRIU=ON`, and is driven by that directory's
+`run-demo.sh` (one rank) or `run-demo-all.sh` (checkpoints all local ranks in parallel).
 
 ## Running things
 
@@ -107,7 +115,10 @@ Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id
 `[0, num_peers)`. The end-to-end `transparent_migration` flow is in
 `runbooks/localstack-python311-redis/` (heterogeneous LocalStack EC2 → Lambda ranks, Redis
 control + data plane), and the AWS Lambda + S3 flow is in `runbooks/aws-python311-s3/`; both
-READMEs are verified step-by-step runbooks. JSON config templates live in `config/`.
+READMEs are verified step-by-step runbooks. The same migration demo on real AWS
+infrastructure (EKS + Knative, ranks as K8s Jobs, replacement rank as a Knative Service)
+lives in `runbooks/localstack-python311-redis/knative-migration/` (`setup.md`, plus
+`setup-local.md` for a local-cluster variant). JSON config templates live in `config/`.
 
 The experimental CRIU rank agent CLI is built only with `FMI_ENABLE_CRIU=ON`:
 
