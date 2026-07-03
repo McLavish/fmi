@@ -1,5 +1,6 @@
-# The orchestrator finds the machine pods, execs `fmi-rank-agent migrate-local` into machine A,
-# and reads pod logs to verify preserved state.
+# The orchestrator finds the machine pods, execs `fmi-rank-agent evacuate-local` into machine A,
+# scales machine A's Deployment to zero once its ranks are staged, and reads pod logs to verify
+# preserved state.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,6 +22,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -54,6 +54,13 @@ spec:
               value: "${WINDOW_MS}"
             - name: CONFIG_PATH
               value: "/tmp/fmi.json"
+            # Read by the exec'd `fmi-rank-agent evacuate-local`: each rank's log must travel in
+            # its staged archive (criu re-opens it by path on the restore host).
+            - name: FMI_CRIU_EXTRA_FILES
+              value: "/tmp/rank-{rank}.log"
+            # Rank pids start above this so they cannot collide with the restore pod's own pids.
+            - name: PID_BASE
+              value: "3000"
           securityContext:
             # criu needs to ptrace-seize, freeze, and recreate process trees.
             privileged: true

@@ -1,4 +1,5 @@
-# Drives and verifies one evacuation. Apply after the machine pods are Running, e.g.:
+# Drives and verifies one evacuation-to-serverless. Apply after the machine pods are Running
+# and the fmi-restore Knative Service is Ready, e.g.:
 #   FMI_IMAGE=... IMAGE_PULL_POLICY=... COMM_NAME=... NUM_PEERS=8 \
 #   envsubst < k8s/orchestrator-job.yaml | kubectl apply -f -
 apiVersion: batch/v1
@@ -31,12 +32,16 @@ spec:
               value: "fmi-redis"
             - name: EVACUATE_SELECTOR
               value: "app=fmi-machine,fmi-machine=a"
+            - name: EVACUATE_DEPLOYMENT
+              value: "fmi-machine-a"
             - name: ALL_MACHINES_SELECTOR
               value: "app=fmi-machine"
             - name: WORKER_CONTAINER
               value: "fmi-machine"
             - name: AGENT_CONFIG
               value: "/tmp/fmi.json"
+            - name: RESTORE_URL
+              value: "http://fmi-restore.fmi-criu.svc.cluster.local/restore"
           resources:
             requests:
               cpu: 100m
