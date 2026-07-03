@@ -40,14 +40,10 @@ RUN git clone --depth 1 --branch v4.2 https://github.com/checkpoint-restore/criu
 # Build FMI (library + tools + the local-criu worker) and tcpunchd from the source tree.
 COPY . /src
 WORKDIR /src
-# Apply the tcpunchd robustness patch. `--forward` exits non-zero when the working tree copied
-# into the image already has it applied, so accept that case by verifying the patched marker is
-# actually present — but fail the build on any other patch failure (e.g. a submodule bump that
-# makes the patch stop applying would otherwise silently ship an unpatched, SIGPIPE-crashing
-# tcpunchd).
-RUN { patch -p1 -d /src/extern/TCPunch --forward \
-        < /src/runbooks/k8s-criu-node-evacuation/patches/0001-tcpunchd-robustness.patch \
-      || grep -q "SIG_IGN" /src/extern/TCPunch/server/hole_punching_server.cpp; } \
+# The TCPunch robustness fixes (tcpunchd ignores SIGPIPE, client resolves hostnames) live in the
+# McLavish/TCPunch fork the submodule points at. Verify they are present — a submodule bump that
+# loses them would otherwise silently ship a SIGPIPE-crashing tcpunchd.
+RUN grep -q "SIG_IGN" /src/extern/TCPunch/server/hole_punching_server.cpp \
     && grep -q "getaddrinfo" /src/extern/TCPunch/client/tcpunch.cpp \
     && cmake -S /src -B /src/build-img \
         -DFMI_ENABLE_CRIU=ON -DFMI_ENABLE_REDIS=ON -DFMI_ENABLE_S3=OFF \

@@ -52,7 +52,6 @@ evacuates machine A:
 | `orchestrator.py` | Kubernetes Job: evacuate-local → scale machine A to 0 → 4 parallel `/restore` → verify relocation in the CRIU registry → promote → verify all 8 ranks preserved state. |
 | `fmi-machine.json.tmpl` | FT config template (Direct data plane, per-role `criu.host_id`). |
 | `k8s/*.yaml` | namespace, redis, tcpunch (headless), templated machine Deployment, RBAC, the `fmi-restore` Knative Service, orchestrator Job. |
-| `patches/0001-tcpunchd-robustness.patch` | tcpunchd ignores SIGPIPE + skips dead probes; TCPunch client resolves **hostnames** (so `Direct.host` can be a Service name). Applied at image build. |
 | `local-two-machines.sh` | Cluster-free baseline: the full evacuate→stage→wipe→restore-remote→promote pipeline on one host (fake serverless host identities). |
 | `local-two-containers.sh` | Cluster-free dress rehearsal: machine A is a container that gets **stopped** after staging; four fresh containers restore its ranks via `restore_server.py` over HTTP. |
 | `tests/test_orchestrator.py` | Unit tests for the orchestrator's and restore server's parsing/verification logic. |
