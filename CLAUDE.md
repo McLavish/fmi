@@ -112,7 +112,8 @@ READMEs are verified step-by-step runbooks. JSON config templates live in `confi
 The experimental CRIU rank agent CLI is built only with `FMI_ENABLE_CRIU=ON`:
 
 ```text
-fmi-rank-agent {migrate|migrate-local|watch|cleanup} <comm_name> <num_peers> <config> [rank]
+fmi-rank-agent {migrate|migrate-local|evacuate-local|restore-remote|promote|watch|cleanup} \
+    <comm_name> <num_peers> <config> [rank]
 ```
 
 ## Architecture
@@ -165,12 +166,15 @@ fault tolerance layered around the user API.
   epoch-qualified communicator name. **Application-state continuity** is selected by
   `fault_tolerance.state_transfer` (a mechanism toggle within the one protocol, not a second
   mode): `"none"` (default) — the rank exits and a fresh replacement recomputes; `"criu"`
-  (same-host v1, needs `FMI_ENABLE_CRIU=ON`) — the rank's process image is CRIU
-  checkpointed/restored so memory is preserved transparently. The CRIU path is driven by the
-  host-local `LocalRankAgent` (`fmi-rank-agent`), reuses the
-  `prepare_channels_for_checkpoint` hook + the survivor reconfigure path, and is verified in
-  `runbooks/local-criu-state-transfer/` (rootless criu) with that runbook's
-  `transparent_state_transfer_demo.cpp`.
+  (needs `FMI_ENABLE_CRIU=ON`) — the rank's process image is CRIU checkpointed/restored so
+  memory is preserved transparently. The CRIU path is driven by the host-local
+  `LocalRankAgent` (`fmi-rank-agent`), reuses the `prepare_channels_for_checkpoint` hook + the
+  survivor reconfigure path, and supports two shapes: **same-host in-place**
+  (`migrate`/`migrate-local`, verified in `runbooks/local-criu-state-transfer/`, rootless criu)
+  and **cross-host** (`evacuate-local` dumps a host's ranks in one cut and stages packed images
+  in Redis via `ControlPlane::criu_image_put`; `restore-remote` fetches + restores one rank on
+  another host; the orchestrator `promote`s once — verified in
+  `runbooks/k8s-criu-node-evacuation/`, node evacuation onto Knative).
     Shared criu-invocation code lives in `ft/experimental/CriuExec`.
   - **Epoch fencing invariant** (`PLANS.md`): under FT, every backend-visible name —
     `Direct` pairing names, `Redis`/`S3` object names, per-instance operation counters — is
