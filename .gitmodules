@@ -1,6 +1,7 @@
 [submodule "extern/TCPunch"]
 	path = extern/TCPunch
-	url = git@github.com:OpenCoreCH/TCPunch.git
+	url = git@github.com:McLavish/TCPunch.git
+	branch = fix/rendezvous-sigpipe-and-client-dns
 [submodule "docs/doxygen-awesome-css"]
 	path = docs/doxygen-awesome-css
 	url = https://github.com/jothepro/doxygen-awesome-css.git
