@@ -158,8 +158,15 @@ docker run --rm --network "${NET}" "${IMAGE}" bash -lc \
 log "waiting for the held /restore responses (workers finishing)"
 for pid in "${POST_PIDS[@]}"; do wait "${pid}"; done
 
-# Survivors report in machine-b's logs; evacuated ranks in their /restore responses.
-survivors_ok="$(docker logs fmi-machine-b 2>&1 | grep -c "OK: application state survived")"
+# Survivors report in machine-b's logs; evacuated ranks in their /restore responses. The
+# supervisor mirrors rank logs via `tail -F`, which flushes with up to ~1s of lag behind the
+# workers' actual exit — poll instead of sampling once.
+survivors_ok=0
+for _ in $(seq 1 60); do
+    survivors_ok="$(docker logs fmi-machine-b 2>&1 | grep -c "OK: application state survived")"
+    [ "${survivors_ok}" -ge $((NUM_PEERS - RANKS_PER_MACHINE)) ] && break
+    sleep 0.5
+done
 responses_ok=0
 for r in $(seq 0 $((RANKS_PER_MACHINE - 1))); do
     if grep -q '"status": "ok"' "${RUNBOOK_DIR}/.restore-rank${r}.json" \
