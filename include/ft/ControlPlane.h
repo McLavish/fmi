@@ -74,6 +74,12 @@ namespace FMI::FT {
         //! Return the currently active communicator epoch.
         [[nodiscard]] std::uint64_t epoch() const;
 
+        //! Last operation boundary each rank published (rank -> operations completed in the
+        //! active epoch). Piggybacked for free on the per-operation snapshot, so an external
+        //! orchestrator/agent can see what every rank is doing (progress, who lags, where a
+        //! stuck migration is stuck) without any rank-side instrumentation.
+        [[nodiscard]] std::vector<std::pair<FMI::Utils::peer_num, std::uint64_t>> operation_boundaries() const;
+
 #ifdef FMI_ENABLE_CRIU
         //! Remove the CRIU rank registry associated with this communicator name.
         void clear_criu_state();
@@ -100,15 +106,24 @@ namespace FMI::FT {
         friend class TransparentMigrationRuntime;
 
         //! What an operation boundary needs to know, read atomically in one Redis round-trip:
-        //! the current epoch and the pending set (its cardinality plus this rank's membership).
-        //! Atomicity matters — promotion bumps the epoch and clears the pending set in one
-        //! script, so a snapshot can never pair a stale epoch with an already-cleared set.
+        //! the current epoch, the pending set (its cardinality plus this rank's membership),
+        //! and the consensus cut boundary. Atomicity matters — promotion bumps the epoch and
+        //! clears the pending set in one script, so a snapshot can never pair a stale epoch
+        //! with an already-cleared set.
         struct OperationSnapshot {
             std::uint64_t epoch = 0;
             bool any_pending = false;
             bool self_pending = false;
+            //! Boundary index the pending cut takes effect at (0 = no cut proposed). Set
+            //! atomically by the first rank that observes the pending set at a boundary, to
+            //! that rank's boundary + 1: at proposal time no rank can have passed that
+            //! boundary, and any rank already inside operation `cut_index - 1` still gets the
+            //! target's participation, because every rank — the target included — keeps
+            //! executing operations while its own boundary is below the cut.
+            std::uint64_t cut_index = 0;
         };
-        [[nodiscard]] OperationSnapshot observe_operation(FMI::Utils::peer_num rank) const;
+        //! Publish @p boundary for @p rank and read the snapshot, all in one script/round-trip.
+        [[nodiscard]] OperationSnapshot observe_operation(FMI::Utils::peer_num rank, std::uint64_t boundary) const;
 
         void ensure_job() const;
         [[nodiscard]] bool is_rank_pending(FMI::Utils::peer_num rank) const;

@@ -80,11 +80,12 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
         // instead of dereferencing null.
         throw std::logic_error("TransparentMigrationRuntime::enter_operation requires a control plane");
     }
-    // One atomic control-plane snapshot per operation boundary: the epoch and the pending set
-    // are read in a single script, so a concurrent promotion (which bumps the epoch and clears
-    // the set in one script on its side) can never slip between the two reads — and the steady
-    // state costs exactly one Redis round-trip instead of three.
-    auto snapshot = control_plane->observe_operation(peer_id);
+    // One atomic control-plane snapshot per operation boundary: the epoch, the pending set and
+    // the consensus cut boundary are read in a single script, so a concurrent promotion (which
+    // bumps the epoch and clears all of them in one script on its side) can never slip between
+    // the reads — and the steady state costs exactly one Redis round-trip instead of three.
+    // The same round-trip publishes this rank's boundary index (progress telemetry).
+    auto snapshot = control_plane->observe_operation(peer_id, boundary_index);
     if (snapshot.epoch > active_epoch) {
         // A cut completed since our last boundary: rejoin at the new epoch first. If this rank
         // is also pending for a NEWER cut, the next boundary's snapshot handles it.
@@ -93,6 +94,17 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     }
 
     if (!snapshot.any_pending) {
+        return;
+    }
+
+    // Consensus cut: the request only takes effect at cut_index, fixed atomically by the first
+    // rank that observed it (to that rank's boundary + 1). A rank below the cut keeps executing
+    // operations — including the migration target — because a slower peer may already be inside
+    // one of those operations and would otherwise block forever on a target that quiesced early
+    // (or read EOF mid-collective from its closed sockets). Every rank therefore parks at the
+    // same boundary, which is what makes closing the data-plane sockets at the quiesce point
+    // safe: at a consensus boundary no operation is in flight anywhere.
+    if (snapshot.cut_index > 0 && boundary_index < snapshot.cut_index) {
         return;
     }
 
@@ -126,7 +138,10 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
 }
 
 void FMI::FT::TransparentMigrationRuntime::exit_operation() {
-    // No in-flight counter needed: transparent migration only quiesces between operations
+    // Count completed operations: the boundary index published at enter_operation and compared
+    // against the consensus cut_index. Incremented in the guard's exit so a parked-and-resumed
+    // operation is counted exactly once, after it actually ran.
+    boundary_index++;
 }
 
 void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
@@ -183,4 +198,8 @@ void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure() 
     // After a CRIU restore the rebuilt channels must be ready before control returns to user
     // code; reconfigure installs the epoch-N+1 channel set in place.
     reconfigure_callback(epoch_comm_name(base_comm_name, active_epoch));
+    // Every rank parked at the same consensus boundary and resumes the new epoch with the same
+    // next operation, so resetting here keeps boundary indices cohort-aligned — including for a
+    // fresh replacement rank, whose counter starts at 0 by construction.
+    boundary_index = 0;
 }

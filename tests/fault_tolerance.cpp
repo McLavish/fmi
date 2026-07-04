@@ -2,10 +2,20 @@
 
 #include "../include/fmi.h"
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <mutex>
+#include <random>
+#include <sstream>
 #include <thread>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace {
     namespace fs = std::filesystem;
@@ -31,6 +41,22 @@ namespace {
         } catch (const std::exception&) {
             return false;
         }
+    }
+
+    // The cut-timing stress test moves real data over Direct, so it additionally needs a
+    // tcpunchd rendezvous server; probe for it so the suite still passes on infra-less hosts.
+    bool tcp_port_open(const char* host, int port) {
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            return false;
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<uint16_t>(port));
+        inet_pton(AF_INET, host, &addr.sin_addr);
+        bool ok = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+        ::close(fd);
+        return ok;
     }
 }
 
@@ -250,5 +276,204 @@ BOOST_AUTO_TEST_CASE(transparent_migration_rejects_overlapping_cut) {
 
     control_plane.clear_job_state();
 }
+
+#ifdef FMI_ENABLE_CRIU
+// Cut-consistency stress: real allreduce traffic over Direct while migration cuts land at
+// random offsets relative to the ranks' operation boundaries.
+//
+// The transparent-migration protocol assumes every rank observes a pending migration at the
+// SAME operation index. observe_operation() is a per-rank read at that rank's own boundary, so
+// a request that becomes visible between survivor B's enter_operation(op j) and target A's
+// enter_operation(op j) leaves B inside op j blocked on A while A parks at its j boundary and
+// closes its sockets — B then sees EOF mid-collective (or times out). This test tries to land
+// requests inside that window: the target rank staggers its entry into every operation, and the
+// orchestrator fires request_migration at a random offset once all ranks pass an iteration
+// threshold. state_transfer="criu" is used because the targeted rank then PARKS at its quiesce
+// point instead of exiting, which lets all ranks live as threads of the test process (no
+// criu binary is involved: promotion is what un-parks the target, exactly as after a restore).
+//
+// A clean cut keeps the test green (all ranks park at the same boundary, rejoin at epoch N+1,
+// and the loop values stay in lockstep). Only an inconsistent cut turns it red.
+BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress) {
+    // Two ranks keep the TCPunch rendezvous load minimal (one pairing per epoch): rank 0 is the
+    // reduce root / survivor, rank 1 the staggered migration target. The race needs exactly one
+    // survivor already inside an operation the target has not entered, so two ranks suffice.
+    constexpr unsigned int world = 2;
+    constexpr FMI::Utils::peer_num target_rank = 1;    // the staggered rank is always the target
+    constexpr int cuts = 6;
+    constexpr int first_cut_iter = 30;
+    constexpr int iters_between_cuts = 40;
+    constexpr int total_iters = first_cut_iter + cuts * iters_between_cuts + 40;
+    const auto target_stagger = std::chrono::milliseconds(3);
+
+    const std::string stress_config_path = repo_config_path("fmi_ft_stress_test.json");
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+    if (!tcp_port_open("127.0.0.1", 10000)) {
+        BOOST_TEST_MESSAGE("Skipping: tcpunchd not reachable on 127.0.0.1:10000");
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(stress_config_path, comm_name, world);
+    control_plane.clear_job_state();
+    control_plane.clear_criu_state();
+
+    std::mutex failures_mutex;
+    std::vector<std::string> failures;
+    auto record_failure = [&](const std::string& message) {
+        std::lock_guard<std::mutex> lock(failures_mutex);
+        failures.push_back(message);
+    };
+
+    std::array<std::atomic<int>, world> progress{};
+
+    auto rank_fn = [&](FMI::Utils::peer_num rank) {
+        try {
+            FMI::Communicator comm(rank, world, stress_config_path, comm_name, 128,
+                                   "stress-worker-" + std::to_string(rank));
+            FMI::Utils::Function<int> sum([](int a, int b) { return a + b; }, true, true);
+            for (int it = 0; it < total_iters; it++) {
+                if (rank == target_rank) {
+                    std::this_thread::sleep_for(target_stagger);
+                }
+                FMI::Comm::Data<int> in = it * 10 + static_cast<int>(rank);
+                FMI::Comm::Data<int> out;
+                comm.allreduce(in, out, sum);
+                int expected = static_cast<int>(world) * it * 10
+                               + static_cast<int>(world * (world - 1) / 2);
+                if (out.get() != expected) {
+                    std::ostringstream oss;
+                    oss << "rank " << rank << " iter " << it << ": allreduce returned "
+                        << out.get() << ", expected " << expected;
+                    record_failure(oss.str());
+                    return;
+                }
+                progress[rank].fetch_add(1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } catch (const FMI::Utils::Timeout&) {
+            std::ostringstream oss;
+            oss << "rank " << rank << " iter " << progress[rank].load()
+                << ": FMI::Utils::Timeout (wedged waiting on a peer)";
+            record_failure(oss.str());
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "rank " << rank << " iter " << progress[rank].load() << ": " << e.what();
+            record_failure(oss.str());
+        } catch (const std::string& s) {
+            // The TCPunch client throws std::string on rendezvous failures.
+            std::ostringstream oss;
+            oss << "rank " << rank << " iter " << progress[rank].load()
+                << ": TCPunch rendezvous failure: " << s;
+            record_failure(oss.str());
+        } catch (...) {
+            std::ostringstream oss;
+            oss << "rank " << rank << " iter " << progress[rank].load() << ": unknown exception";
+            record_failure(oss.str());
+        }
+    };
+
+    std::vector<std::future<void>> ranks;
+    ranks.reserve(world);
+    for (FMI::Utils::peer_num rank = 0; rank < world; rank++) {
+        ranks.push_back(std::async(std::launch::async, rank_fn, rank));
+    }
+
+    std::random_device rd;
+    const unsigned int seed = rd();
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> offset_ms(0, 12);
+    BOOST_TEST_MESSAGE("cut_timing_stress seed: " << seed);
+
+    int completed_cuts = 0;
+    for (int cut = 0; cut < cuts; cut++) {
+        int fire_at = first_cut_iter + cut * iters_between_cuts;
+        bool ready = FMI::Utils::poll_until(
+                [&]() {
+                    for (FMI::Utils::peer_num rank = 0; rank < world; rank++) {
+                        if (progress[rank].load() < fire_at) {
+                            return false;
+                        }
+                    }
+                    return true;
+                },
+                20000, 2);
+        if (!ready) {
+            record_failure("orchestrator: ranks never reached iteration " + std::to_string(fire_at)
+                           + " for cut " + std::to_string(cut) + " (a prior cut wedged the job)");
+            break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(offset_ms(rng)));
+        std::uint64_t epoch = control_plane.epoch();
+        control_plane.request_migration(target_rank);
+
+        // Try-promote until the gate opens (the target wrote QUIESCED at its boundary).
+        bool promoted = FMI::Utils::poll_until(
+                [&]() {
+                    try {
+                        control_plane.promote_epoch(epoch + 1);
+                        return true;
+                    } catch (const std::exception&) {
+                        return false;   // target not quiesced yet
+                    }
+                },
+                20000, 10);
+        if (!promoted) {
+            record_failure("orchestrator: cut " + std::to_string(cut)
+                           + " never became promotable (target never reached its quiesce point)");
+            // Release anything parked so the rank threads terminate instead of waiting forever.
+            // Only target_rank is ever requested, so it is the only possibly-pending rank.
+            control_plane.mark_rank_quiesced(epoch, target_rank);
+            try {
+                control_plane.promote_epoch(epoch + 1);
+            } catch (const std::exception&) {
+                // job is failing anyway; rank-side timeouts bound the remaining waits
+            }
+            break;
+        }
+        completed_cuts++;
+        std::ostringstream cut_msg;
+        cut_msg << "cut " << cut << " promoted to epoch " << epoch + 1 << " (progress";
+        for (FMI::Utils::peer_num rank = 0; rank < world; rank++) {
+            cut_msg << " " << progress[rank].load();
+        }
+        cut_msg << ")";
+        BOOST_TEST_MESSAGE(cut_msg.str());
+    }
+
+    // Rank-side waits are bounded by Direct's max_timeout, but a TCPunch pairing can wedge past
+    // its own timeout (known rendezvous flakiness), leaving a rank thread stuck forever. A stuck
+    // std::async future would then block the test binary at scope exit, so bound the join and
+    // hard-exit after reporting if any rank never terminates.
+    bool all_joined = true;
+    for (FMI::Utils::peer_num rank = 0; rank < world; rank++) {
+        if (ranks[rank].wait_for(std::chrono::seconds(45)) != std::future_status::ready) {
+            all_joined = false;
+            record_failure("rank " + std::to_string(rank) + " thread never terminated at iter "
+                           + std::to_string(progress[rank].load())
+                           + " (wedged past every timeout, e.g. inside a TCPunch pairing)");
+        }
+    }
+
+    BOOST_TEST_MESSAGE("cut_timing_stress completed cuts: " << completed_cuts << "/" << cuts);
+    for (const auto& failure : failures) {
+        BOOST_ERROR(failure);
+    }
+    BOOST_CHECK_EQUAL(failures.size(), 0u);
+
+    control_plane.clear_job_state();
+    control_plane.clear_criu_state();
+
+    if (!all_joined) {
+        // Failures above have already been streamed to the log; exiting is the only way to
+        // terminate with a thread stuck in a blocking call that ignores its deadline.
+        std::_Exit(201);
+    }
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END();

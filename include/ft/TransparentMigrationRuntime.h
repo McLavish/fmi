@@ -41,6 +41,15 @@ namespace FMI::FT {
         std::function<void()> prepare_for_checkpoint;
         std::function<void()> finalize_channels;
 
+        //! Operations completed in the active epoch: the rank is "at boundary B" when it has
+        //! completed B operations and is about to run operation B. Published to the control
+        //! plane at every boundary (piggybacked on the observe_operation round-trip) and used
+        //! for the consensus cut: a migration only takes effect at a cut_index agreed via the
+        //! control plane, so no rank can be left inside an operation the target never joins.
+        //! Reset to 0 on every epoch rejoin, which keeps the counter cohort-aligned: all ranks
+        //! (survivors, the target, a replacement) resume the new epoch at the same operation.
+        std::uint64_t boundary_index = 0;
+
         // How a migrated rank's state is handled, the data backend name, and host identity used by
         // the CRIU path are all read from `config` where needed (see checkpoint_and_wait_for_restore).
 
