@@ -294,7 +294,9 @@ BOOST_AUTO_TEST_CASE(transparent_migration_rejects_overlapping_cut) {
 //
 // A clean cut keeps the test green (all ranks park at the same boundary, rejoin at epoch N+1,
 // and the loop values stay in lockstep). Only an inconsistent cut turns it red.
-BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress) {
+// Parameterized over the data plane: the Direct variant needs a tcpunchd rendezvous server,
+// the Redis variant only needs the same Redis that serves as control plane.
+static void run_cut_timing_stress(const std::string& stress_config_file, bool needs_tcpunchd) {
     // Two ranks keep the TCPunch rendezvous load minimal (one pairing per epoch): rank 0 is the
     // reduce root / survivor, rank 1 the staggered migration target. The race needs exactly one
     // survivor already inside an operation the target has not entered, so two ranks suffice.
@@ -306,13 +308,13 @@ BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress) {
     constexpr int total_iters = first_cut_iter + cuts * iters_between_cuts + 40;
     const auto target_stagger = std::chrono::milliseconds(3);
 
-    const std::string stress_config_path = repo_config_path("fmi_ft_stress_test.json");
+    const std::string stress_config_path = repo_config_path(stress_config_file);
     std::string comm_name = unique_comm_name();
     if (!redis_available(comm_name)) {
         BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
         return;
     }
-    if (!tcp_port_open("127.0.0.1", 10000)) {
+    if (needs_tcpunchd && !tcp_port_open("127.0.0.1", 10000)) {
         BOOST_TEST_MESSAGE("Skipping: tcpunchd not reachable on 127.0.0.1:10000");
         return;
     }
@@ -473,6 +475,18 @@ BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress) {
         // terminate with a thread stuck in a blocking call that ignores its deadline.
         std::_Exit(201);
     }
+}
+
+BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress) {
+    run_cut_timing_stress("fmi_ft_stress_test.json", /*needs_tcpunchd=*/true);
+}
+
+// The same protocol torture over the Redis (ClientServer) data plane — checkpoint-safe since
+// Redis::prepare_for_checkpoint, and therefore allowed under state_transfer="criu". No
+// tcpunchd involved, so this variant also isolates the consensus-cut logic from TCPunch
+// rendezvous flakiness.
+BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress_redis) {
+    run_cut_timing_stress("fmi_ft_stress_redis_test.json", /*needs_tcpunchd=*/false);
 }
 #endif
 

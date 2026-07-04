@@ -3,8 +3,8 @@
 #include <cmath>
 
 FMI::Comm::Redis::Redis(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params) : ClientServer(params) {
-    std::string hostname = params["host"];
-    auto port = std::stoi(params["port"]);
+    hostname = params["host"];
+    port = std::stoi(params["port"]);
     bandwidth_single = std::stod(model_params["bandwidth_single"]);
     bandwidth_multiple = std::stod(model_params["bandwidth_multiple"]);
     overhead = std::stod(model_params["overhead"]);
@@ -17,6 +17,23 @@ FMI::Comm::Redis::Redis(std::map<std::string, std::string> params, std::map<std:
         include_infrastructure_costs = false;
     }
 
+    context = nullptr;
+    ensure_connection();
+}
+
+FMI::Comm::Redis::~Redis() {
+    if (context != nullptr) {
+        redisFree(context);
+    }
+}
+
+void FMI::Comm::Redis::ensure_connection() {
+    if (context != nullptr && !context->err) {
+        return;
+    }
+    if (context != nullptr) {
+        redisFree(context);
+    }
     context = redisConnect(hostname.c_str(), port);
     if (context == nullptr || context->err) {
         if (context) {
@@ -27,11 +44,15 @@ FMI::Comm::Redis::Redis(std::map<std::string, std::string> params, std::map<std:
     }
 }
 
-FMI::Comm::Redis::~Redis() {
-    redisFree(context);
+void FMI::Comm::Redis::prepare_for_checkpoint() {
+    if (context != nullptr) {
+        redisFree(context);
+        context = nullptr;
+    }
 }
 
 void FMI::Comm::Redis::upload_object(channel_data buf, std::string name) {
+    ensure_connection();
     std::string command = "SET " + name + " %b";
     auto* reply = (redisReply*) redisCommand(context, command.c_str(), buf.buf, buf.len);
     if (reply->type == REDIS_REPLY_ERROR) {
@@ -41,6 +62,7 @@ void FMI::Comm::Redis::upload_object(channel_data buf, std::string name) {
 }
 
 bool FMI::Comm::Redis::download_object(channel_data buf, std::string name) {
+    ensure_connection();
     std::string command = "GET " + name;
     auto* reply = (redisReply*) redisCommand(context, command.c_str());
     if (reply->type == REDIS_REPLY_NIL || reply->type == REDIS_REPLY_ERROR) {
@@ -54,12 +76,14 @@ bool FMI::Comm::Redis::download_object(channel_data buf, std::string name) {
 }
 
 void FMI::Comm::Redis::delete_object(std::string name) {
+    ensure_connection();
     std::string command = "DEL " + name;
     auto* reply = (redisReply*) redisCommand(context, command.c_str());
     freeReplyObject(reply);
 }
 
 std::vector<std::string> FMI::Comm::Redis::get_object_names() {
+    ensure_connection();
     std::vector<std::string> keys;
     std::string command = "KEYS *";
     auto* reply = (redisReply*) redisCommand(context, command.c_str());

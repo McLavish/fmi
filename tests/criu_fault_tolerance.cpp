@@ -72,7 +72,8 @@ namespace {
                                const fs::path& images_dir,
                                const std::string& host_id,
                                bool enable_direct,
-                               bool enable_data_redis) {
+                               bool enable_data_redis,
+                               bool enable_data_s3 = false) {
         // ofstream does not create missing parent directories; without this the config file is
         // never written, redis_available() throws "cannot open file", and the test silently
         // skips (skip == no assertions == green) — masking real coverage gaps.
@@ -81,7 +82,7 @@ namespace {
         out << "{\n"
                "  \"backends\": {\n"
                "    \"S3\": {\n"
-               "      \"enabled\": false,\n"
+            << "      \"enabled\": " << bool_string(enable_data_s3) << ",\n"
                "      \"bucket_name\": \"romanboe-uploadtest\",\n"
                "      \"s3_region\": \"eu-central-1\",\n"
                "      \"timeout\": 100,\n"
@@ -528,18 +529,19 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
     fs::remove_all(temp_dir);
 }
 
-BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_direct_data_backend) {
-    // CRIU freezes the whole process image, so the data plane must be Direct — the only backend
-    // that releases its sockets in prepare_for_checkpoint(). The runtime must fail fast at
-    // construction if the data plane is pinned to anything else, rather than later dumping a
-    // process with live Redis/S3 sockets. No Redis needed: the check runs before the control_plane
-    // is touched, so a null control_plane is fine.
+BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_checkpoint_safe_data_backend) {
+    // CRIU freezes the whole process image, so the data plane must be checkpoint-safe: a backend
+    // that releases its transport in prepare_for_checkpoint(). Direct closes its peer sockets and
+    // Redis drops its client connection, so both are accepted; S3 is not (live AWS SDK sockets
+    // and threads would ride into the image). The runtime must fail fast at construction, rather
+    // than later dumping a process with live SDK state. No Redis needed: the check runs before
+    // the control_plane is touched, so a null control_plane is fine.
     FMI::Utils::FaultToleranceConfig config;
     config.enabled = true;
     config.control_backend = "Redis";
     config.state_transfer = "criu";
 
-    config.preferred_data_backend = "Redis";
+    config.preferred_data_backend = "S3";
     BOOST_CHECK_THROW(
             FMI::FT::TransparentMigrationRuntime(
                     0, "worker", "", 0, config, nullptr, "comm",
@@ -551,17 +553,25 @@ BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_direct_data_backend) {
             FMI::FT::TransparentMigrationRuntime(
                     0, "worker", "", 0, config, nullptr, "comm",
                     [](const std::string&) {}, []() {}));
+
+    config.preferred_data_backend = "Redis";
+    BOOST_CHECK_NO_THROW(
+            FMI::FT::TransparentMigrationRuntime(
+                    0, "worker", "", 0, config, nullptr, "comm",
+                    [](const std::string&) {}, []() {}));
 }
 
 BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_extra_enabled_backends) {
     // Checkpoint safety covers the whole ENABLED channel set, not just preferred_data_backend:
-    // build_channels instantiates every enabled backend and only Direct releases its sockets in
-    // prepare_for_checkpoint, so an extra enabled Redis/S3 channel would ride into the criu
-    // image with a live socket. Both entry points must refuse such a config at construction —
-    // before touching the control plane, so no Redis is needed here.
+    // build_channels instantiates every enabled backend, and an enabled S3 channel would ride
+    // into the criu image with live AWS SDK sockets and threads (Direct and Redis are
+    // checkpoint-safe — they release their transport in prepare_for_checkpoint). Both entry
+    // points must refuse such a config at construction — before touching the control plane,
+    // so no Redis is needed here.
     auto temp_dir = fs::temp_directory_path() / unique_comm_name("extra-backend");
     auto config_path = write_criu_config(temp_dir / "fmi-criu.json", temp_dir / "images",
-                                         current_host_id(), true, /*enable_data_redis=*/true);
+                                         current_host_id(), true, /*enable_data_redis=*/false,
+                                         /*enable_data_s3=*/true);
 
     BOOST_CHECK_THROW(FMI::Communicator(0, 2, config_path.string(), "extra-backend-comm"),
                       std::runtime_error);
