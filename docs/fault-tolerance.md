@@ -17,6 +17,13 @@ What it does:
 - preserves logical rank IDs across migration
 - triggers migration externally (an orchestrator calls `request_migration`)
 - cuts over at FMI operation boundaries (via `Communicator`'s `OperationGuard`)
+- agrees on **one consensus cut boundary** per migration: the first rank that observes the
+  pending request fixes a `cut_index` (atomically, in the same per-operation control-plane
+  round-trip), chosen past any operation another rank may already be inside. Every rank —
+  the target included — keeps executing operations below the cut and parks exactly at it,
+  so no rank is ever left blocked inside an operation the target never joins. The same
+  round-trip publishes each rank's operation boundary (readable via
+  `ControlPlane::operation_boundaries()` for progress/diagnostics).
 - uses `Direct`/TCP as the data plane and Redis for FT control
 
 What it does not do:
@@ -54,10 +61,12 @@ At the migration quiesce point (`TransparentMigrationRuntime`), the targeted ran
 
 1. opts in to ptrace from a non-parent rank agent via `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)`
    (needed under the default `yama ptrace_scope=1`),
-2. releases its `Direct` sockets (`prepare_for_checkpoint`),
+2. releases its data-plane transport (`prepare_for_checkpoint`: `Direct` closes its peer
+   sockets, `Redis` drops its client connection),
 3. publishes a restorable image entry (pid + host + `QUIESCED@epoch N+1`) into the Redis CRIU
    rank registry,
-4. blocks in the promotion-wait loop.
+4. blocks in a **socket-free** promotion-wait loop: the control-plane connection is dropped
+   after every poll, so outside brief poll instants the process holds no TCP socket at all.
 
 A host-local rank agent (`FMI::FT::LocalRankAgent`, CLI `fmi-rank-agent`) then:
 
@@ -68,9 +77,11 @@ A host-local rank agent (`FMI::FT::LocalRankAgent`, CLI `fmi-rank-agent`) then:
 4. promotes the epoch to `N+1`.
 
 The restored rank and the survivors both observe epoch `N+1` and reconfigure their channels under
-the new epoch-qualified name; `Direct` re-pairs lazily. The Redis control connection is closed by
-criu's `--tcp-close` and the `ControlPlane` reconnects lazily (SIGPIPE is ignored so the first
-post-restore write is not fatal).
+the new epoch-qualified name; `Direct` re-pairs lazily. Because the dumped image contains no
+established TCP socket, criu needs neither `--tcp-established` nor `--tcp-close`, the image is
+host-agnostic, and the restored rank's first control-plane call simply opens a fresh Redis
+connection (no dead-socket write, hence no SIGPIPE handling anywhere). The rank agent retries a
+dump that happens to land during a poll instant.
 
 #### Configuration
 
@@ -119,7 +130,8 @@ no shell quoting, so individual flags must not contain spaces.
 #### v1 limitations
 
 - same host only (criu restores on the dumping host)
-- `Direct` is the only supported data backend; Redis is the control plane
+- `Direct` and `Redis` are the supported (checkpoint-safe) data backends; S3 is rejected
+  (live AWS SDK sockets/threads would be captured in the image). Redis is the control plane
 - one targeted rank per migration; no in-flight-collective preservation
 - no Python binding for the CRIU path (the demo is C++)
 - the rank agent is the migration authority and must complete `migrate_rank` (dump → restore →
