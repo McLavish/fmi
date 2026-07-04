@@ -74,6 +74,14 @@ namespace FMI::FT {
         //! Return the currently active communicator epoch.
         [[nodiscard]] std::uint64_t epoch() const;
 
+        //! Drop the Redis connection; the next command transparently reconnects. Used by the
+        //! CRIU quiesce path to hold the control-plane socket closed between promotion polls,
+        //! so the process image captured by `criu dump` contains no established TCP socket —
+        //! which removes the need for criu's --tcp-close (and the SIGPIPE hazard of a restored
+        //! rank writing to a dead socket: after restore the context is simply null and the
+        //! next command opens a fresh connection).
+        void disconnect();
+
         //! Last operation boundary each rank published (rank -> operations completed in the
         //! active epoch). Piggybacked for free on the per-operation snapshot, so an external
         //! orchestrator/agent can see what every rank is doing (progress, who lags, where a

@@ -306,13 +306,14 @@ BOOST_AUTO_TEST_CASE(rank_agent_dumps_restores_and_promotes_single_rank) {
     fs::remove_all(temp_dir);
 }
 
-BOOST_AUTO_TEST_CASE(criu_runtime_scopes_sigpipe_to_default_disposition) {
-    // The criu state-transfer path needs SIGPIPE ignored so a --tcp-close'd Redis socket
-    // surfaces EPIPE instead of killing the restored rank. That disposition is process-global,
-    // so the runtime (the rank-side criu owner) must only take it over when the application left
-    // SIGPIPE at its default — never clobbering a handler the application installed itself.
-    // No Redis needed: the runtime ctor arms SIGPIPE before it touches the control plane, so a
-    // null control plane is fine (mirrors criu_state_transfer_rejects_non_direct_data_backend).
+BOOST_AUTO_TEST_CASE(criu_runtime_leaves_sigpipe_disposition_untouched) {
+    // The criu quiesce path holds the control-plane connection closed while waiting to be
+    // dumped, so the captured image contains no established TCP socket and the restored rank
+    // never writes to a dead one — there is no SIGPIPE hazard left, and the runtime must not
+    // touch the process-global SIGPIPE disposition (neither the default nor an
+    // application-installed handler).
+    // No Redis needed: a null control plane is fine for construction-time checks (mirrors
+    // criu_state_transfer_rejects_non_direct_data_backend).
     FMI::Utils::FaultToleranceConfig config;
     config.enabled = true;
     config.control_backend = "Redis";
@@ -321,12 +322,12 @@ BOOST_AUTO_TEST_CASE(criu_runtime_scopes_sigpipe_to_default_disposition) {
 
     auto original = current_sigpipe_handler();
 
-    // From the default disposition, a criu-mode runtime arms SIG_IGN.
+    // The default disposition stays the default.
     std::signal(SIGPIPE, SIG_DFL);
     {
         FMI::FT::TransparentMigrationRuntime runtime(0, "worker", "", 0, config, nullptr, "comm",
                                                      [](const std::string&) {}, []() {});
-        BOOST_CHECK(current_sigpipe_handler() == SIG_IGN);
+        BOOST_CHECK(current_sigpipe_handler() == SIG_DFL);
     }
 
     // An application-installed handler is left untouched.

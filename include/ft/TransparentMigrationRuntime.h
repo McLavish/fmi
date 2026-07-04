@@ -60,7 +60,13 @@ namespace FMI::FT {
         //! stuck migration (dead orchestrator/agent, failed restore) is therefore not a
         //! library-detected error; detecting and resolving it (abort the job, or promote a
         //! replacement) is the orchestrator's responsibility. See docs/fault-tolerance.md.
-        void wait_for_promotion_and_reconfigure();
+        //!
+        //! With socket_free_wait the control-plane connection is dropped after every poll, so
+        //! the wait holds no open TCP socket outside the brief poll instants. Used while this
+        //! process is waiting to be criu-dumped: the captured image then (almost) never
+        //! contains an established socket, criu needs no TCP flags, and the restored image
+        //! reconnects from a null context instead of writing to a dead socket.
+        void wait_for_promotion_and_reconfigure(bool socket_free_wait = false);
 
         //! CRIU state-transfer quiesce point for the migration target: release transport,
         //! publish a restorable image entry, and block until restored + promoted. The process

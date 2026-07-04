@@ -383,23 +383,37 @@ std::string FMI::FT::LocalRankAgent::pack_rank_image(const std::string& dir,
 }
 
 void FMI::FT::LocalRankAgent::dump_rank(int pid, const std::string& dir) const {
-    // --tcp-close: the rank still holds its Redis control-plane connection; tell criu to close
-    //   it on restore (the ControlPlane reconnects lazily) instead of trying to repair it.
+    // No TCP flags: a quiesced rank holds no established TCP socket — the data plane was
+    //   released at the quiesce point and the control-plane connection is dropped between
+    //   promotion polls (socket-free wait). criu therefore has nothing to repair or close,
+    //   and the image is host-agnostic. The retry below covers the one residual window: a
+    //   dump that lands during the brief poll instant fails on the established Redis socket
+    //   and simply retries into the (much longer) closed window.
     // --manage-cgroups=ignore: don't record cgroup membership — a cross-host restore runs in a
     //   pod whose cgroup paths don't exist on the dump host, and the restored task simply stays
     //   in the restorer's cgroup (also correct for the same-host in-place path).
     // No --leave-stopped: criu ptrace-seizes, dumps, then kills and reaps the task, freeing the
     //   pid so the immediate restore can reclaim it.
     // Operator flags (FMI_CRIU_EXTRA_ARGS) are appended inside run_criu.
-    FMI::FT::run_criu({
-            "criu", "dump",
-            "-t", std::to_string(pid),
-            "-D", dir,
-            "-o", "dump.log",
-            "--shell-job",
-            "--tcp-close",
-            "--manage-cgroups=ignore"
-    });
+    const int attempts = 3;
+    for (int attempt = 1;; attempt++) {
+        try {
+            FMI::FT::run_criu({
+                    "criu", "dump",
+                    "-t", std::to_string(pid),
+                    "-D", dir,
+                    "-o", "dump.log",
+                    "--shell-job",
+                    "--manage-cgroups=ignore"
+            });
+            return;
+        } catch (const std::exception& e) {
+            if (attempt == attempts) {
+                throw;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(config.criu.poll_ms));
+        }
+    }
 }
 
 void FMI::FT::LocalRankAgent::restore_rank(const std::string& dir) const {
@@ -411,7 +425,6 @@ void FMI::FT::LocalRankAgent::restore_rank(const std::string& dir) const {
             "-D", dir,
             "-o", "restore.log",
             "--shell-job",
-            "--tcp-close",
             "--manage-cgroups=ignore",
             "--restore-detached"
     });

@@ -7,7 +7,6 @@
 #ifdef FMI_ENABLE_CRIU
 #include "../../include/ft/experimental/CriuRequirements.h"
 #include "../../include/ft/experimental/HostId.h"
-#include <csignal>
 #include <sys/prctl.h>
 #endif
 
@@ -40,18 +39,11 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         // the rank agent enforces the same rule via this shared helper.
         require_checkpoint_safe_data_plane(config);
 
-        // criu's --tcp-close drops the Redis control socket across checkpoint/restore, so the
-        // restored rank's next write would raise SIGPIPE and — under the default disposition — be
-        // killed before the ControlPlane can reconnect. Ignore SIGPIPE (process-global) so the
-        // write fails with EPIPE and command() reconnects transparently. Armed here, on the rank
-        // that is actually checkpointed, so it is captured in the image; never overwrite a handler
-        // the application already installed; intentionally not restored (the rank keeps this
-        // disposition for the rest of the FT session). Only this rank-side path needs it — the
-        // rank agent / orchestrator processes are not --tcp-closed, so they no longer over-arm it.
-        auto previous = std::signal(SIGPIPE, SIG_IGN);
-        if (previous != SIG_DFL && previous != SIG_ERR) {
-            std::signal(SIGPIPE, previous);
-        }
+        // No SIGPIPE guard needed here anymore: the quiesce path holds the control-plane
+        // connection closed while waiting to be dumped (socket-free wait), so the captured
+        // image contains no established TCP socket and the restored rank's first write goes
+        // to a freshly opened connection, never to a dead one. The data plane is covered by
+        // Direct's MSG_NOSIGNAL sends.
 
         // Advertise this rank's host in the CRIU registry now, at construction, so the
         // host-local rank agent can discover which ranks run on its host BEFORE they reach
@@ -175,14 +167,19 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
     int pid = static_cast<int>(getpid());
     control_plane->criu_mark_rank_quiesced(peer_id, pid, host_id, backend_name, target_epoch);
 
-    // Block until restored and promoted. The rank agent dumps this process here and restores
-    // it; the restored image resumes in this same loop, observes epoch N+1, and reconfigures
-    // exactly like a survivor — carrying preserved application memory.
-    wait_for_promotion_and_reconfigure();
+    // Block until restored and promoted, holding the control-plane socket closed between
+    // polls: with the data plane already released above, the dumped image then contains no
+    // established TCP socket at all, so criu needs neither --tcp-established nor --tcp-close,
+    // and the restored image's first control-plane call opens a fresh connection instead of
+    // writing to a dead socket (which is what used to require the SIGPIPE guard). The rank
+    // agent dumps this process here and restores it; the restored image resumes in this same
+    // loop, observes epoch N+1, and reconfigures exactly like a survivor — carrying preserved
+    // application memory.
+    wait_for_promotion_and_reconfigure(true);
 #endif
 }
 
-void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure() {
+void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure(bool socket_free_wait) {
     // Unbounded wait: the library never promotes its own epoch, so a waiting rank can only
     // wait for the external actor (orchestrator or rank agent) to do it. A migration that
     // never completes is the orchestrator's responsibility to detect and resolve, not a
@@ -190,7 +187,15 @@ void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure() 
     // exceptions from the control-plane client; only the "promotion never arrives" case waits.)
     std::uint64_t observed = active_epoch;
     FMI::Utils::poll_until(
-            [this, &observed]() { observed = control_plane->epoch(); return observed > active_epoch; },
+            [this, &observed, socket_free_wait]() {
+                observed = control_plane->epoch();
+                if (socket_free_wait && observed <= active_epoch) {
+                    // Not promoted yet: close the just-used connection before sleeping, so a
+                    // criu dump landing anywhere in the sleep captures a socket-free image.
+                    control_plane->disconnect();
+                }
+                return observed > active_epoch;
+            },
             0, config.poll_interval_ms);
 
     active_epoch = observed;

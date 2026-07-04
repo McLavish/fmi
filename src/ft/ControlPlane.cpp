@@ -101,6 +101,14 @@ struct FMI::FT::ControlPlane::Impl {
         context = connect_redis(config);
     }
 
+    void disconnect() {
+        std::lock_guard<std::mutex> lock(command_mutex);
+        if (context != nullptr) {
+            redisFree(context);
+            context = nullptr;
+        }
+    }
+
     ReplyPtr command(std::initializer_list<std::string> args) {
         return command(std::vector<std::string>(args));
     }
@@ -548,6 +556,12 @@ void FMI::FT::ControlPlane::register_rank(std::uint64_t epoch, FMI::Utils::peer_
 void FMI::FT::ControlPlane::set_rank_state(std::uint64_t epoch, FMI::Utils::peer_num rank, FMI::FT::RankState state) const {
 #if FMI_ENABLE_REDIS
     impl->command({"HSET", impl->states_key(epoch), std::to_string(rank), to_string(state)});
+#endif
+}
+
+void FMI::FT::ControlPlane::disconnect() {
+#if FMI_ENABLE_REDIS
+    impl->disconnect();
 #endif
 }
 
