@@ -6,6 +6,8 @@
 #include <thread>
 #include <netinet/tcp.h>
 #include <cmath>
+#include <cstring>
+#include <stdexcept>
 
 FMI::Comm::Direct::Direct(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params) {
     hostname = params["host"];
@@ -25,23 +27,47 @@ FMI::Comm::Direct::Direct(std::map<std::string, std::string> params, std::map<st
 
 void FMI::Comm::Direct::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     check_socket(rcpt_id, comm_name + std::to_string(peer_id) + "_" + std::to_string(rcpt_id));
-    long sent = ::send(sockets[rcpt_id], buf.buf, buf.len, 0);
-    if (sent == -1) {
-        if (errno == EAGAIN) {
-            throw Utils::Timeout();
+    // MSG_NOSIGNAL: a peer that closed mid-migration must surface as EPIPE, not kill the
+    // process with SIGPIPE. Loop: a blocking send under SO_SNDTIMEO may accept only part of
+    // a large buffer, and a silent short send would desynchronize the byte stream.
+    std::size_t sent = 0;
+    while (sent < buf.len) {
+        long n = ::send(sockets[rcpt_id], buf.buf + sent, buf.len - sent, MSG_NOSIGNAL);
+        if (n == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                throw Utils::Timeout();
+            }
+            throw std::runtime_error("Direct: send to peer " + std::to_string(rcpt_id) +
+                                     " failed after " + std::to_string(sent) + "/" +
+                                     std::to_string(buf.len) + " bytes: " + strerror(errno));
         }
-        BOOST_LOG_TRIVIAL(error) << peer_id << ": Error when sending: " << strerror(errno) ;
+        sent += static_cast<std::size_t>(n);
     }
 }
 
 void FMI::Comm::Direct::recv_object(channel_data buf, Utils::peer_num sender_id) {
     check_socket(sender_id, comm_name + std::to_string(sender_id) + "_" + std::to_string(peer_id));
-    long received = ::recv(sockets[sender_id], buf.buf, buf.len, MSG_WAITALL);
-    if (received == -1 || received < buf.len) {
-        if (errno == EAGAIN) {
-            throw Utils::Timeout();
+    // Never return with a partially filled buffer: EOF or an error mid-message must be loud.
+    // A silent short read here hands garbage to the collective and corrupts the reduction.
+    // MSG_WAITALL under SO_RCVTIMEO can legitimately return a partial chunk on timeout, so
+    // loop while progress is made and only throw Timeout when a call yields nothing.
+    std::size_t received = 0;
+    while (received < buf.len) {
+        long n = ::recv(sockets[sender_id], buf.buf + received, buf.len - received, MSG_WAITALL);
+        if (n == 0) {
+            throw std::runtime_error("Direct: connection to peer " + std::to_string(sender_id) +
+                                     " closed after " + std::to_string(received) + "/" +
+                                     std::to_string(buf.len) + " bytes");
         }
-        BOOST_LOG_TRIVIAL(error) << peer_id << ": Error when receiving: " << strerror(errno);
+        if (n == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                throw Utils::Timeout();
+            }
+            throw std::runtime_error("Direct: recv from peer " + std::to_string(sender_id) +
+                                     " failed after " + std::to_string(received) + "/" +
+                                     std::to_string(buf.len) + " bytes: " + strerror(errno));
+        }
+        received += static_cast<std::size_t>(n);
     }
 }
 
