@@ -69,7 +69,9 @@ namespace FMI {
             operation_runtime = std::make_shared<FMI::FT::TransparentMigrationRuntime>(
                     peer_id, resolved_worker_id, placement, active_epoch,
                     ft_config, control_plane, comm_name,
-                    [this](const std::string& new_name) { reconfigure_to_epoch(new_name); },
+                    [this](const std::string& new_name, const std::vector<FMI::Utils::peer_num>& moved) {
+                        reconfigure_to_epoch(new_name, moved);
+                    },
                     [this]() { prepare_channels_for_checkpoint(); },
                     [this]() { finalize_channels(); });
         } else {
@@ -92,14 +94,29 @@ namespace FMI {
         }
     }
 
-    void Communicator::reconfigure_to_epoch(const std::string& new_comm_name) {
-        for (auto const& [name, channel] : channels) {
-            channel->finalize();
-        }
-        channels.clear();
+    void Communicator::reconfigure_to_epoch(const std::string& new_comm_name,
+                                            const std::vector<FMI::Utils::peer_num>& moved_ranks) {
         this->comm_name = new_comm_name;
+        // Selective re-pair: channels that can reconfigure in place (Direct) keep their
+        // surviving peer connections and only drop links to migrated ranks — one migration no
+        // longer forces every survivor pair back through the TCPunch rendezvous. Channels that
+        // cannot carry state across epochs (ClientServer: per-epoch object names + operation
+        // counters) decline, get finalized (releasing their epoch-N objects), and are rebuilt.
+        for (auto it = channels.begin(); it != channels.end();) {
+            if (it->second->reconfigure_for_epoch(new_comm_name, moved_ranks)) {
+                ++it;
+            } else {
+                it->second->finalize();
+                it = channels.erase(it);
+            }
+        }
         Utils::Configuration config(config_path);
-        build_channels(config);
+        for (auto const& [backend_name, params] : config.get_active_channels()) {
+            if (channels.find(backend_name) == channels.end()) {
+                register_channel(backend_name,
+                    Comm::Channel::get_channel(backend_name, params.first, params.second));
+            }
+        }
         // PLANS.md step 4 seam: if CRIU state transfer is integrated into transparent
         // migration, restored rank state must be available before rebuilt channels are used.
         // ChannelPolicy holds a reference to the channels map; it sees the rebuilt entries automatically

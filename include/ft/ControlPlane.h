@@ -88,6 +88,13 @@ namespace FMI::FT {
         //! stuck migration is stuck) without any rank-side instrumentation.
         [[nodiscard]] std::vector<std::pair<FMI::Utils::peer_num, std::uint64_t>> operation_boundaries() const;
 
+        //! Ranks migrated by the cut that entered @p epoch (the pending set persisted by
+        //! promote_epoch, sorted). Rejoining ranks use it for selective re-pair: only links
+        //! involving a moved rank are reconnected; surviving connections are kept. Empty for
+        //! an epoch entered without any migration (e.g. a bare promote), where keeping every
+        //! connection is exactly right.
+        [[nodiscard]] std::vector<FMI::Utils::peer_num> moved_ranks(std::uint64_t epoch) const;
+
 #ifdef FMI_ENABLE_CRIU
         //! Remove the CRIU rank registry associated with this communicator name.
         void clear_criu_state();

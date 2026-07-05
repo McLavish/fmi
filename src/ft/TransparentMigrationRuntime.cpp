@@ -18,7 +18,7 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
         const FMI::Utils::FaultToleranceConfig& config,
         std::shared_ptr<FMI::FT::ControlPlane> control_plane,
         std::string base_comm_name,
-        std::function<void(const std::string&)> reconfigure_callback,
+        ReconfigureCallback reconfigure_callback,
         std::function<void()> prepare_for_checkpoint,
         std::function<void()> finalize_channels) :
         peer_id(peer_id),
@@ -201,8 +201,12 @@ void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure(bo
     active_epoch = observed;
     control_plane->join_epoch(active_epoch, peer_id, worker_id, placement);
     // After a CRIU restore the rebuilt channels must be ready before control returns to user
-    // code; reconfigure installs the epoch-N+1 channel set in place.
-    reconfigure_callback(epoch_comm_name(base_comm_name, active_epoch));
+    // code; reconfigure installs the epoch-N+1 channel set in place. The moved set persisted
+    // by the promotion tells the channels which links to drop (selective re-pair) — read here,
+    // on the cold path, so it works for every rejoin flavor: parked survivor, restored target,
+    // and a rank that slept through the whole cut.
+    auto moved = control_plane->moved_ranks(active_epoch);
+    reconfigure_callback(epoch_comm_name(base_comm_name, active_epoch), moved);
     // Every rank parked at the same consensus boundary and resumes the new epoch with the same
     // next operation, so resetting here keeps boundary indices cohort-aligned — including for a
     // fresh replacement rank, whose counter starts at 0 by construction.

@@ -1,6 +1,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "../include/fmi.h"
+#include "../include/comm/Direct.h"
 
 #include <array>
 #include <atomic>
@@ -15,6 +16,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace {
@@ -487,6 +489,159 @@ BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress) {
 // rendezvous flakiness.
 BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress_redis) {
     run_cut_timing_stress("fmi_ft_stress_redis_test.json", /*needs_tcpunchd=*/false);
+}
+
+// Selective re-pair: a migration cut must only tear down Direct links that involve a migrated
+// rank — surviving peer connections stay open across the epoch bump. Three ranks run as forked
+// processes (production-shaped, and required here: the TCPunch client keeps global pairing
+// state, so concurrent pairings must not share a process). Rank 1 is migrated once; every rank
+// records Direct::pairing_count() after warm-up and asserts on the number of NEW pairings its
+// process performed after the cut: survivors must re-establish strictly fewer links than they
+// own (their survivor<->survivor link is kept), which under a full rebuild would be violated.
+BOOST_AUTO_TEST_CASE(transparent_migration_selective_repair_keeps_survivor_links) {
+    constexpr unsigned int world = 3;
+    constexpr FMI::Utils::peer_num moved_rank = 1;
+    constexpr int warmup_iters = 12;
+    constexpr int total_iters = 40;
+
+    const std::string config = repo_config_path("fmi_ft_stress_test.json");
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+    if (!tcp_port_open("127.0.0.1", 10000)) {
+        BOOST_TEST_MESSAGE("Skipping: tcpunchd not reachable on 127.0.0.1:10000");
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(config, comm_name, world);
+    control_plane.clear_job_state();
+    control_plane.clear_criu_state();
+
+    // Child exit codes: 0 ok, 5 wrong allreduce value, 6 exception, 7 pairing assertion failed.
+    auto rank_body = [&](FMI::Utils::peer_num rank) -> int {
+        try {
+            unsigned int pairings_after_warmup = 0;
+            {
+                FMI::Communicator comm(rank, world, config, comm_name, 128,
+                                       "sr-worker-" + std::to_string(rank));
+                FMI::Utils::Function<int> sum([](int a, int b) { return a + b; }, true, true);
+                for (int it = 0; it < total_iters; it++) {
+                    FMI::Comm::Data<int> in = it * 10 + static_cast<int>(rank);
+                    FMI::Comm::Data<int> out;
+                    comm.allreduce(in, out, sum);
+                    if (out.get() != 30 * it + 3) {
+                        fprintf(stderr, "[sr rank %u] iter %d: got %d want %d\n",
+                                rank, it, out.get(), 30 * it + 3);
+                        return 5;
+                    }
+                    if (it == warmup_iters - 1) {
+                        pairings_after_warmup = FMI::Comm::Direct::pairing_count();
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+            }
+            unsigned int total = FMI::Comm::Direct::pairing_count();
+            unsigned int delta = total - pairings_after_warmup;
+            fprintf(stderr, "[sr rank %u] pairings: warmup=%u post-cut-delta=%u\n",
+                    rank, pairings_after_warmup, delta);
+            if (rank != moved_rank && !(delta < pairings_after_warmup)) {
+                // A survivor re-established as many links as it owns: nothing was kept.
+                return 7;
+            }
+            return 0;
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[sr rank %u] exception: %s\n", rank, e.what());
+            return 6;
+        } catch (const std::string& s) {
+            fprintf(stderr, "[sr rank %u] TCPunch failure: %s\n", rank, s.c_str());
+            return 6;
+        } catch (...) {
+            fprintf(stderr, "[sr rank %u] unknown exception\n", rank);
+            return 6;
+        }
+    };
+
+    std::vector<pid_t> children;
+    for (FMI::Utils::peer_num rank = 0; rank < world; rank++) {
+        pid_t pid = fork();
+        BOOST_REQUIRE(pid >= 0);
+        if (pid == 0) {
+            // Never return into Boost from a child: run the rank body and exit immediately.
+            std::_Exit(rank_body(rank));
+        }
+        children.push_back(pid);
+    }
+
+    // Orchestrate one cut of moved_rank: wait until every rank is past warm-up (visible via the
+    // piggybacked boundary telemetry), request, promote when the gate opens, then require at
+    // least 3 post-promotion operations (boundaries reset to 0 at rejoin) before the ranks run
+    // out their fixed iteration budget.
+    auto all_boundaries_at_least = [&](std::uint64_t minimum) {
+        auto boundaries = control_plane.operation_boundaries();
+        if (boundaries.size() < world) {
+            return false;
+        }
+        for (const auto& [rank, boundary] : boundaries) {
+            (void) rank;
+            if (boundary < minimum) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    bool warm = FMI::Utils::poll_until([&]() { return all_boundaries_at_least(warmup_iters); }, 30000, 5);
+    std::uint64_t epoch = control_plane.epoch();
+    bool promoted = false;
+    if (warm) {
+        control_plane.request_migration(moved_rank);
+        promoted = FMI::Utils::poll_until(
+                [&]() {
+                    try {
+                        control_plane.promote_epoch(epoch + 1);
+                        return true;
+                    } catch (const std::exception&) {
+                        return false;
+                    }
+                },
+                30000, 10);
+    }
+    bool resumed = promoted && FMI::Utils::poll_until([&]() { return all_boundaries_at_least(3); }, 30000, 5);
+
+    // Reap the children (bounded); kill stragglers so the suite can never hang here.
+    std::vector<int> exit_codes(world, -1);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    for (FMI::Utils::peer_num rank = 0; rank < world; rank++) {
+        while (true) {
+            int status = 0;
+            pid_t done = waitpid(children[rank], &status, WNOHANG);
+            if (done == children[rank]) {
+                exit_codes[rank] = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+                break;
+            }
+            if (std::chrono::steady_clock::now() > deadline) {
+                kill(children[rank], SIGKILL);
+                waitpid(children[rank], &status, 0);
+                exit_codes[rank] = -2;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    BOOST_CHECK_MESSAGE(warm, "ranks never reached the warm-up boundary");
+    BOOST_CHECK_MESSAGE(promoted, "the cut never became promotable");
+    BOOST_CHECK_MESSAGE(resumed, "ranks did not resume operations at the new epoch");
+    for (FMI::Utils::peer_num rank = 0; rank < world; rank++) {
+        BOOST_CHECK_MESSAGE(exit_codes[rank] == 0,
+                            "rank " << rank << " exited with " << exit_codes[rank]
+                            << " (5=value mismatch, 6=exception, 7=no link was kept, -2=hung)");
+    }
+
+    control_plane.clear_job_state();
+    control_plane.clear_criu_state();
 }
 #endif
 

@@ -3,6 +3,8 @@
 
 #include "PeerToPeer.h"
 
+#include <atomic>
+
 namespace FMI::Comm {
     //! Channel that uses the TCPunch TCP NAT Hole Punching Library for connection establishment.
     class Direct : public PeerToPeer {
@@ -20,6 +22,19 @@ namespace FMI::Comm {
         void finalize() override;
 
         void prepare_for_checkpoint() override;
+
+        //! Selective re-pair: close only the links to migrated ranks and adopt the new
+        //! epoch-qualified name; surviving peer connections stay open. Safe because the
+        //! consensus cut guarantees every operation below the cut completed everywhere before
+        //! anyone reconfigures, so a kept stream is message-aligned with no epoch-N bytes in
+        //! flight; the re-established (moved) links pair under epoch-qualified names, which
+        //! preserves the fencing invariant for everything that is rebuilt.
+        bool reconfigure_for_epoch(const std::string& new_comm_name,
+                                   const std::vector<FMI::Utils::peer_num>& moved_ranks) override;
+
+        //! Process-wide count of completed TCPunch pairings. Cheap telemetry for measuring
+        //! reconfiguration cost; also what the selective re-pair test asserts on.
+        static unsigned int pairing_count();
 
     private:
         //! Contains the socket file descriptor for the communication with the peers.

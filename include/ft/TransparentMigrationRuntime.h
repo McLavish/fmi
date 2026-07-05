@@ -10,10 +10,16 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace FMI::FT {
     class TransparentMigrationRuntime : public OperationRuntime {
     public:
+        //! The reconfigure callback receives the epoch-qualified communicator name plus the
+        //! ranks migrated by the cut (for selective re-pair of the data plane).
+        using ReconfigureCallback =
+            std::function<void(const std::string&, const std::vector<FMI::Utils::peer_num>&)>;
+
         TransparentMigrationRuntime(
             FMI::Utils::peer_num peer_id,
             std::string worker_id,
@@ -22,7 +28,7 @@ namespace FMI::FT {
             const FMI::Utils::FaultToleranceConfig& config,
             std::shared_ptr<FMI::FT::ControlPlane> control_plane,
             std::string base_comm_name,
-            std::function<void(const std::string&)> reconfigure_callback,
+            ReconfigureCallback reconfigure_callback,
             std::function<void()> prepare_for_checkpoint = {},
             std::function<void()> finalize_channels = {});
 
@@ -37,7 +43,7 @@ namespace FMI::FT {
         FMI::Utils::FaultToleranceConfig config;
         std::shared_ptr<FMI::FT::ControlPlane> control_plane;
         std::string base_comm_name;
-        std::function<void(const std::string&)> reconfigure_callback;
+        ReconfigureCallback reconfigure_callback;
         std::function<void()> prepare_for_checkpoint;
         std::function<void()> finalize_channels;
 

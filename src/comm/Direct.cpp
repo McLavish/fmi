@@ -71,6 +71,14 @@ void FMI::Comm::Direct::recv_object(channel_data buf, Utils::peer_num sender_id)
     }
 }
 
+namespace {
+    std::atomic<unsigned int> total_pairings{0};
+}
+
+unsigned int FMI::Comm::Direct::pairing_count() {
+    return total_pairings.load();
+}
+
 void FMI::Comm::Direct::check_socket(FMI::Utils::peer_num partner_id, std::string pair_name) {
     if (sockets.empty()) {
         sockets = std::vector<int>(num_peers, -1);
@@ -78,6 +86,7 @@ void FMI::Comm::Direct::check_socket(FMI::Utils::peer_num partner_id, std::strin
     if (sockets[partner_id] == -1) {
         try {
             sockets[partner_id] = pair(pair_name, hostname, port, max_timeout);
+            total_pairings.fetch_add(1);
         } catch (Timeout) {
             throw Utils::Timeout();
         }
@@ -118,6 +127,18 @@ void FMI::Comm::Direct::finalize() {
 
 void FMI::Comm::Direct::prepare_for_checkpoint() {
     close_sockets();
+}
+
+bool FMI::Comm::Direct::reconfigure_for_epoch(const std::string& new_comm_name,
+                                              const std::vector<Utils::peer_num>& moved_ranks) {
+    for (auto rank : moved_ranks) {
+        if (rank < sockets.size() && sockets[rank] >= 0) {
+            close(sockets[rank]);
+            sockets[rank] = -1;
+        }
+    }
+    set_comm_name(new_comm_name);
+    return true;
 }
 
 void FMI::Comm::Direct::close_sockets() {

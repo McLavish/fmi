@@ -217,6 +217,10 @@ struct FMI::FT::ControlPlane::Impl {
         return prefix() + "epoch:" + std::to_string(epoch) + ":placement";
     }
 
+    [[nodiscard]] std::string moved_key(std::uint64_t epoch) const {
+        return prefix() + "epoch:" + std::to_string(epoch) + ":moved";
+    }
+
 #ifdef FMI_ENABLE_CRIU
     [[nodiscard]] std::string criu_prefix() const {
         return prefix() + "criu:";
@@ -515,6 +519,26 @@ FMI::FT::ControlPlane::OperationSnapshot FMI::FT::ControlPlane::observe_operatio
 #endif
 }
 
+std::vector<FMI::Utils::peer_num> FMI::FT::ControlPlane::moved_ranks(std::uint64_t epoch) const {
+#if FMI_ENABLE_REDIS
+    std::vector<FMI::Utils::peer_num> moved;
+    auto reply = impl->command({"SMEMBERS", impl->moved_key(epoch)});
+    if (reply->type == REDIS_REPLY_ARRAY) {
+        for (std::size_t i = 0; i < reply->elements; i++) {
+            auto* member = reply->element[i];
+            if (member != nullptr && member->str != nullptr) {
+                moved.push_back(static_cast<FMI::Utils::peer_num>(std::stoul(member->str)));
+            }
+        }
+    }
+    std::sort(moved.begin(), moved.end());
+    return moved;
+#else
+    (void) epoch;
+    return {};
+#endif
+}
+
 std::vector<std::pair<FMI::Utils::peer_num, std::uint64_t>> FMI::FT::ControlPlane::operation_boundaries() const {
 #if FMI_ENABLE_REDIS
     std::vector<std::pair<FMI::Utils::peer_num, std::uint64_t>> boundaries;
@@ -579,10 +603,15 @@ bool FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
     // new epoch — so without this they accumulate in Redis for the lifetime of the job. Building
     // the keys from `current` (not next-1) makes the cleanup correct regardless of step size.
     // KEYS[1]=meta, KEYS[2]=pending, KEYS[3]=boundaries; ARGV[1]=next epoch, ARGV[2]=epoch-key
-    // prefix, ARGV[3..5]=the three per-epoch suffixes, ARGV[6]=the QUIESCED wire string.
+    // prefix, ARGV[3..5]=the three per-epoch suffixes, ARGV[6]=the QUIESCED wire string,
+    // ARGV[7]=the ":moved" suffix.
     // The consensus cut state (cut_index + published boundaries) belongs to the epoch being
     // left: every rank resets its boundary counter to 0 when it rejoins, so both are cleared
     // here, atomically with the promotion that releases the cut.
+    // The pending set is persisted as the entered epoch's "moved" set before it is cleared:
+    // rejoining ranks read it to reconnect only the links that involve a migrated rank and
+    // keep their surviving connections (selective re-pair). Written atomically with the
+    // promotion so even a rank that slept through the whole cut can still learn who moved.
     static const std::string script =
             "local current = redis.call('HGET', KEYS[1], 'current_epoch') "
             "if not current then current = '0' end "
@@ -597,14 +626,18 @@ bool FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
             "end "
             "redis.call('HSET', KEYS[1], 'current_epoch', ARGV[1]) "
             "redis.call('HDEL', KEYS[1], 'cut_index') "
+            "local moved = ARGV[2]..ARGV[1]..ARGV[7] "
+            "redis.call('DEL', moved) "
+            "for i = 1, #pending do redis.call('SADD', moved, pending[i]) end "
             "redis.call('DEL', KEYS[2]) "
             "redis.call('DEL', KEYS[3]) "
-            "redis.call('DEL', ARGV[2]..current..ARGV[3], ARGV[2]..current..ARGV[4], ARGV[2]..current..ARGV[5]) "
+            "redis.call('DEL', ARGV[2]..current..ARGV[3], ARGV[2]..current..ARGV[4], "
+            "ARGV[2]..current..ARGV[5], ARGV[2]..current..ARGV[7]) "
             "return 1";
     auto reply = impl->command({"EVAL", script, "3", impl->meta_key(), impl->pending_key(),
                                 impl->boundaries_key(), std::to_string(next_epoch),
                                 impl->prefix() + "epoch:", ":members",
-                                ":states", ":placement", to_string(RankState::Quiesced)});
+                                ":states", ":placement", to_string(RankState::Quiesced), ":moved"});
     return reply->integer == 1;
 #else
     (void) next_epoch;

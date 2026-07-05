@@ -174,8 +174,12 @@ namespace FMI {
         //! Returns the communicator name passed to the underlying channels.
         [[nodiscard]] std::string get_comm_name() const { return comm_name; }
 
-        //! Rebuild all channels under a new epoch-fenced comm_name (in-place; object identity preserved).
-        void reconfigure_to_epoch(const std::string& new_comm_name);
+        //! Reconfigure channels under a new epoch-fenced comm_name (in-place; object identity of
+        //! the Communicator preserved). Channels that support in-place epoch reconfiguration
+        //! (Direct) keep their surviving peer connections and drop only links to @p moved_ranks;
+        //! the rest are finalized and rebuilt from scratch under the new name.
+        void reconfigure_to_epoch(const std::string& new_comm_name,
+                                  const std::vector<FMI::Utils::peer_num>& moved_ranks);
 
     private:
         std::shared_ptr<FMI::Utils::ChannelPolicy> policy;

@@ -327,7 +327,7 @@ BOOST_AUTO_TEST_CASE(criu_runtime_leaves_sigpipe_disposition_untouched) {
     std::signal(SIGPIPE, SIG_DFL);
     {
         FMI::FT::TransparentMigrationRuntime runtime(0, "worker", "", 0, config, nullptr, "comm",
-                                                     [](const std::string&) {}, []() {});
+                                                     [](const std::string&, const std::vector<FMI::Utils::peer_num>&) {}, []() {});
         BOOST_CHECK(current_sigpipe_handler() == SIG_DFL);
     }
 
@@ -335,7 +335,7 @@ BOOST_AUTO_TEST_CASE(criu_runtime_leaves_sigpipe_disposition_untouched) {
     std::signal(SIGPIPE, sigpipe_probe_handler);
     {
         FMI::FT::TransparentMigrationRuntime runtime(0, "worker", "", 0, config, nullptr, "comm",
-                                                     [](const std::string&) {}, []() {});
+                                                     [](const std::string&, const std::vector<FMI::Utils::peer_num>&) {}, []() {});
         BOOST_CHECK(current_sigpipe_handler() == sigpipe_probe_handler);
     }
 
@@ -454,7 +454,7 @@ BOOST_AUTO_TEST_CASE(runtime_checkpoint_quiesce_publishes_image_then_reconfigure
 
     FMI::FT::TransparentMigrationRuntime runtime(
             0, "worker-0", "", 0, config, control_plane, comm_name,
-            [&](const std::string& new_name) {
+            [&](const std::string& new_name, const std::vector<FMI::Utils::peer_num>&) {
                 {
                     std::lock_guard<std::mutex> lock(name_mutex);
                     reconfigured_name = new_name;
@@ -545,20 +545,20 @@ BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_non_checkpoint_safe_data_backen
     BOOST_CHECK_THROW(
             FMI::FT::TransparentMigrationRuntime(
                     0, "worker", "", 0, config, nullptr, "comm",
-                    [](const std::string&) {}, []() {}),
+                    [](const std::string&, const std::vector<FMI::Utils::peer_num>&) {}, []() {}),
             std::runtime_error);
 
     config.preferred_data_backend = "Direct";
     BOOST_CHECK_NO_THROW(
             FMI::FT::TransparentMigrationRuntime(
                     0, "worker", "", 0, config, nullptr, "comm",
-                    [](const std::string&) {}, []() {}));
+                    [](const std::string&, const std::vector<FMI::Utils::peer_num>&) {}, []() {}));
 
     config.preferred_data_backend = "Redis";
     BOOST_CHECK_NO_THROW(
             FMI::FT::TransparentMigrationRuntime(
                     0, "worker", "", 0, config, nullptr, "comm",
-                    [](const std::string&) {}, []() {}));
+                    [](const std::string&, const std::vector<FMI::Utils::peer_num>&) {}, []() {}));
 }
 
 BOOST_AUTO_TEST_CASE(criu_state_transfer_rejects_extra_enabled_backends) {
@@ -761,7 +761,7 @@ BOOST_AUTO_TEST_CASE(runtime_advertises_host_in_criu_registry_on_construction) {
 
     FMI::FT::TransparentMigrationRuntime runtime(
             0, "worker-0", "", 0, config, control_plane, comm_name,
-            [](const std::string&) {}, []() {});
+            [](const std::string&, const std::vector<FMI::Utils::peer_num>&) {}, []() {});
 
     bool advertised = false;
     for (const auto& info : control_plane->criu_rank_info()) {
