@@ -77,7 +77,11 @@ A host-local rank agent (`FMI::FT::LocalRankAgent`, CLI `fmi-rank-agent`) then:
 4. promotes the epoch to `N+1`.
 
 The restored rank and the survivors both observe epoch `N+1` and reconfigure their channels under
-the new epoch-qualified name; `Direct` re-pairs lazily. Because the dumped image contains no
+the new epoch-qualified name. Reconfiguration is **selective**: promotion persists the migrated
+set, and `Direct` keeps surviving peer connections open, closing and lazily re-pairing only the
+links that involve a migrated rank (safe because at a consensus boundary a kept stream has no
+old-epoch bytes in flight). ClientServer backends are rebuilt in full, since their object names
+and operation counters are per-epoch. Because the dumped image contains no
 established TCP socket, criu needs neither `--tcp-established` nor `--tcp-close`, the image is
 host-agnostic, and the restored rank's first control-plane call simply opens a fresh Redis
 connection (no dead-socket write, hence no SIGPIPE handling anywhere). The rank agent retries a
