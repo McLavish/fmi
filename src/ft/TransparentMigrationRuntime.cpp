@@ -1,5 +1,6 @@
 #include "../../include/ft/TransparentMigrationRuntime.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -76,10 +77,14 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     // the consensus cut boundary are read in a single script, so a concurrent promotion (which
     // bumps the epoch and clears all of them in one script on its side) can never slip between
     // the reads — and the steady state costs exactly one Redis round-trip instead of three.
-    // The same round-trip publishes this rank's boundary index (progress telemetry).
-    auto snapshot = control_plane->observe_operation(peer_id, boundary_index);
+    // The same round-trip publishes this rank's boundary index (progress telemetry), guarded
+    // by active_epoch so a rank observing a stale epoch cannot pollute the new epoch's hash.
+    auto snapshot = control_plane->observe_operation(peer_id, boundary_index, active_epoch);
     if (snapshot.epoch > active_epoch) {
-        // A cut completed since our last boundary: rejoin at the new epoch first. If this rank
+        // A cut completed since our last boundary: rejoin at the new epoch. Safe even though
+        // this rank never saw the cut itself — promote_epoch's cut gate guarantees the epoch
+        // only advances once every member (this rank included) published a boundary >= the
+        // cut, so a rank taking this branch was parked at the cut, not below it. If this rank
         // is also pending for a NEWER cut, the next boundary's snapshot handles it.
         wait_for_promotion_and_reconfigure();
         return;
@@ -90,13 +95,14 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
     }
 
     // Consensus cut: the request only takes effect at cut_index, fixed atomically by the first
-    // rank that observed it (to that rank's boundary + 1). A rank below the cut keeps executing
-    // operations — including the migration target — because a slower peer may already be inside
-    // one of those operations and would otherwise block forever on a target that quiesced early
-    // (or read EOF mid-collective from its closed sockets). Every rank therefore parks at the
-    // same boundary, which is what makes closing the data-plane sockets at the quiesce point
-    // safe: at a consensus boundary no operation is in flight anywhere.
-    if (snapshot.cut_index > 0 && boundary_index < snapshot.cut_index) {
+    // rank that observed it. A rank below the cut keeps executing operations — including the
+    // migration target — because a slower peer may already be inside one of those operations
+    // and would otherwise block forever on a target that quiesced early (or read EOF
+    // mid-collective from its closed sockets). Every rank therefore parks at the same
+    // boundary, which is what makes closing the data-plane sockets at the quiesce point safe:
+    // at a consensus boundary no operation is in flight anywhere. (cut_proposed distinguishes
+    // a legitimate cut at boundary 0 from "no cut fixed yet".)
+    if (snapshot.cut_proposed && boundary_index < snapshot.cut_index) {
         return;
     }
 
@@ -112,16 +118,14 @@ void FMI::FT::TransparentMigrationRuntime::enter_operation() {
         // The QUIESCED marker is what promote_epoch's gate waits for, so the orchestrator can
         // only promote after this write — the exiting process can never race its replacement.
         control_plane->mark_rank_quiesced(active_epoch, peer_id);
-        // std::exit does not unwind, so ~Communicator (which finalizes channels) never runs.
-        // Finalize here so a Redis/S3 data plane deletes this rank's epoch-N objects instead of
-        // leaking them on every migration. Best-effort: we are terminating regardless.
-        if (finalize_channels) {
-            try {
-                finalize_channels();
-            } catch (...) {
-                // ignore — the rank is exiting
-            }
-        }
+        // Deliberately NO finalize_channels() here: this rank quiesces at the consensus cut
+        // having completed operations its slower peers may still be running — on a
+        // ClientServer data plane (Redis/S3) they still need to download this rank's uploaded
+        // objects for those operations, and finalize would delete them out from under the
+        // download loop (which then times out). The objects only become garbage once every
+        // rank passes the cut, and by then this process is gone — so its epoch-N objects are
+        // left behind by design (epoch-qualified names make them inert; job-level cleanup
+        // reclaims the store). Process exit releases sockets and connections on its own.
         std::exit(0);
     }
 
@@ -141,7 +145,8 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
     std::uint64_t target_epoch = active_epoch + 1;
     // Data backend name recorded in the CRIU image registry, and this host's identity for
     // same-host scoping. Resolved here so non-CRIU migration pays for neither. The constructor
-    // guarantees preferred_data_backend == "Direct" on this path, so it is recorded truthfully.
+    // guarantees a checkpoint-safe preferred_data_backend (Direct or Redis) on this path, so
+    // it is recorded truthfully.
     std::string backend_name = config.preferred_data_backend;
     std::string host_id = FMI::FT::resolve_host_id(config);
 
@@ -185,30 +190,51 @@ void FMI::FT::TransparentMigrationRuntime::wait_for_promotion_and_reconfigure(bo
     // never completes is the orchestrator's responsibility to detect and resolve, not a
     // condition the library times out on. (Redis connectivity failures still surface as
     // exceptions from the control-plane client; only the "promotion never arrives" case waits.)
-    std::uint64_t observed = active_epoch;
-    FMI::Utils::poll_until(
-            [this, &observed, socket_free_wait]() {
-                observed = control_plane->epoch();
-                if (socket_free_wait && observed <= active_epoch) {
-                    // Not promoted yet: close the just-used connection before sleeping, so a
-                    // criu dump landing anywhere in the sleep captures a socket-free image.
-                    control_plane->disconnect();
-                }
-                return observed > active_epoch;
-            },
-            0, config.poll_interval_ms);
+    //
+    // The outer loop re-checks the epoch after reconfiguring: if another promotion landed
+    // while this rank was joining/rebuilding, it rejoins again immediately instead of
+    // returning to user code configured for an already-stale epoch. Each pass unions the
+    // moved sets of every epoch crossed — a rank that skips epochs (e.g. it was slow to poll
+    // while two back-to-back cuts completed) must drop its links to EVERY rank migrated in
+    // between, not only the last cut's, or it would keep an established-but-dead socket to an
+    // earlier cut's target and read EOF from it mid-collective later.
+    while (true) {
+        std::uint64_t observed = active_epoch;
+        FMI::Utils::poll_until(
+                [this, &observed, socket_free_wait]() {
+                    observed = control_plane->epoch();
+                    if (socket_free_wait && observed <= active_epoch) {
+                        // Not promoted yet: close the just-used connection before sleeping, so
+                        // a criu dump landing anywhere in the sleep captures a socket-free
+                        // image.
+                        control_plane->disconnect();
+                    }
+                    return observed > active_epoch;
+                },
+                0, config.poll_interval_ms);
 
-    active_epoch = observed;
-    control_plane->join_epoch(active_epoch, peer_id, worker_id, placement);
-    // After a CRIU restore the rebuilt channels must be ready before control returns to user
-    // code; reconfigure installs the epoch-N+1 channel set in place. The moved set persisted
-    // by the promotion tells the channels which links to drop (selective re-pair) — read here,
-    // on the cold path, so it works for every rejoin flavor: parked survivor, restored target,
-    // and a rank that slept through the whole cut.
-    auto moved = control_plane->moved_ranks(active_epoch);
-    reconfigure_callback(epoch_comm_name(base_comm_name, active_epoch), moved);
-    // Every rank parked at the same consensus boundary and resumes the new epoch with the same
-    // next operation, so resetting here keeps boundary indices cohort-aligned — including for a
-    // fresh replacement rank, whose counter starts at 0 by construction.
-    boundary_index = 0;
+        std::vector<FMI::Utils::peer_num> moved;
+        for (std::uint64_t epoch = active_epoch + 1; epoch <= observed; epoch++) {
+            auto epoch_moved = control_plane->moved_ranks(epoch);
+            moved.insert(moved.end(), epoch_moved.begin(), epoch_moved.end());
+        }
+        std::sort(moved.begin(), moved.end());
+        moved.erase(std::unique(moved.begin(), moved.end()), moved.end());
+
+        active_epoch = observed;
+        control_plane->join_epoch(active_epoch, peer_id, worker_id, placement);
+        // After a CRIU restore the rebuilt channels must be ready before control returns to
+        // user code; reconfigure installs the new epoch's channel set in place, dropping only
+        // the links in the unioned moved set (selective re-pair).
+        reconfigure_callback(epoch_comm_name(base_comm_name, active_epoch), moved);
+        // Every rank parked at the same consensus boundary and resumes the new epoch with the
+        // same next operation, so resetting here keeps boundary indices cohort-aligned —
+        // including for a fresh replacement rank, whose counter starts at 0 by construction.
+        boundary_index = 0;
+
+        if (control_plane->epoch() == active_epoch) {
+            return;
+        }
+        // Another promotion landed mid-rejoin: loop and catch up before touching user data.
+    }
 }

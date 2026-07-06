@@ -83,7 +83,7 @@ void FMI::FT::LocalRankAgent::ensure_migration_mode() const {
     if (config.state_transfer != "criu") {
         throw std::runtime_error("Rank agent requires fault_tolerance.state_transfer=\"criu\"");
     }
-    // Same Direct-only data-plane rule the rank-side runtime enforces (shared helper).
+    // Same checkpoint-safe data-plane rule the rank-side runtime enforces (shared helper).
     require_checkpoint_safe_data_plane(config);
 }
 
@@ -158,8 +158,30 @@ std::uint64_t FMI::FT::LocalRankAgent::migrate_ranks(const std::vector<FMI::Util
     // and reconfigure their channels under the new epoch-qualified communicator name. A false
     // return means another actor already advanced the epoch to (at least) the target; the
     // restored ranks are released by that promotion just the same.
-    control_plane->promote_epoch(target_epoch);
+    promote_when_gate_opens(target_epoch);
     return target_epoch;
+}
+
+void FMI::FT::LocalRankAgent::promote_when_gate_opens(std::uint64_t target_epoch) const {
+    std::exception_ptr last_error;
+    bool promoted = FMI::Utils::poll_until(
+            [&]() {
+                try {
+                    control_plane->promote_epoch(target_epoch);
+                    return true;
+                } catch (const std::exception&) {
+                    // Gate closed (a pending rank not yet QUIESCED, or a survivor not yet at
+                    // the consensus cut boundary): both clear on their own — retry.
+                    last_error = std::current_exception();
+                    return false;
+                }
+            },
+            config.criu.quiesce_timeout_ms, config.criu.poll_ms);
+    if (!promoted) {
+        // The gate never opened within the quiesce timeout: surface the control plane's last
+        // explanation (it names the rank holding the gate) so the orchestrator can act.
+        std::rethrow_exception(last_error);
+    }
 }
 
 std::vector<FMI::Utils::peer_num> FMI::FT::LocalRankAgent::discover_local_ranks() const {
@@ -290,7 +312,7 @@ std::uint64_t FMI::FT::LocalRankAgent::promote_next() const {
     std::uint64_t target_epoch = control_plane->epoch() + 1;
     // A false return means another actor already advanced the epoch to (at least) the target;
     // the parked ranks are released by that promotion just the same.
-    control_plane->promote_epoch(target_epoch);
+    promote_when_gate_opens(target_epoch);
     return target_epoch;
 }
 

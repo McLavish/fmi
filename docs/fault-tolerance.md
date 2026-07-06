@@ -22,8 +22,14 @@ What it does:
   round-trip), chosen past any operation another rank may already be inside. Every rank —
   the target included — keeps executing operations below the cut and parks exactly at it,
   so no rank is ever left blocked inside an operation the target never joins. The same
-  round-trip publishes each rank's operation boundary (readable via
-  `ControlPlane::operation_boundaries()` for progress/diagnostics).
+  round-trip publishes each rank's operation boundary (epoch-guarded, and readable via
+  `ControlPlane::operation_boundaries()` for progress/diagnostics), and **promotion enforces
+  the cut**: when a cut was fixed, `promote_epoch` refuses until every member of the epoch has
+  published a boundary at the cut — so the epoch can never advance past a slow rank, and all
+  ranks always resume the new epoch at the same operation. Ranks below the cut can always
+  finish to it (their peers completed those operations, so anything they still need is
+  already in socket buffers / the object store), so this gate opens on its own; orchestrators
+  retry exactly as for the quiescence gate.
 - uses `Direct`/TCP as the data plane and Redis for FT control
 
 What it does not do:
@@ -51,6 +57,12 @@ the same logical rank, which starts fresh at epoch `N+1`. This is appropriate fo
 recomputable workloads. The heterogeneous LocalStack EC2→Lambda runbook
 (`runbooks/localstack-python311-redis/`) exercises this path: the replacement Lambda runs with
 `resume=True` and recomputes phase 1.
+
+The exiting rank deliberately does **not** delete its data-plane objects (Redis/S3): it
+quiesces at the consensus cut having completed operations its slower peers may still be
+running, and they still need to download its uploads for those operations. Its epoch-`N`
+objects are left behind (epoch-qualified names make them inert) and are reclaimed by job-level
+cleanup of the store.
 
 ### `state_transfer = "criu"` — transparent state transfer (same-host v1)
 

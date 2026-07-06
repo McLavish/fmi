@@ -84,7 +84,7 @@ namespace FMI::FT {
 
     private:
         //! Preconditions for driving a CRIU migration: fault tolerance enabled, Redis control
-        //! plane, state_transfer="criu", and a checkpoint-safe Direct data plane.
+        //! plane, state_transfer="criu", and a checkpoint-safe data plane (Direct or Redis).
         void ensure_migration_mode() const;
         //! Block until every rank in @p ranks has published a checkpoint-ready image (QUIESCED for
         //! @p target_epoch, pid>0) on this host, returning their registry entries. Throws
@@ -94,6 +94,12 @@ namespace FMI::FT {
         //! Discover the ranks advertised on this host that are eligible for a new cut (skipping
         //! leftovers parked Quiesced for an epoch that has already passed).
         [[nodiscard]] std::vector<FMI::Utils::peer_num> discover_local_ranks() const;
+        //! Promote to @p target_epoch, retrying while the control-plane gates are closed.
+        //! Both gates are transient by construction — the pending ranks' quiescence is already
+        //! guaranteed by the time the agent promotes, and survivors reach the consensus cut on
+        //! their own (their remaining below-cut operations are completable without the target).
+        //! Bounded by the quiesce timeout; rethrows the last gate error on expiry.
+        void promote_when_gate_opens(std::uint64_t target_epoch) const;
         [[nodiscard]] std::string rank_image_dir(std::uint64_t target_epoch, FMI::Utils::peer_num rank) const;
         void dump_rank(int pid, const std::string& dir) const;
         void restore_rank(const std::string& dir) const;

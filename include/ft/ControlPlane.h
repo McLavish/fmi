@@ -55,6 +55,15 @@ namespace FMI::FT {
         //! the ordering requirement of the protocol impossible to violate: promoting before the
         //! target rank reached its quiesce point would otherwise let the old process rejoin the
         //! new epoch as a survivor next to its replacement (two processes owning one logical rank).
+        //!
+        //! When a consensus cut boundary was fixed, promotion is ALSO gated on every member of
+        //! the epoch having published a boundary >= the cut. Without this, a slow rank still
+        //! below the cut when the epoch advanced would rejoin early — having completed fewer
+        //! operations than its cohort — and the ranks would execute different user operations
+        //! as the "same" collective forever after. Ranks below the cut can always finish to it
+        //! (their peers completed those operations, so everything they still need is already
+        //! sent/uploaded), so the gate opening is only a matter of time; callers retry exactly
+        //! like they do for the quiescence gate.
         bool promote_epoch(std::uint64_t next_epoch) const;
 
         //! Mark @p rank QUIESCED in @p epoch's state hash: the rank-side quiesce marker that
@@ -92,7 +101,10 @@ namespace FMI::FT {
         //! promote_epoch, sorted). Rejoining ranks use it for selective re-pair: only links
         //! involving a moved rank are reconnected; surviving connections are kept. Empty for
         //! an epoch entered without any migration (e.g. a bare promote), where keeping every
-        //! connection is exactly right.
+        //! connection is exactly right. Moved sets are retained until clear_job_state (one
+        //! small set per cut) so a rank that crosses several epochs in one rejoin can union
+        //! the moved sets of every epoch it skipped — deleting them at the next promotion
+        //! would leave such a rank holding a kept-but-dead socket to an earlier cut's target.
         [[nodiscard]] std::vector<FMI::Utils::peer_num> moved_ranks(std::uint64_t epoch) const;
 
 #ifdef FMI_ENABLE_CRIU
@@ -129,16 +141,24 @@ namespace FMI::FT {
             std::uint64_t epoch = 0;
             bool any_pending = false;
             bool self_pending = false;
-            //! Boundary index the pending cut takes effect at (0 = no cut proposed). Set
-            //! atomically by the first rank that observes the pending set at a boundary, to
-            //! that rank's boundary + 1: at proposal time no rank can have passed that
-            //! boundary, and any rank already inside operation `cut_index - 1` still gets the
-            //! target's participation, because every rank — the target included — keeps
-            //! executing operations while its own boundary is below the cut.
+            //! True when a consensus cut boundary has been fixed for the pending cut. Kept
+            //! separate from cut_index because 0 is a legitimate cut boundary (a cut proposed
+            //! before any operation ran); conflating "cut at 0" with "no cut" would let ranks
+            //! park at differing boundaries in exactly the race the cut exists to prevent.
+            bool cut_proposed = false;
+            //! Boundary index the pending cut takes effect at (valid iff cut_proposed). Set
+            //! atomically by the first same-epoch rank that observes the pending set at a
+            //! boundary: the proposer's boundary, bumped past any other rank's published
+            //! boundary. Any rank already inside a lower operation still gets the target's
+            //! participation, because every rank — the target included — keeps executing
+            //! operations while its own boundary is below the cut.
             std::uint64_t cut_index = 0;
         };
-        //! Publish @p boundary for @p rank and read the snapshot, all in one script/round-trip.
-        [[nodiscard]] OperationSnapshot observe_operation(FMI::Utils::peer_num rank, std::uint64_t boundary) const;
+        //! Publish @p boundary for @p rank (only when @p epoch still is the current epoch —
+        //! a rank that slept through a promotion must not pollute the new epoch's boundary
+        //! hash with an old-epoch counter) and read the snapshot, all in one script/round-trip.
+        [[nodiscard]] OperationSnapshot observe_operation(FMI::Utils::peer_num rank, std::uint64_t boundary,
+                                                          std::uint64_t epoch) const;
 
         void ensure_job() const;
         [[nodiscard]] bool is_rank_pending(FMI::Utils::peer_num rank) const;

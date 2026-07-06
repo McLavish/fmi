@@ -457,13 +457,20 @@ void FMI::FT::ControlPlane::clear_criu_state() {
 #endif
 
 FMI::FT::ControlPlane::OperationSnapshot FMI::FT::ControlPlane::observe_operation(FMI::Utils::peer_num rank,
-                                                                                 std::uint64_t boundary) const {
+                                                                                 std::uint64_t boundary,
+                                                                                 std::uint64_t epoch) const {
 #if FMI_ENABLE_REDIS
     // One script = one round-trip on the per-operation hot path, and an atomic pairing of the
     // epoch with the pending set (promotion updates both in a single script on its side).
     // The same script publishes this rank's boundary (telemetry, costs no extra round-trip)
     // and maintains the consensus cut boundary: the FIRST boundary observation that sees a
     // non-empty pending set fixes cut_index.
+    //
+    // Epoch guard: the boundary is published (and a cut proposed) only when the caller's
+    // epoch still is the current epoch. A rank that slept through a promotion would otherwise
+    // pollute the NEW epoch's boundary hash with its old-epoch counter — corrupting both the
+    // next cut proposal and promote_epoch's cut gate. Such a caller only needs the epoch from
+    // the snapshot (it rejoins immediately); the cut fields are returned as "no cut".
     //
     // Proposal rule: cut at the proposer's own boundary B, unless some OTHER rank has
     // published a boundary >= B — then cut one operation later, at max_published + 1.
@@ -476,16 +483,20 @@ FMI::FT::ControlPlane::OperationSnapshot FMI::FT::ControlPlane::observe_operatio
     // boundary is BELOW B are only inside operations the proposer already completed: whatever
     // they still owe or expect involving the target is already in flight, so cutting at B is
     // safe and costs no deferral (this also keeps a lone rank able to quiesce immediately).
+    //
+    // The cut is returned as -1 for "none": 0 is a legitimate boundary (a cut proposed before
+    // any operation ran) and must not be conflated with "no cut proposed".
     static const std::string script =
-            "redis.call('HSET', KEYS[3], ARGV[1], ARGV[2]) "
             "local epoch = redis.call('HGET', KEYS[1], 'current_epoch') "
             "if not epoch then epoch = '0' end "
+            "local same_epoch = tonumber(ARGV[3]) == tonumber(epoch) "
+            "if same_epoch then redis.call('HSET', KEYS[3], ARGV[1], ARGV[2]) end "
             "local pending = redis.call('SCARD', KEYS[2]) "
-            "local cut = 0 "
+            "local cut = -1 "
             "if pending > 0 then "
             "local existing = redis.call('HGET', KEYS[1], 'cut_index') "
             "if existing then cut = tonumber(existing) "
-            "else "
+            "elseif same_epoch then "
             "cut = tonumber(ARGV[2]) "
             "local bounds = redis.call('HGETALL', KEYS[3]) "
             "for i = 1, #bounds, 2 do "
@@ -498,16 +509,18 @@ FMI::FT::ControlPlane::OperationSnapshot FMI::FT::ControlPlane::observe_operatio
             "end "
             "return {epoch, pending, redis.call('SISMEMBER', KEYS[2], ARGV[1]), cut}";
     auto reply = impl->command({"EVAL", script, "3", impl->meta_key(), impl->pending_key(),
-                                impl->boundaries_key(), std::to_string(rank), std::to_string(boundary)});
+                                impl->boundaries_key(), std::to_string(rank), std::to_string(boundary),
+                                std::to_string(epoch)});
     OperationSnapshot snapshot;
     if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 4) {
-        auto* epoch = reply->element[0];
-        if (epoch != nullptr && epoch->str != nullptr) {
-            snapshot.epoch = std::stoull(epoch->str);
+        auto* current = reply->element[0];
+        if (current != nullptr && current->str != nullptr) {
+            snapshot.epoch = std::stoull(current->str);
         }
         snapshot.any_pending = reply->element[1] != nullptr && reply->element[1]->integer > 0;
         snapshot.self_pending = reply->element[2] != nullptr && reply->element[2]->integer == 1;
-        if (reply->element[3] != nullptr && reply->element[3]->integer > 0) {
+        if (reply->element[3] != nullptr && reply->element[3]->integer >= 0) {
+            snapshot.cut_proposed = true;
             snapshot.cut_index = static_cast<std::uint64_t>(reply->element[3]->integer);
         }
     }
@@ -515,6 +528,7 @@ FMI::FT::ControlPlane::OperationSnapshot FMI::FT::ControlPlane::observe_operatio
 #else
     (void) rank;
     (void) boundary;
+    (void) epoch;
     return {};
 #endif
 }
@@ -605,13 +619,27 @@ bool FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
     // KEYS[1]=meta, KEYS[2]=pending, KEYS[3]=boundaries; ARGV[1]=next epoch, ARGV[2]=epoch-key
     // prefix, ARGV[3..5]=the three per-epoch suffixes, ARGV[6]=the QUIESCED wire string,
     // ARGV[7]=the ":moved" suffix.
+    //
+    // Second gate (after quiescence): when a consensus cut was fixed, every MEMBER of the
+    // epoch being left must have published a boundary >= the cut. Promoting past a slower
+    // rank would strand it: it would rejoin at the new epoch having completed fewer
+    // operations than its cohort (the cut state is deleted below, so it could not even
+    // finish), permanently misaligning the operation streams. Ranks below the cut can always
+    // finish to it — their peers completed those operations, so everything they still need
+    // is already in their socket buffers / the object store — so this gate opens by itself;
+    // callers retry exactly as for the quiescence gate. An epoch promoted without any cut
+    // (no operation observed the pending set — e.g. a bare orchestrator promote) skips this
+    // gate: there is no alignment obligation to enforce.
+    //
     // The consensus cut state (cut_index + published boundaries) belongs to the epoch being
     // left: every rank resets its boundary counter to 0 when it rejoins, so both are cleared
     // here, atomically with the promotion that releases the cut.
     // The pending set is persisted as the entered epoch's "moved" set before it is cleared:
     // rejoining ranks read it to reconnect only the links that involve a migrated rank and
-    // keep their surviving connections (selective re-pair). Written atomically with the
-    // promotion so even a rank that slept through the whole cut can still learn who moved.
+    // keep their surviving connections (selective re-pair). Moved sets of OLDER epochs are
+    // deliberately NOT reclaimed here (only at clear_job_state): a rank that crosses several
+    // epochs in one rejoin must union the moved sets of every epoch it skipped, so they must
+    // survive later promotions. One small set per cut for the job's lifetime.
     static const std::string script =
             "local current = redis.call('HGET', KEYS[1], 'current_epoch') "
             "if not current then current = '0' end "
@@ -624,6 +652,17 @@ bool FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
             ".. ' is marked for migration but has not quiesced') "
             "end "
             "end "
+            "local cutv = redis.call('HGET', KEYS[1], 'cut_index') "
+            "if cutv then "
+            "local members = redis.call('HKEYS', ARGV[2]..current..ARGV[3]) "
+            "for i = 1, #members do "
+            "local b = redis.call('HGET', KEYS[3], members[i]) "
+            "if (not b) or tonumber(b) < tonumber(cutv) then "
+            "return redis.error_reply('cannot promote epoch ' .. ARGV[1] .. ': rank ' .. members[i] "
+            ".. ' has not reached the consensus cut boundary') "
+            "end "
+            "end "
+            "end "
             "redis.call('HSET', KEYS[1], 'current_epoch', ARGV[1]) "
             "redis.call('HDEL', KEYS[1], 'cut_index') "
             "local moved = ARGV[2]..ARGV[1]..ARGV[7] "
@@ -632,7 +671,7 @@ bool FMI::FT::ControlPlane::promote_epoch(std::uint64_t next_epoch) const {
             "redis.call('DEL', KEYS[2]) "
             "redis.call('DEL', KEYS[3]) "
             "redis.call('DEL', ARGV[2]..current..ARGV[3], ARGV[2]..current..ARGV[4], "
-            "ARGV[2]..current..ARGV[5], ARGV[2]..current..ARGV[7]) "
+            "ARGV[2]..current..ARGV[5]) "
             "return 1";
     auto reply = impl->command({"EVAL", script, "3", impl->meta_key(), impl->pending_key(),
                                 impl->boundaries_key(), std::to_string(next_epoch),
