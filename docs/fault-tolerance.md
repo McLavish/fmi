@@ -29,7 +29,8 @@ What it does:
   ranks always resume the new epoch at the same operation. Ranks below the cut can always
   finish to it (their peers completed those operations, so anything they still need is
   already in socket buffers / the object store), so this gate opens on its own; orchestrators
-  retry exactly as for the quiescence gate.
+  retry exactly as for the quiescence gate. The full mechanism — proposal rule, parking,
+  enforcement, and a worked example — is described in [consensus-cut.md](consensus-cut.md).
 - uses `Direct`/TCP as the data plane and Redis for FT control
 
 What it does not do:
