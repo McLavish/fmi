@@ -33,6 +33,9 @@ needing the target's participation. Cutting above `J` keeps everyone (target inc
 executing through operation `J`. Ranks published *below* `B` are only inside operations the
 proposer already completed, so whatever they still need from the target is already in flight —
 no deferral required. A lone rank therefore quiesces immediately at its own boundary.
+(Note that this reasoning identifies operations across ranks by their per-rank index — it is
+only sound within the scope described in
+[Scope: aligned operation streams](#scope-aligned-operation-streams).)
 
 **Parking.** Given a fixed cut `C`, every rank keeps executing while `boundary_index < C` and
 stops exactly at `C`: the target quiesces (exits, or CRIU-checkpoints under
@@ -68,6 +71,50 @@ Three ranks, migration requested for rank 2 while everyone is around their 8th o
 | ranks 0 and 2 | boundary 7 < 8 → both execute op 8, so rank 1's in-flight op 8 completes with full participation |
 | all ranks at boundary 8 | rank 2 quiesces; ranks 0 and 1 park |
 | orchestrator retries `promote_epoch` | gate opens (target QUIESCED, all boundaries ≥ 8) → epoch N+1; everyone resumes at the same index |
+
+## Scope: aligned operation streams
+
+The cut is one global index compared against each rank's *local* count of guarded operations.
+The identification "operation `k` on rank X is the same operation as operation `k` on rank Y"
+is an **assumption about the application**, not something the protocol establishes. The
+mechanism is sound exactly when every matched communication sits at the same boundary index on
+all of its participants — in practice, when every rank issues its guarded FMI operations in
+the same order (the SPMD/collectives shape; MPI-style semantics already require identically
+ordered collectives).
+
+General point-to-point schedules break the assumption. `send`/`recv` are guarded and counted
+like any other operation, and nothing forces a matching send and recv to share an index:
+
+- rank 1's op 0 is `recv(from 0)`; the matching `send(to 1)` is rank 0's op 5
+- rank 1 publishes boundary 0 (pending set still empty in that call) and blocks inside the recv
+- the request lands; rank 0 proposes at its boundary 5 → `cut_index = 5` (rank 1's published 0
+  is *below* 5 and is ignored, per the proposal rule)
+- rank 0 parks at 5 without ever executing the send; rank 1 can never leave op 0, so it never
+  reaches the cut
+
+The proposal rule's "ranks published below `B` are only inside operations the proposer already
+completed" is exactly what fails: with unaligned streams, a low published boundary says nothing
+about *which* operation that rank is blocked inside. Note that even a fully symmetric
+neighbour exchange violates the assumption *mid-phase* — each rank walks its own neighbour
+list, so a matched pair sits at different in-phase offsets on its two endpoints — and
+per-rank neighbour counts that differ (interior vs. boundary ranks of a stencil) misalign the
+counters permanently.
+
+**Failure mode: fail-stop, never corruption.** The promotion gate refuses while any member's
+published boundary is below the cut, so a misaligned cut leaves the job parked/blocked with
+promotion failing loudly ("has not reached the consensus cut boundary"). That hang is the
+orchestrator's to detect and resolve (see the liveness section of
+[fault-tolerance.md](fault-tolerance.md)); what can never happen is a silently misaligned
+epoch.
+
+The practical contract, until the protocol either validates alignment (e.g. publishing an
+operation signature — kind/root/size — with each boundary and rejecting mismatched cuts) or
+counts only collectives as cuttable boundaries:
+
+- **collectives-only workloads** may have migration requested at any time;
+- **workloads using `send`/`recv`** must only have migration requested while all ranks are at
+  an aligned point — e.g. the application holds every rank immediately before the same
+  collective for the duration of the request window.
 
 ## Centralized or decentralized?
 

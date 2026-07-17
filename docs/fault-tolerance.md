@@ -21,7 +21,8 @@ What it does:
   pending request fixes a `cut_index` (atomically, in the same per-operation control-plane
   round-trip), chosen past any operation another rank may already be inside. Every rank —
   the target included — keeps executing operations below the cut and parks exactly at it,
-  so no rank is ever left blocked inside an operation the target never joins. The same
+  so no rank is ever left blocked inside an operation the target never joins (within the
+  protocol's aligned-streams scope — see "What it does not do"). The same
   round-trip publishes each rank's operation boundary (epoch-guarded, and readable via
   `ControlPlane::operation_boundaries()` for progress/diagnostics), and **promotion enforces
   the cut**: when a cut was fixed, `promote_epoch` refuses until every member of the epoch has
@@ -37,6 +38,16 @@ What it does not do:
 
 - preserve in-flight collectives (cutover is only between operations)
 - recover arbitrary crashes in the middle of an FMI operation
+- support **divergent per-rank operation streams**: the consensus cut identifies operations
+  across ranks by their per-rank operation index, so it is only sound when every rank issues
+  its guarded operations in the same order — identically ordered collectives, or
+  point-to-point schedules where every matched send/recv pair sits at the same index on both
+  endpoints. A general `send`/`recv` schedule can leave a rank blocked inside a receive whose
+  matching send lies *beyond* the sender's cut; the promotion gate then refuses forever, so
+  the failure is a loud hang (fail-stop, resolved by the orchestrator per the liveness
+  section), never a silently misaligned epoch. With such workloads, only request migration
+  while all ranks are at an aligned point. Details and a worked counterexample:
+  [consensus-cut.md](consensus-cut.md#scope-aligned-operation-streams).
 
 ## Application-state handling: `fault_tolerance.state_transfer`
 

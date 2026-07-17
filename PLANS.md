@@ -147,5 +147,9 @@ V1 defers any migration request that arrives while a rank is inside an FMI opera
 - external daemon is responsible for eviction detection and replacement-worker launch
 - applications already provide explicit checkpoint/restore hooks
 - v1 targets planned migration, not arbitrary crash recovery or live process migration
+- ranks issue guarded FMI operations in identical order (SPMD collectives): the consensus cut
+  identifies operations across ranks by per-rank index, so divergent point-to-point schedules
+  are out of scope — they fail-stop at the promotion gate (see docs/consensus-cut.md, "Scope:
+  aligned operation streams")
 - TCP means FMI `Direct` backend for rank-to-rank communication
 - Redis is accepted for the first FT control plane even though the default data backend is TCP
