@@ -131,6 +131,28 @@ int run_selected(const std::vector<const Scenario*>& selected) {
     return aggregate_exit(classifications);
 }
 
+int run_explorer() {
+    const auto counterexamples = explore_bounded_model();
+    if (counterexamples.empty()) {
+        std::cerr << "explore: setup_error: no bounded counterexamples found\n";
+        return aggregate_exit({Classification::SetupError});
+    }
+
+    std::vector<Classification> classifications;
+    classifications.reserve(counterexamples.size());
+    for (std::size_t index = 0; index < counterexamples.size(); ++index) {
+        const auto& counterexample = counterexamples[index];
+        std::cout << "counterexample " << (index + 1) << '\n'
+                  << "  classification: " << to_string(counterexample.classification) << '\n'
+                  << "  backend: " << to_string(counterexample.backend) << '\n'
+                  << "  matching corpus ID: " << counterexample.matching_scenario_id << '\n'
+                  << counterexample.normalized_trace;
+        if (index + 1 != counterexamples.size()) std::cout << '\n';
+        classifications.push_back(counterexample.classification);
+    }
+    return aggregate_exit(classifications);
+}
+
 } // namespace
 } // namespace FMI::Tests::MigrationCounterexamples
 
@@ -147,8 +169,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     if (options->explore) {
-        std::cerr << "explore: setup_error: not implemented\n";
-        return aggregate_exit({Classification::SetupError});
+        return run_explorer();
     }
 
     const auto selected = select_scenarios(*options);

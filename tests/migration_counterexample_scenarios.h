@@ -66,6 +66,8 @@ struct Observation {
 };
 
 struct ModelCounterexample {
+    // A payload-normalized, deterministic per-rank schedule.  The explorer's
+    // ordering key is (classification, backend, normalized_trace).
     std::string normalized_trace;
     Backend backend;
     Classification classification;
