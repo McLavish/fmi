@@ -14,3 +14,18 @@ target_compile_definitions (Boost_Tests_run PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_E
 
 # The CRIU transparent state-transfer demo is not a test; it lives with its runbook and is
 # built from runbooks/local-criu-state-transfer/ (see the top-level CMakeLists.txt).
+
+if(FMI_ENABLE_CRIU)
+    find_package(Threads REQUIRED)
+    add_executable(
+        fmi_migration_counterexamples
+        migration_counterexample_runner.cpp
+        migration_counterexample_scenarios.cpp
+        migration_cut_model.cpp
+    )
+    target_link_libraries(fmi_migration_counterexamples FMI Threads::Threads)
+    target_compile_definitions(
+        fmi_migration_counterexamples
+        PRIVATE FMI_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    )
+endif()
