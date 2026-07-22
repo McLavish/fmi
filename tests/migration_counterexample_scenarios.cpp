@@ -18,11 +18,17 @@ Action synchronize() {
     return {ActionKind::Synchronize};
 }
 
+Action barrier() {
+    return {ActionKind::Barrier};
+}
+
 Phase phase(std::initializer_list<std::vector<Action>> rank_actions) {
     return {rank_actions};
 }
 
-constexpr auto redis_deadline = std::chrono::seconds(5);
+// Redis operations have a configured five-second backend timeout.  The subprocess
+// deadline must leave enough room for that timeout to be reported and serialized.
+constexpr auto redis_deadline = std::chrono::seconds(8);
 constexpr auto direct_deadline = std::chrono::seconds(10);
 
 std::vector<Scenario> make_scenarios() {
@@ -31,15 +37,15 @@ std::vector<Scenario> make_scenarios() {
             "queued_message_lost",
             "an unmatched completed send remains receivable across the migration cut",
             Backend::Redis, ScenarioKind::Program, 2, {1}, 1,
-            {phase({{send(1, {101}, "old")}, {synchronize()}}),
-             phase({{synchronize()}, {receive(0, 1, "old")}})},
+            {phase({{send(1, {101}, "old")}, {send(0, {901}, "cut-align")}}),
+             phase({{barrier()}, {barrier(), receive(0, 1, "old")}})},
             Classification::LostMessage, redis_deadline
         },
         {
             "queued_message_substituted",
             "a post-cut send must not occupy the receive slot of an old queued message",
             Backend::Redis, ScenarioKind::Program, 2, {1}, 1,
-            {phase({{send(1, {101}, "old")}, {synchronize()}}),
+            {phase({{send(1, {101}, "old")}, {send(0, {901}, "cut-align")}}),
              phase({{send(1, {303}, "new")}, {receive(0, 1, "old")}})},
             Classification::WrongPayload, redis_deadline
         },
@@ -48,8 +54,8 @@ std::vector<Scenario> make_scenarios() {
             "draining a FIFO prefix must preserve the old undrained suffix",
             Backend::Redis, ScenarioKind::Program, 2, {1}, 1,
             {phase({{send(1, {101}, "first"), send(1, {202}, "second")},
-                    {receive(0, 1, "first")}}),
-             phase({{synchronize()}, {receive(0, 1, "second")}})},
+                    {receive(0, 1, "first"), send(0, {901}, "cut-align")}}),
+             phase({{barrier()}, {barrier(), receive(0, 1, "second")}})},
             Classification::LostMessage, redis_deadline
         },
         {
@@ -58,8 +64,10 @@ std::vector<Scenario> make_scenarios() {
             Backend::Redis, ScenarioKind::Program, 2, {1}, 1,
             {phase({{send(1, {101}, "first"), send(1, {202}, "second"),
                      send(1, {303}, "third")},
-                    {synchronize()}}),
-             phase({{send(1, {404}, "fourth")},
+                    {send(0, {801}, "cut-align-1"), send(0, {802}, "cut-align-2"),
+                     send(0, {803}, "cut-align-3")}}),
+             phase({{send(1, {404}, "fourth"), send(1, {505}, "fifth"),
+                     send(1, {606}, "sixth")},
                     {receive(0, 1, "first"), receive(0, 1, "second"),
                      receive(0, 1, "third")}})},
             Classification::ReorderedOrDuplicated, redis_deadline
@@ -68,7 +76,8 @@ std::vector<Scenario> make_scenarios() {
             "variable_size_partial_overwrite",
             "a successful receive must never partially overwrite an old variable-size payload",
             Backend::Redis, ScenarioKind::Program, 2, {1}, 1,
-            {phase({{send(1, {101, 102, 103}, "wide-old")}, {synchronize()}}),
+            {phase({{send(1, {101, 102, 103}, "wide-old")},
+                    {send(0, {901}, "cut-align")}}),
              phase({{send(1, {404}, "narrow-new")}, {receive(0, 3, "wide-old")}})},
             Classification::PartialPayload, redis_deadline
         },
@@ -94,8 +103,11 @@ std::vector<Scenario> make_scenarios() {
             "unrelated_rank_migration",
             "migration of an unrelated rank must preserve survivor-to-survivor queued data",
             Backend::Redis, ScenarioKind::Program, 3, {2}, 1,
-            {phase({{send(1, {101}, "survivor-link")}, {synchronize()}, {synchronize()}}),
-             phase({{synchronize()}, {receive(0, 1, "survivor-link")}, {synchronize()}})},
+            {phase({{send(1, {101}, "survivor-link")},
+                    {send(0, {901}, "cut-align-1")},
+                    {send(0, {902}, "cut-align-2")}}),
+             phase({{barrier()}, {barrier(), receive(0, 1, "survivor-link")},
+                    {barrier()}})},
             Classification::LostMessage, redis_deadline
         },
         {
