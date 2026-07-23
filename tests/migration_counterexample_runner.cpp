@@ -22,8 +22,11 @@
 #include <vector>
 
 #include <signal.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -46,9 +49,20 @@ std::string no_state_transfer_config_path() {
            "/config/fmi_ft_counterexample_redis_none.json";
 }
 
+std::string direct_config_path() {
+    return std::string(FMI_SOURCE_DIR) + "/config/fmi_ft_stress_test.json";
+}
+
 std::string unique_comm_name(const Scenario& scenario, bool migrate) {
     const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(
             Clock::now().time_since_epoch()).count();
+    if (scenario.backend == Backend::Direct) {
+        const std::string short_id =
+                scenario.id == "direct_moved_link_backlog" ? "moved" : "survivor";
+        return "mce-" + short_id + "-" + (migrate ? "m" : "b") + "-p" +
+               std::to_string(static_cast<long long>(getpid())) + "-t" +
+               std::to_string(ticks);
+    }
     return "migration-counterexample-" + scenario.id + "-" +
            (migrate ? "migrated" : "baseline") + "-pid-" +
            std::to_string(static_cast<long long>(getpid())) + "-tick-" +
@@ -247,6 +261,33 @@ private:
     std::string comm_name;
 };
 
+bool tcpunchd_available() {
+    const int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) return false;
+
+    const int original_flags = fcntl(socket_fd, F_GETFL, 0);
+    if (original_flags >= 0) fcntl(socket_fd, F_SETFL, original_flags | O_NONBLOCK);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(10000);
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    int connected = connect(socket_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+    if (connected != 0 && errno == EINPROGRESS) {
+        pollfd descriptor{socket_fd, POLLOUT, 0};
+        connected = poll(&descriptor, 1, 250) > 0 ? 0 : -1;
+        if (connected == 0) {
+            int socket_error = 0;
+            socklen_t length = sizeof(socket_error);
+            if (getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &socket_error, &length) != 0 ||
+                socket_error != 0) {
+                connected = -1;
+            }
+        }
+    }
+    close(socket_fd);
+    return connected == 0;
+}
+
 bool write_byte(int fd, char value) {
     while (true) {
         const auto written = write(fd, &value, 1);
@@ -362,21 +403,28 @@ public:
 
     bool expect(std::size_t child, char expected, Clock::time_point deadline,
                 std::string& error) {
-        if (child >= children.size()) {
-            error = "invalid rank child index";
-            return false;
-        }
-        const auto event = read_byte_until(children[child].event_fd, deadline);
-        if (!event) {
-            error = "rank " + std::to_string(child) + " produced no event before deadline";
-            return false;
-        }
+        const auto event = next(child, deadline, error);
+        if (!event) return false;
         if (*event != expected) {
             error = "rank " + std::to_string(child) + " produced event " +
                     std::string(1, *event) + " instead of " + std::string(1, expected);
             return false;
         }
         return true;
+    }
+
+    std::optional<char> next(std::size_t child, Clock::time_point deadline,
+                             std::string& error) {
+        if (child >= children.size()) {
+            error = "invalid rank child index";
+            return std::nullopt;
+        }
+        const auto event = read_byte_until(children[child].event_fd, deadline);
+        if (!event) {
+            error = "rank " + std::to_string(child) + " produced no event before deadline";
+            return std::nullopt;
+        }
+        return event;
     }
 
     bool command_all(char value) {
@@ -472,6 +520,13 @@ Observation counterexample(Classification classification, std::string detail,
     observation.classification = classification;
     observation.detail = std::move(detail);
     observation.promoted = promoted;
+    return observation;
+}
+
+Observation infrastructure_skip(std::string detail) {
+    Observation observation;
+    observation.classification = Classification::InfrastructureSkip;
+    observation.detail = std::move(detail);
     return observation;
 }
 
@@ -1048,6 +1103,269 @@ Observation run_stale_barrier_object(const Scenario& scenario, bool migrate,
             true);
 }
 
+Observation run_direct_moved_link(const Scenario& scenario, bool migrate,
+                                  const std::string& comm_name) {
+    if (!tcpunchd_available()) {
+        return infrastructure_skip("tcpunchd is not listening on 127.0.0.1:10000");
+    }
+
+    const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
+    const std::string config = direct_config_path();
+    FMI::FT::ControlPlane orchestrator(config, comm_name, scenario.world);
+    orchestrator.clear_job_state();
+    orchestrator.clear_criu_state();
+    ControlPlaneCleanup control_cleanup(orchestrator);
+    RankChildren ranks;
+
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(0, 2, config, comm_name, 128, "direct-moved-rank-0");
+        write_byte(events, 'R');
+        expect_command(commands, 'W', deadline);
+        FMI::Comm::Data<std::vector<int>> warm(std::vector<int>{1});
+        comm.send(warm, 1);
+        write_byte(events, 'A');
+        expect_command(commands, 'B', deadline);
+        FMI::Comm::Data<std::vector<int>> old(std::vector<int>{101});
+        comm.send(old, 1);
+        write_byte(events, 'B');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> newer(std::vector<int>{303});
+        comm.send(newer, 1);
+        write_byte(events, 'D');
+        expect_command(commands, 'X', deadline);
+    });
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(1, 2, config, comm_name, 128, "direct-moved-rank-1");
+        write_byte(events, 'R');
+        expect_command(commands, 'W', deadline);
+        FMI::Comm::Data<std::vector<int>> warm(1);
+        comm.recv(warm, 0);
+        if (warm.get() != std::vector<int>{1}) throw std::runtime_error("bad Direct warmup");
+        write_byte(events, 'A');
+        expect_command(commands, 'B', deadline);
+        FMI::Comm::Data<std::vector<int>> align(std::vector<int>{901});
+        comm.send(align, 0);
+        write_byte(events, 'B');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> received(1);
+        comm.recv(received, 0);
+        const auto value = received.get().front();
+        if (value == 101) {
+            write_byte(events, 'O');
+        } else if (value == 303) {
+            write_byte(events, 'N');
+        } else {
+            throw std::runtime_error("unexpected Direct payload " + std::to_string(value));
+        }
+        expect_command(commands, 'X', deadline);
+    });
+
+    std::string error;
+    if (!ranks.expect_all('R', deadline, error) || !ranks.command_all('W') ||
+        !ranks.expect_all('A', deadline, error) || !ranks.command_all('B') ||
+        !ranks.expect_all('B', deadline, error)) {
+        return setup_error(error.empty() ? "Direct moved-link prelude failed" : error);
+    }
+
+    if (migrate) orchestrator.request_migration(1);
+    if (!ranks.command_all('C')) return setup_error("failed to release Direct moved-link cut");
+    if (migrate) {
+        if (!wait_until(deadline, [&]() {
+                return rank_has_state(orchestrator, 0, 1, FMI::FT::RankState::Quiesced) &&
+                       boundary_at_least(orchestrator, 0, 2) &&
+                       boundary_at_least(orchestrator, 1, 2);
+            })) {
+            return setup_error("Direct moved-link ranks did not reach cut 2");
+        }
+        try {
+            if (!orchestrator.promote_epoch(1)) {
+                return setup_error("Direct moved-link migration did not promote");
+            }
+        } catch (const std::exception& error_value) {
+            return setup_error(std::string("Direct moved-link promotion failed: ") +
+                               error_value.what());
+        }
+    }
+
+    const auto payload_event = ranks.next(1, deadline, error);
+    if (!payload_event || !ranks.expect(0, 'D', deadline, error)) {
+        return setup_error(error.empty() ? "Direct moved-link result missing" : error);
+    }
+    if (*payload_event != 'O' && *payload_event != 'N') {
+        return setup_error("Direct moved-link rank produced an invalid payload event");
+    }
+
+    if (!migrate) {
+        if (*payload_event != 'O') {
+            return setup_error("Direct moved-link baseline did not preserve FIFO");
+        }
+        Observation observation = preserved();
+        observation.received_payloads = {{101}};
+        return observation;
+    }
+    if (*payload_event == 'O') {
+        Observation observation = preserved(
+                "the unread moved-link payload survived reconfiguration");
+        observation.promoted = true;
+        observation.received_payloads = {{101}};
+        return observation;
+    }
+    Observation observation = counterexample(
+            Classification::WrongPayload,
+            "receive old baseline=[101] migrated=[303]; closing the moved endpoint discarded "
+            "the unread epoch-zero bytes",
+            true);
+    observation.received_payloads = {{303}};
+    return observation;
+}
+
+Observation run_direct_survivor_link(const Scenario& scenario, bool migrate,
+                                     const std::string& comm_name) {
+    if (!tcpunchd_available()) {
+        return infrastructure_skip("tcpunchd is not listening on 127.0.0.1:10000");
+    }
+
+    const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
+    const std::string config = direct_config_path();
+    FMI::FT::ControlPlane orchestrator(config, comm_name, scenario.world);
+    orchestrator.clear_job_state();
+    orchestrator.clear_criu_state();
+    ControlPlaneCleanup control_cleanup(orchestrator);
+    RankChildren ranks;
+
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(0, 3, config, comm_name, 128, "direct-survivor-rank-0");
+        write_byte(events, 'R');
+        expect_command(commands, 'W', deadline);
+        FMI::Comm::Data<std::vector<int>> warm(std::vector<int>{1});
+        comm.send(warm, 1);
+        FMI::Comm::Data<std::vector<int>> from_two(1);
+        comm.recv(from_two, 2);
+        write_byte(events, 'A');
+        expect_command(commands, 'B', deadline);
+        FMI::Comm::Data<std::vector<int>> old(std::vector<int>{101});
+        comm.send(old, 1);
+        write_byte(events, 'B');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> newer(std::vector<int>{303});
+        comm.send(newer, 1);
+        FMI::Comm::Data<std::vector<int>> to_two(std::vector<int>{404});
+        comm.send(to_two, 2);
+        write_byte(events, 'D');
+        expect_command(commands, 'X', deadline);
+    });
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(1, 3, config, comm_name, 128, "direct-survivor-rank-1");
+        write_byte(events, 'R');
+        expect_command(commands, 'W', deadline);
+        FMI::Comm::Data<std::vector<int>> warm(1);
+        comm.recv(warm, 0);
+        FMI::Comm::Data<std::vector<int>> to_two(std::vector<int>{2});
+        comm.send(to_two, 2);
+        write_byte(events, 'A');
+        expect_command(commands, 'B', deadline);
+        FMI::Comm::Data<std::vector<int>> align(std::vector<int>{201});
+        comm.send(align, 2);
+        write_byte(events, 'B');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> received(1);
+        comm.recv(received, 0);
+        const auto value = received.get().front();
+        if (value == 101) {
+            write_byte(events, 'O');
+        } else if (value == 303) {
+            write_byte(events, 'N');
+        } else {
+            throw std::runtime_error("unexpected survivor-stream payload " +
+                                     std::to_string(value));
+        }
+        expect_command(commands, 'X', deadline);
+    });
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(2, 3, config, comm_name, 128, "direct-survivor-rank-2");
+        write_byte(events, 'R');
+        expect_command(commands, 'W', deadline);
+        FMI::Comm::Data<std::vector<int>> from_one(1);
+        comm.recv(from_one, 1);
+        FMI::Comm::Data<std::vector<int>> to_zero(std::vector<int>{3});
+        comm.send(to_zero, 0);
+        write_byte(events, 'A');
+        expect_command(commands, 'B', deadline);
+        FMI::Comm::Data<std::vector<int>> align(std::vector<int>{301});
+        comm.send(align, 0);
+        write_byte(events, 'B');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> received(1);
+        comm.recv(received, 0);
+        if (received.get() != std::vector<int>{404}) {
+            throw std::runtime_error("moved link did not receive epoch-current payload");
+        }
+        write_byte(events, 'D');
+        expect_command(commands, 'X', deadline);
+    });
+
+    std::string error;
+    if (!ranks.expect_all('R', deadline, error) || !ranks.command_all('W') ||
+        !ranks.expect_all('A', deadline, error) || !ranks.command_all('B') ||
+        !ranks.expect_all('B', deadline, error)) {
+        return setup_error(error.empty() ? "Direct survivor-link prelude failed" : error);
+    }
+
+    if (migrate) orchestrator.request_migration(2);
+    if (!ranks.command_all('C')) return setup_error("failed to release Direct survivor-link cut");
+    if (migrate) {
+        if (!wait_until(deadline, [&]() {
+                return rank_has_state(orchestrator, 0, 2, FMI::FT::RankState::Quiesced) &&
+                       boundary_at_least(orchestrator, 0, 3) &&
+                       boundary_at_least(orchestrator, 1, 3) &&
+                       boundary_at_least(orchestrator, 2, 3);
+            })) {
+            return setup_error("Direct survivor-link ranks did not reach cut 3");
+        }
+        try {
+            if (!orchestrator.promote_epoch(1)) {
+                return setup_error("Direct survivor-link migration did not promote");
+            }
+        } catch (const std::exception& error_value) {
+            return setup_error(std::string("Direct survivor-link promotion failed: ") +
+                               error_value.what());
+        }
+    }
+
+    const auto payload_event = ranks.next(1, deadline, error);
+    if (!payload_event || !ranks.expect(0, 'D', deadline, error) ||
+        !ranks.expect(2, 'D', deadline, error)) {
+        return setup_error(error.empty() ? "Direct survivor-link result missing" : error);
+    }
+    if (*payload_event != 'O' && *payload_event != 'N') {
+        return setup_error("Direct survivor-link rank produced an invalid payload event");
+    }
+    if (!migrate) {
+        if (*payload_event != 'O') {
+            return setup_error("Direct survivor-link baseline did not preserve FIFO");
+        }
+        Observation observation = preserved();
+        observation.received_payloads = {{101}};
+        return observation;
+    }
+    if (*payload_event == 'N') {
+        Observation observation = counterexample(
+                Classification::WrongPayload,
+                "closing the survivor link dropped payload 101, so the post-cut payload 303 "
+                "occupied its receive slot",
+                true);
+        observation.received_payloads = {{303}};
+        return observation;
+    }
+    Observation observation = counterexample(
+            Classification::ReorderedOrDuplicated,
+            "rank 1 received payload 101 from the retained rank-0/rank-1 socket only after "
+            "epoch 1 was promoted; epoch-zero bytes crossed the literal epoch fence",
+            true);
+    observation.received_payloads = {{101}};
+    return observation;
+}
+
 Observation run_specialized_case_named(const Scenario& scenario, bool migrate,
                                        const std::string& comm_name) {
     try {
@@ -1077,6 +1395,15 @@ Observation run_specialized_case_named(const Scenario& scenario, bool migrate,
 
 Observation run_case_named(const Scenario& scenario, bool migrate,
                            const std::string& comm_name) {
+    if (scenario.backend == Backend::Direct) {
+        if (scenario.id == "direct_moved_link_backlog") {
+            return run_direct_moved_link(scenario, migrate, comm_name);
+        }
+        if (scenario.id == "direct_survivor_link_crosses_epoch") {
+            return run_direct_survivor_link(scenario, migrate, comm_name);
+        }
+        return setup_error("unknown Direct scenario");
+    }
     if (scenario.kind == ScenarioKind::Program) {
         return run_program_case_named(scenario, migrate, comm_name);
     }
@@ -1513,18 +1840,15 @@ int run_selected(const std::vector<const Scenario*>& selected) {
     std::vector<Classification> classifications;
     classifications.reserve(selected.size());
     for (const auto* scenario : selected) {
-        if (scenario->backend != Backend::Redis) {
-            std::cout << scenario->id << ": baseline="
-                      << to_string(Classification::InfrastructureSkip)
-                      << " migrated=" << to_string(Classification::InfrastructureSkip)
-                      << " detail=executor scheduled for a later corpus task\n";
-            classifications.push_back(Classification::InfrastructureSkip);
-            continue;
-        }
-
         const Observation baseline = run_isolated(*scenario, false);
         std::cout << scenario->id << ": baseline=" << to_string(baseline.classification)
                   << std::flush;
+        if (baseline.classification == Classification::InfrastructureSkip) {
+            std::cout << " migrated=" << to_string(Classification::InfrastructureSkip)
+                      << " detail=" << baseline.detail << '\n';
+            classifications.push_back(Classification::InfrastructureSkip);
+            continue;
+        }
         if (baseline.classification != Classification::Preserved) {
             std::cout << " migrated=" << to_string(Classification::SetupError)
                       << " detail=" << baseline.detail << '\n';

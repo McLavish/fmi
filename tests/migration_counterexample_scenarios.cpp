@@ -14,10 +14,6 @@ Action receive(FMI::Utils::peer_num peer, std::size_t elements, std::string tag)
     return {ActionKind::Receive, peer, {}, elements, std::move(tag)};
 }
 
-Action synchronize() {
-    return {ActionKind::Synchronize};
-}
-
 Action barrier() {
     return {ActionKind::Barrier};
 }
@@ -119,19 +115,26 @@ std::vector<Scenario> make_scenarios() {
         {
             "direct_moved_link_backlog",
             "moving a Direct endpoint must not discard unread bytes on its established link",
-            Backend::Direct, ScenarioKind::Program, 2, {1}, 1,
+            Backend::Direct, ScenarioKind::Program, 2, {1}, 2,
             {phase({{send(1, {1}, "warmup")}, {receive(0, 1, "warmup")}}),
-             phase({{send(1, {101}, "old")}, {synchronize()}}),
+             phase({{send(1, {101}, "old")}, {send(0, {901}, "cut-align")}}),
              phase({{send(1, {303}, "new")}, {receive(0, 1, "old")}})},
-            Classification::LostMessage, direct_deadline
+            Classification::WrongPayload, direct_deadline
         },
         {
             "direct_survivor_link_crosses_epoch",
             "an old Direct survivor link must not deliver epoch-zero bytes after promotion",
-            Backend::Direct, ScenarioKind::Program, 3, {2}, 1,
-            {phase({{send(1, {1}, "warmup")}, {receive(0, 1, "warmup")}, {synchronize()}}),
-             phase({{send(1, {101}, "old-survivor-link")}, {synchronize()}, {synchronize()}}),
-             phase({{synchronize()}, {receive(0, 1, "old-survivor-link")}, {synchronize()}})},
+            Backend::Direct, ScenarioKind::Program, 3, {2}, 2,
+            {phase({{send(1, {1}, "warmup-0-1"), receive(2, 1, "warmup-2-0")},
+                    {receive(0, 1, "warmup-0-1"), send(2, {2}, "warmup-1-2")},
+                    {receive(1, 1, "warmup-1-2"), send(0, {3}, "warmup-2-0")}}),
+             phase({{send(1, {101}, "old-survivor-link")},
+                    {send(2, {201}, "queued-1-2")},
+                    {send(0, {301}, "queued-2-0")}}),
+             phase({{send(1, {303}, "new-survivor-link"),
+                     send(2, {404}, "current-moved-link")},
+                    {receive(0, 1, "old-survivor-link")},
+                    {receive(0, 1, "current-moved-link")}})},
             Classification::ReorderedOrDuplicated, direct_deadline
         },
         {
