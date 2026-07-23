@@ -9,8 +9,10 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -20,8 +22,12 @@
 #include <vector>
 
 #include <signal.h>
+#include <poll.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <hiredis/hiredis.h>
 
 namespace FMI::Tests::MigrationCounterexamples {
 namespace {
@@ -33,6 +39,11 @@ constexpr std::size_t max_pipe_message = 16 * 1024 * 1024;
 
 std::string config_path() {
     return std::string(FMI_SOURCE_DIR) + "/config/fmi_ft_stress_redis_test.json";
+}
+
+std::string no_state_transfer_config_path() {
+    return std::string(FMI_SOURCE_DIR) +
+           "/config/fmi_ft_counterexample_redis_none.json";
 }
 
 std::string unique_comm_name(const Scenario& scenario, bool migrate) {
@@ -203,6 +214,289 @@ public:
 private:
     FMI::FT::ControlPlane& control_plane;
 };
+
+void delete_redis_data_keys(const std::string& comm_name) {
+    redisContext* context = redisConnect("127.0.0.1", 6379);
+    if (context == nullptr || context->err) {
+        if (context != nullptr) redisFree(context);
+        return;
+    }
+
+    const std::string pattern = comm_name + "@epoch=*";
+    auto* keys = static_cast<redisReply*>(
+            redisCommand(context, "KEYS %b", pattern.data(), pattern.size()));
+    if (keys != nullptr && keys->type == REDIS_REPLY_ARRAY) {
+        for (std::size_t index = 0; index < keys->elements; ++index) {
+            const auto* key = keys->element[index];
+            if (key == nullptr || key->str == nullptr) continue;
+            auto* removed = static_cast<redisReply*>(
+                    redisCommand(context, "DEL %b", key->str, key->len));
+            if (removed != nullptr) freeReplyObject(removed);
+        }
+    }
+    if (keys != nullptr) freeReplyObject(keys);
+    redisFree(context);
+}
+
+class DataKeyCleanup {
+public:
+    explicit DataKeyCleanup(std::string comm_name) : comm_name(std::move(comm_name)) {}
+    ~DataKeyCleanup() { delete_redis_data_keys(comm_name); }
+
+private:
+    std::string comm_name;
+};
+
+bool write_byte(int fd, char value) {
+    while (true) {
+        const auto written = write(fd, &value, 1);
+        if (written == 1) return true;
+        if (written < 0 && errno == EINTR) continue;
+        return false;
+    }
+}
+
+std::optional<char> read_byte_until(int fd, Clock::time_point deadline) {
+    while (Clock::now() < deadline) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - Clock::now());
+        pollfd descriptor{fd, POLLIN | POLLHUP, 0};
+        const int timeout = static_cast<int>(
+                std::max<std::int64_t>(1, std::min<std::int64_t>(remaining.count(), 100)));
+        const int polled = poll(&descriptor, 1, timeout);
+        if (polled < 0 && errno == EINTR) continue;
+        if (polled < 0) return std::nullopt;
+        if (polled == 0) continue;
+        char value = 0;
+        const auto count = read(fd, &value, 1);
+        if (count == 1) return value;
+        if (count < 0 && errno == EINTR) continue;
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+class RankChildren {
+public:
+    struct Child {
+        pid_t pid = -1;
+        int command_fd = -1;
+        int event_fd = -1;
+    };
+
+    RankChildren() = default;
+    RankChildren(const RankChildren&) = delete;
+    RankChildren& operator=(const RankChildren&) = delete;
+
+    ~RankChildren() { stop(); }
+
+    template<typename Function>
+    std::size_t spawn(Function function) {
+        int commands[2] = {-1, -1};
+        int events[2] = {-1, -1};
+        if (pipe(commands) != 0 || pipe(events) != 0) {
+            const int error = errno;
+            if (commands[0] >= 0) close(commands[0]);
+            if (commands[1] >= 0) close(commands[1]);
+            if (events[0] >= 0) close(events[0]);
+            if (events[1] >= 0) close(events[1]);
+            throw std::runtime_error(std::string("rank pipe: ") + std::strerror(error));
+        }
+
+        const pid_t pid = fork();
+        if (pid < 0) {
+            const int error = errno;
+            close(commands[0]);
+            close(commands[1]);
+            close(events[0]);
+            close(events[1]);
+            throw std::runtime_error(std::string("rank fork: ") + std::strerror(error));
+        }
+        if (pid == 0) {
+            close(commands[1]);
+            close(events[0]);
+            for (const auto& child : children) {
+                close(child.command_fd);
+                close(child.event_fd);
+            }
+            prctl(PR_SET_PDEATHSIG, SIGKILL);
+            if (getppid() == 1) std::_Exit(125);
+            try {
+                function(commands[0], events[1]);
+                close(commands[0]);
+                close(events[1]);
+                std::_Exit(0);
+            } catch (const std::exception& error) {
+                std::cerr << "rank child " << static_cast<long long>(getpid())
+                          << ": " << error.what() << '\n';
+                write_byte(events[1], 'E');
+                close(commands[0]);
+                close(events[1]);
+                std::_Exit(3);
+            } catch (const std::string& error) {
+                std::cerr << "rank child " << static_cast<long long>(getpid())
+                          << ": " << error << '\n';
+                write_byte(events[1], 'E');
+                close(commands[0]);
+                close(events[1]);
+                std::_Exit(3);
+            } catch (...) {
+                std::cerr << "rank child " << static_cast<long long>(getpid())
+                          << ": unknown exception\n";
+                write_byte(events[1], 'E');
+                close(commands[0]);
+                close(events[1]);
+                std::_Exit(3);
+            }
+        }
+
+        close(commands[0]);
+        close(events[1]);
+        children.push_back({pid, commands[1], events[0]});
+        return children.size() - 1;
+    }
+
+    bool command(std::size_t child, char value) {
+        return child < children.size() && write_byte(children[child].command_fd, value);
+    }
+
+    bool expect(std::size_t child, char expected, Clock::time_point deadline,
+                std::string& error) {
+        if (child >= children.size()) {
+            error = "invalid rank child index";
+            return false;
+        }
+        const auto event = read_byte_until(children[child].event_fd, deadline);
+        if (!event) {
+            error = "rank " + std::to_string(child) + " produced no event before deadline";
+            return false;
+        }
+        if (*event != expected) {
+            error = "rank " + std::to_string(child) + " produced event " +
+                    std::string(1, *event) + " instead of " + std::string(1, expected);
+            return false;
+        }
+        return true;
+    }
+
+    bool command_all(char value) {
+        for (std::size_t index = 0; index < children.size(); ++index) {
+            if (!command(index, value)) return false;
+        }
+        return true;
+    }
+
+    bool expect_all(char expected, Clock::time_point deadline, std::string& error) {
+        for (std::size_t index = 0; index < children.size(); ++index) {
+            if (!expect(index, expected, deadline, error)) return false;
+        }
+        return true;
+    }
+
+    void stop() {
+        if (stopped) return;
+        stopped = true;
+        for (auto& child : children) {
+            if (child.command_fd >= 0) {
+                close(child.command_fd);
+                child.command_fd = -1;
+            }
+            if (child.event_fd >= 0) {
+                close(child.event_fd);
+                child.event_fd = -1;
+            }
+            if (child.pid > 0) kill(child.pid, SIGKILL);
+        }
+        for (auto& child : children) {
+            if (child.pid <= 0) continue;
+            while (waitpid(child.pid, nullptr, 0) < 0 && errno == EINTR) {}
+            child.pid = -1;
+        }
+    }
+
+private:
+    std::vector<Child> children;
+    bool stopped = false;
+};
+
+bool wait_until(Clock::time_point deadline, const std::function<bool()>& predicate) {
+    while (Clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return predicate();
+}
+
+std::map<FMI::Utils::peer_num, std::uint64_t> boundaries(
+        const FMI::FT::ControlPlane& orchestrator) {
+    std::map<FMI::Utils::peer_num, std::uint64_t> result;
+    for (const auto& [rank, boundary] : orchestrator.operation_boundaries()) {
+        result[rank] = boundary;
+    }
+    return result;
+}
+
+bool boundary_at_least(const FMI::FT::ControlPlane& orchestrator,
+                       FMI::Utils::peer_num rank, std::uint64_t expected) {
+    const auto current = boundaries(orchestrator);
+    const auto found = current.find(rank);
+    return found != current.end() && found->second >= expected;
+}
+
+bool rank_has_state(const FMI::FT::ControlPlane& orchestrator, std::uint64_t epoch,
+                    FMI::Utils::peer_num rank, FMI::FT::RankState expected) {
+    for (const auto& entry : orchestrator.directory_snapshot(epoch)) {
+        if (entry.rank == rank) return entry.state == expected;
+    }
+    return false;
+}
+
+Observation setup_error(std::string detail) {
+    Observation observation;
+    observation.classification = Classification::SetupError;
+    observation.detail = std::move(detail);
+    return observation;
+}
+
+Observation preserved(std::string detail = {}) {
+    Observation observation;
+    observation.classification = Classification::Preserved;
+    observation.baseline_valid = true;
+    observation.detail = std::move(detail);
+    return observation;
+}
+
+Observation counterexample(Classification classification, std::string detail,
+                           bool promoted = false) {
+    Observation observation;
+    observation.classification = classification;
+    observation.detail = std::move(detail);
+    observation.promoted = promoted;
+    return observation;
+}
+
+bool promotion_remains_closed(FMI::FT::ControlPlane& orchestrator,
+                              std::uint64_t next_epoch,
+                              Clock::time_point deadline,
+                              std::string& last_error) {
+    while (Clock::now() < deadline) {
+        try {
+            if (orchestrator.promote_epoch(next_epoch)) return false;
+        } catch (const std::exception& error) {
+            last_error = error.what();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return orchestrator.epoch() < next_epoch;
+}
+
+void expect_command(int fd, char expected, Clock::time_point deadline) {
+    const auto command = read_byte_until(fd, deadline);
+    if (!command || *command != expected) {
+        throw std::runtime_error("rank did not receive command " +
+                                 std::string(1, expected));
+    }
+}
 
 Observation run_program_case_named(const Scenario& scenario, bool migrate,
                                    const std::string& comm_name) {
@@ -402,6 +696,391 @@ Observation run_program_case_named(const Scenario& scenario, bool migrate,
         observation.detail = "orchestrator: unknown exception";
     }
     return observation;
+}
+
+Observation run_future_send_after_cut(const Scenario& scenario, bool migrate,
+                                      const std::string& comm_name) {
+    const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
+    FMI::FT::ControlPlane orchestrator(config_path(), comm_name, scenario.world);
+    orchestrator.clear_job_state();
+    orchestrator.clear_criu_state();
+    ControlPlaneCleanup control_cleanup(orchestrator);
+    DataKeyCleanup data_cleanup(comm_name);
+    RankChildren ranks;
+
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(0, 2, config_path(), comm_name, 128, "future-rank-0");
+        write_byte(events, 'R');
+        expect_command(commands, 'S', deadline);
+        FMI::Comm::Data<std::vector<int>> warm(std::vector<int>{101});
+        comm.send(warm, 1);
+        write_byte(events, 'W');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> local(std::vector<int>{202});
+        comm.send(local, 0);
+        FMI::Comm::Data<std::vector<int>> future(std::vector<int>{303});
+        comm.send(future, 1);
+        write_byte(events, 'D');
+        expect_command(commands, 'X', deadline);
+    });
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(1, 2, config_path(), comm_name, 128, "future-rank-1");
+        write_byte(events, 'R');
+        expect_command(commands, 'S', deadline);
+        FMI::Comm::Data<std::vector<int>> warm(1);
+        comm.recv(warm, 0);
+        if (warm.get() != std::vector<int>{101}) throw std::runtime_error("bad warmup");
+        write_byte(events, 'W');
+        expect_command(commands, 'B', deadline);
+        FMI::Comm::Data<std::vector<int>> future(1);
+        comm.recv(future, 0);
+        if (future.get() != std::vector<int>{303}) throw std::runtime_error("bad future payload");
+        write_byte(events, 'D');
+        expect_command(commands, 'X', deadline);
+    });
+
+    std::string error;
+    if (!ranks.expect_all('R', deadline, error) || !ranks.command_all('S') ||
+        !ranks.expect_all('W', deadline, error) || !ranks.command(1, 'B')) {
+        return setup_error(error.empty() ? "failed to start future-send ranks" : error);
+    }
+    if (!wait_until(deadline, [&]() { return boundary_at_least(orchestrator, 1, 1); })) {
+        return setup_error("receiver did not enter the below-cut receive");
+    }
+
+    if (migrate) orchestrator.request_migration(1);
+    if (!ranks.command(0, 'C')) return setup_error("failed to release future sender");
+
+    if (!migrate) {
+        if (!ranks.expect(0, 'D', deadline, error) ||
+            !ranks.expect(1, 'D', deadline, error)) {
+            return setup_error(error);
+        }
+        return preserved("future send satisfies the already-posted receive without migration");
+    }
+
+    if (!wait_until(deadline, [&]() {
+            return boundary_at_least(orchestrator, 0, 2) &&
+                   boundary_at_least(orchestrator, 1, 1);
+        })) {
+        return setup_error("did not reach the expected sender=2 receiver=1 cut state");
+    }
+    std::string promotion_error;
+    if (!promotion_remains_closed(orchestrator, 1, Clock::now() +
+                                  std::chrono::milliseconds(250), promotion_error)) {
+        return setup_error("future-send cut unexpectedly promoted");
+    }
+    return counterexample(
+            Classification::OperationStuck,
+            "receiver is inside recv at boundary 1 while the matching sender parks at cut 2" +
+            (promotion_error.empty() ? std::string{} : "; " + promotion_error));
+}
+
+Observation run_pending_set_expansion(const Scenario& scenario, bool migrate,
+                                      const std::string& comm_name) {
+    const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
+    FMI::FT::ControlPlane orchestrator(config_path(), comm_name, scenario.world);
+    orchestrator.clear_job_state();
+    orchestrator.clear_criu_state();
+    ControlPlaneCleanup control_cleanup(orchestrator);
+    DataKeyCleanup data_cleanup(comm_name);
+    RankChildren ranks;
+
+    for (FMI::Utils::peer_num rank = 0; rank < 2; ++rank) {
+        ranks.spawn([=](int commands, int events) {
+            FMI::Communicator comm(rank, 2, config_path(), comm_name, 128,
+                                   "expansion-rank-" + std::to_string(rank));
+            write_byte(events, 'R');
+            expect_command(commands, 'S', deadline);
+            comm.barrier();
+            write_byte(events, 'D');
+            expect_command(commands, 'X', deadline);
+        });
+    }
+
+    std::string error;
+    if (!ranks.expect_all('R', deadline, error)) return setup_error(error);
+    if (!migrate) {
+        if (!ranks.command_all('S') || !ranks.expect_all('D', deadline, error)) {
+            return setup_error(error.empty() ? "failed to run baseline barrier" : error);
+        }
+        return preserved("the two-rank barrier completes without migration");
+    }
+
+    orchestrator.request_migrations({0});
+    if (!ranks.command_all('S')) return setup_error("failed to release pending-set ranks");
+    if (!wait_until(deadline, [&]() {
+            return rank_has_state(orchestrator, 0, 0, FMI::FT::RankState::Quiesced) &&
+                   boundary_at_least(orchestrator, 0, 0) &&
+                   boundary_at_least(orchestrator, 1, 0);
+        })) {
+        return setup_error("initial target and survivor did not park at cut 0");
+    }
+
+    orchestrator.request_migrations({0, 1});
+    if (!rank_has_state(orchestrator, 0, 1, FMI::FT::RankState::MigrationPending)) {
+        return setup_error("expanded pending set did not mark the parked survivor pending");
+    }
+    std::string promotion_error;
+    if (!promotion_remains_closed(orchestrator, 1, Clock::now() +
+                                  std::chrono::milliseconds(250), promotion_error)) {
+        return setup_error("expanded pending set unexpectedly promoted");
+    }
+    return counterexample(
+            Classification::PromotionStuck,
+            "rank 1 parked as a survivor before it was added to the pending set and can no "
+            "longer publish QUIESCED" +
+            (promotion_error.empty() ? std::string{} : "; " + promotion_error));
+}
+
+Observation run_failed_operation_boundary(const Scenario& scenario, bool migrate,
+                                          const std::string& comm_name) {
+    const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
+    FMI::FT::ControlPlane orchestrator(config_path(), comm_name, scenario.world);
+    orchestrator.clear_job_state();
+    orchestrator.clear_criu_state();
+    ControlPlaneCleanup control_cleanup(orchestrator);
+    DataKeyCleanup data_cleanup(comm_name);
+    RankChildren ranks;
+
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(0, 2, config_path(), comm_name, 128, "failed-op-rank-0");
+        write_byte(events, 'R');
+        expect_command(commands, 'S', deadline);
+        FMI::Comm::Data<std::vector<int>> reduce_send(std::vector<int>{1});
+        FMI::Comm::Data<std::vector<int>> reduce_receive(2);
+        FMI::Utils::Function<std::vector<int>> add(
+                [](std::vector<int> left, std::vector<int> right) {
+                    const auto count = std::min(left.size(), right.size());
+                    for (std::size_t index = 0; index < count; ++index) left[index] += right[index];
+                    return left;
+                }, true, true);
+        bool rejected = false;
+        try {
+            comm.reduce(reduce_send, reduce_receive, 0, add);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected) throw std::runtime_error("mismatched reduce was not rejected");
+
+        FMI::Comm::Data<std::vector<int>> first(std::vector<int>{101});
+        comm.send(first, 1);
+        write_byte(events, 'P');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> second(std::vector<int>{202});
+        comm.send(second, 1);
+        write_byte(events, 'D');
+        expect_command(commands, 'X', deadline);
+    });
+    ranks.spawn([=](int commands, int events) {
+        FMI::Communicator comm(1, 2, config_path(), comm_name, 128, "failed-op-rank-1");
+        write_byte(events, 'R');
+        expect_command(commands, 'C', deadline);
+        FMI::Comm::Data<std::vector<int>> first(1);
+        FMI::Comm::Data<std::vector<int>> second(1);
+        comm.recv(first, 0);
+        comm.recv(second, 0);
+        if (first.get() != std::vector<int>{101} || second.get() != std::vector<int>{202}) {
+            throw std::runtime_error("wrong payload after failed operation");
+        }
+        write_byte(events, 'D');
+        expect_command(commands, 'X', deadline);
+    });
+
+    std::string error;
+    if (!ranks.expect_all('R', deadline, error) || !ranks.command(0, 'S') ||
+        !ranks.expect(0, 'P', deadline, error)) {
+        return setup_error(error.empty() ? "failed operation prelude did not complete" : error);
+    }
+    if (migrate) orchestrator.request_migration(1);
+    if (!ranks.command(0, 'C') || !ranks.command(1, 'C')) {
+        return setup_error("failed to release the post-error operations");
+    }
+
+    if (!migrate) {
+        if (!ranks.expect(0, 'D', deadline, error) ||
+            !ranks.expect(1, 'D', deadline, error)) {
+            return setup_error(error);
+        }
+        return preserved("the application catches the rejected reduce and continues normally");
+    }
+
+    if (!wait_until(deadline, [&]() {
+            return boundary_at_least(orchestrator, 0, 2) &&
+                   boundary_at_least(orchestrator, 1, 1);
+        })) {
+        return setup_error("failed operation did not produce the expected 2-to-1 boundary skew");
+    }
+    std::string promotion_error;
+    if (!promotion_remains_closed(orchestrator, 1, Clock::now() +
+                                  std::chrono::milliseconds(250), promotion_error)) {
+        return setup_error("failed-operation cut unexpectedly promoted");
+    }
+    return counterexample(
+            Classification::OperationStuck,
+            "the rejected reduce advanced rank 0's boundary, so rank 0 parks before send(202) "
+            "while rank 1 blocks receiving it" +
+            (promotion_error.empty() ? std::string{} : "; " + promotion_error));
+}
+
+Observation run_incomplete_membership(const Scenario& scenario, bool migrate,
+                                      const std::string& comm_name) {
+    const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
+    FMI::FT::ControlPlane orchestrator(config_path(), comm_name, scenario.world);
+    orchestrator.clear_job_state();
+    orchestrator.clear_criu_state();
+    ControlPlaneCleanup control_cleanup(orchestrator);
+    DataKeyCleanup data_cleanup(comm_name);
+    RankChildren ranks;
+    const FMI::Utils::peer_num started_ranks = migrate ? 2 : 3;
+
+    for (FMI::Utils::peer_num rank = 0; rank < started_ranks; ++rank) {
+        ranks.spawn([=](int commands, int events) {
+            FMI::Communicator comm(rank, 3, config_path(), comm_name, 128,
+                                   "membership-rank-" + std::to_string(rank));
+            write_byte(events, 'R');
+            expect_command(commands, 'S', deadline);
+            comm.barrier();
+            write_byte(events, 'D');
+            expect_command(commands, 'X', deadline);
+        });
+    }
+
+    std::string error;
+    if (!ranks.expect_all('R', deadline, error)) return setup_error(error);
+    if (!migrate) {
+        if (!ranks.command_all('S') || !ranks.expect_all('D', deadline, error)) {
+            return setup_error(error.empty() ? "full-world baseline barrier failed" : error);
+        }
+        return preserved("all three configured ranks join before the barrier");
+    }
+
+    if (orchestrator.directory_snapshot(0).size() != 2) {
+        return setup_error("delayed-rank setup did not leave exactly two registered members");
+    }
+    orchestrator.request_migration(1);
+    if (!ranks.command_all('S')) return setup_error("failed to release partial membership");
+    if (!wait_until(deadline, [&]() {
+            return rank_has_state(orchestrator, 0, 1, FMI::FT::RankState::Quiesced) &&
+                   boundary_at_least(orchestrator, 0, 0) &&
+                   boundary_at_least(orchestrator, 1, 0);
+        })) {
+        return setup_error("the two registered ranks did not reach cut 0");
+    }
+
+    try {
+        if (!orchestrator.promote_epoch(1)) {
+            return setup_error("partial-world promotion returned false");
+        }
+    } catch (const std::exception& error_value) {
+        return setup_error(std::string("partial-world promotion was rejected: ") +
+                           error_value.what());
+    }
+    return counterexample(
+            Classification::PrematureCollective,
+            "epoch 1 was promoted with only ranks 0 and 1 registered in a three-rank world; "
+            "rank 2 has never joined",
+            true);
+}
+
+Observation run_stale_barrier_object(const Scenario& scenario, bool migrate,
+                                     const std::string& comm_name) {
+    const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
+    const std::string config = no_state_transfer_config_path();
+    FMI::FT::ControlPlane orchestrator(config, comm_name, scenario.world);
+    orchestrator.clear_job_state();
+    ControlPlaneCleanup control_cleanup(orchestrator);
+    DataKeyCleanup data_cleanup(comm_name);
+    RankChildren ranks;
+
+    for (FMI::Utils::peer_num rank = 0; rank < 2; ++rank) {
+        ranks.spawn([=](int commands, int events) {
+            FMI::Communicator comm(rank, 2, config, comm_name, 128,
+                                   "stale-barrier-rank-" + std::to_string(rank));
+            write_byte(events, 'R');
+            expect_command(commands, 'S', deadline);
+            comm.barrier();
+            write_byte(events, 'A');
+            expect_command(commands, 'N', deadline);
+            comm.barrier();
+            write_byte(events, 'D');
+            expect_command(commands, 'X', deadline);
+        });
+    }
+
+    std::string error;
+    if (!ranks.expect_all('R', deadline, error) || !ranks.command_all('S') ||
+        !ranks.expect_all('A', deadline, error)) {
+        return setup_error(error.empty() ? "epoch-zero barrier did not complete" : error);
+    }
+    if (!migrate) {
+        if (!ranks.command_all('N') || !ranks.expect_all('D', deadline, error)) {
+            return setup_error(error.empty() ? "baseline second barrier failed" : error);
+        }
+        return preserved("both ranks participate in both baseline barriers");
+    }
+
+    orchestrator.request_migration(1);
+    if (!ranks.command_all('N')) return setup_error("failed to release migration barrier");
+    if (!wait_until(deadline, [&]() {
+            return rank_has_state(orchestrator, 0, 1, FMI::FT::RankState::Quiesced) &&
+                   boundary_at_least(orchestrator, 0, 1) &&
+                   boundary_at_least(orchestrator, 1, 1);
+        })) {
+        return setup_error("target did not exit and survivor did not park at cut 1");
+    }
+
+    try {
+        if (!orchestrator.promote_epoch(1)) {
+            return setup_error("stale-barrier migration did not promote");
+        }
+    } catch (const std::exception& error_value) {
+        return setup_error(std::string("stale-barrier promotion failed: ") +
+                           error_value.what());
+    }
+    if (!ranks.expect(0, 'D', deadline, error)) {
+        return setup_error("survivor's epoch-one barrier did not return: " + error);
+    }
+    return counterexample(
+            Classification::PrematureCollective,
+            "rank 0 completed the epoch-one barrier before any replacement rank 1 existed; "
+            "ClientServer counted rank 1's epoch-zero _barrier_0 object",
+            true);
+}
+
+Observation run_specialized_case_named(const Scenario& scenario, bool migrate,
+                                       const std::string& comm_name) {
+    try {
+        switch (scenario.kind) {
+        case ScenarioKind::FutureSendAfterCut:
+            return run_future_send_after_cut(scenario, migrate, comm_name);
+        case ScenarioKind::StaleBarrierObject:
+            return run_stale_barrier_object(scenario, migrate, comm_name);
+        case ScenarioKind::PendingSetExpansion:
+            return run_pending_set_expansion(scenario, migrate, comm_name);
+        case ScenarioKind::FailedOperationBoundary:
+            return run_failed_operation_boundary(scenario, migrate, comm_name);
+        case ScenarioKind::IncompleteMembership:
+            return run_incomplete_membership(scenario, migrate, comm_name);
+        case ScenarioKind::Program:
+            return setup_error("program scenario dispatched to specialized executor");
+        }
+    } catch (const std::exception& error) {
+        return setup_error(std::string("specialized executor: ") + error.what());
+    } catch (const std::string& error) {
+        return setup_error("specialized executor: " + error);
+    } catch (...) {
+        return setup_error("specialized executor: unknown exception");
+    }
+    return setup_error("unknown specialized scenario kind");
+}
+
+Observation run_case_named(const Scenario& scenario, bool migrate,
+                           const std::string& comm_name) {
+    if (scenario.kind == ScenarioKind::Program) {
+        return run_program_case_named(scenario, migrate, comm_name);
+    }
+    return run_specialized_case_named(scenario, migrate, comm_name);
 }
 
 void append_u32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
@@ -633,7 +1312,7 @@ Observation run_isolated(const Scenario& scenario, bool migrate) {
         close(pipe_fds[0]);
         Observation child_result;
         try {
-            child_result = run_program_case_named(scenario, migrate, comm_name);
+            child_result = run_case_named(scenario, migrate, comm_name);
         } catch (const std::exception& error) {
             child_result.detail = std::string("uncaught child exception: ") + error.what();
         } catch (const std::string& error) {
@@ -834,7 +1513,7 @@ int run_selected(const std::vector<const Scenario*>& selected) {
     std::vector<Classification> classifications;
     classifications.reserve(selected.size());
     for (const auto* scenario : selected) {
-        if (scenario->kind != ScenarioKind::Program || scenario->backend != Backend::Redis) {
+        if (scenario->backend != Backend::Redis) {
             std::cout << scenario->id << ": baseline="
                       << to_string(Classification::InfrastructureSkip)
                       << " migrated=" << to_string(Classification::InfrastructureSkip)

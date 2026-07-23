@@ -150,7 +150,7 @@ std::vector<Scenario> make_scenarios() {
             "failed_operation_advances_boundary",
             "a failed operation must not advance the migration operation boundary",
             Backend::Redis, ScenarioKind::FailedOperationBoundary, 2, {1}, 0, {},
-            Classification::WrongPayload, redis_deadline
+            Classification::OperationStuck, redis_deadline
         },
         {
             "promotion_before_full_membership",
