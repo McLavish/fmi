@@ -142,36 +142,72 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
         upload(sendbuf, file_name);
     }
     bool left_to_right = !(f.commutative && f.associative);
-    auto num_data = peer_id + 1;
+    const Utils::peer_num num_data = peer_id + 1;
     std::vector<bool> received(num_data, false);
     std::vector<bool> applied(num_data, false);
     auto buffer_length = sendbuf.len;
-    std::vector<char> data(buffer_length * num_data);
-    std::memcpy(reinterpret_cast<void*>(recvbuf.buf), sendbuf.buf, buffer_length);
+    std::vector<char> data(static_cast<std::size_t>(buffer_length) * num_data);
+
+    // Park our own contribution in its own slot rather than seeding the accumulator with it.
+    // An inclusive scan at rank k is f(v0, v1, ..., vk) with our value LAST; seeding the
+    // accumulator with vk and folding the lower ranks in afterwards computed
+    // f(vk, v0, ..., v(k-1)) instead — a different result for any non-commutative reduction,
+    // which is exactly the case left_to_right exists to serve. Copying sendbuf out first also
+    // makes the routine safe when sendbuf and recvbuf alias.
+    std::memcpy(data.data() + static_cast<std::size_t>(peer_id) * buffer_length, sendbuf.buf, buffer_length);
     received[peer_id] = true;
-    applied[peer_id] = true;
+
+    bool accumulator_seeded = false;
+    Utils::peer_num next_in_order = 0;
+
+    auto fold = [&] (Utils::peer_num i) {
+        char* element = data.data() + static_cast<std::size_t>(i) * buffer_length;
+        if (!accumulator_seeded) {
+            std::memcpy(reinterpret_cast<void*>(recvbuf.buf), element, buffer_length);
+            accumulator_seeded = true;
+        } else {
+            f.f(recvbuf.buf, element);
+        }
+        applied[i] = true;
+    };
+
+    // Bound every loop by num_data, not num_peers: received/applied hold peer_id + 1 entries
+    // and data holds that many buffers, so iterating to num_peers read past the end of all
+    // three for every rank except the last.
+    auto apply_ready = [&] () {
+        if (left_to_right) {
+            // Strict index order, and only ever a prefix: a gap must stall the fold, never be
+            // skipped over.
+            while (next_in_order < num_data && received[next_in_order]) {
+                fold(next_in_order);
+                next_in_order++;
+            }
+        } else {
+            for (Utils::peer_num i = 0; i < num_data; i++) {
+                if (received[i] && !applied[i]) {
+                    fold(i);
+                }
+            }
+        }
+    };
+
+    // Rank 0 has every input it needs locally; fold before waiting so it completes without
+    // depending on max_timeout being non-zero.
+    apply_ready();
+
     unsigned int elapsed_time = 0;
     while (elapsed_time < max_timeout && std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; }) ) {
         // Receive all values
-        for (int i = 0; i < num_data; i++) {
+        for (Utils::peer_num i = 0; i < num_data; i++) {
             if (received[i]) {
                 continue;
             }
             std::string file_name = comm_name + std::to_string(i) + "_scan_" + std::to_string(num_operations["scan"]);
-            if (download_object({data.data() + i * buffer_length, buffer_length}, file_name)) {
+            if (download_object({data.data() + static_cast<std::size_t>(i) * buffer_length, buffer_length}, file_name)) {
                 received[i] = true;
             }
         }
-        // Apply function where possible
-        bool all_left_applied = true;
-        for (int i = 0; i < num_peers; i++) {
-            if (received[i] && !applied[i] && (!left_to_right || all_left_applied)) {
-                f.f(recvbuf.buf, data.data() + i * buffer_length);
-                applied[i] = true;
-            } else if (!received[i]) {
-                all_left_applied = false;
-            }
-        }
+        apply_ready();
 
         elapsed_time += timeout;
         std::this_thread::sleep_for(std::chrono::milliseconds(timeout));

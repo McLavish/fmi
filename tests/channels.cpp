@@ -1,5 +1,7 @@
 #include <boost/test/unit_test.hpp>
 
+#include "forked_rank_guard.h"
+
 #include "../include/comm/Channel.h"
 #include <chrono>
 #include <numeric>
@@ -136,7 +138,8 @@ BOOST_AUTO_TEST_CASE(bcast) {
         constexpr int num_peers = 32;
         int* vals = static_cast<int*>(mmap(nullptr, num_peers * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         vals[root] = 42;
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -171,7 +174,8 @@ BOOST_AUTO_TEST_CASE(barrier_unsucc) {
         
         constexpr int num_peers = 4;
         bool* caught = static_cast<bool*>(mmap(nullptr, num_peers * sizeof(bool), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -214,7 +218,8 @@ BOOST_AUTO_TEST_CASE(barrier_succ) {
         auto model_params = backend_data.second.second;
         
         constexpr int num_peers = 2;
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -253,7 +258,8 @@ BOOST_AUTO_TEST_CASE(gather_one) {
         FMI::Utils::peer_num root = 1;
 
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -298,7 +304,8 @@ BOOST_AUTO_TEST_CASE(gather_multiple) {
         FMI::Utils::peer_num root = 0;
 
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -340,7 +347,8 @@ BOOST_AUTO_TEST_CASE(scatter_one) {
         FMI::Utils::peer_num root = 0;
 
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -385,7 +393,8 @@ BOOST_AUTO_TEST_CASE(scatter_multiple) {
         FMI::Utils::peer_num root = 3;
 
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -425,7 +434,8 @@ BOOST_AUTO_TEST_CASE(reduce_multiple) {
         FMI::Utils::peer_num root = 5;
         constexpr int num_peers = 13;
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -473,7 +483,8 @@ BOOST_AUTO_TEST_CASE(reduce_multiple_ltr) {
         FMI::Utils::peer_num root = 0;
         constexpr int num_peers = 8;
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -520,7 +531,8 @@ BOOST_AUTO_TEST_CASE(allreduce_multiple) {
         
         constexpr int num_peers = 8;
         int* res = static_cast<int*>(mmap(nullptr, num_peers * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -566,7 +578,8 @@ BOOST_AUTO_TEST_CASE(allreduce_multiple_ltr) {
         FMI::Utils::peer_num root = 0;
         constexpr int num_peers = 8;
         int* res = static_cast<int*>(mmap(nullptr, num_peers * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -611,7 +624,8 @@ BOOST_AUTO_TEST_CASE(scan) {
         
         constexpr int num_peers = 32;
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -654,7 +668,8 @@ BOOST_AUTO_TEST_CASE(scan_ltr) {
 
         constexpr int num_peers = 8;
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-        int peer_id = 0;
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
         for (int i = 1; i < num_peers; i ++) {
             int pid = fork();
             if (pid == 0) {
@@ -688,5 +703,63 @@ BOOST_AUTO_TEST_CASE(scan_ltr) {
 
     }
 }
+
+#if FMI_ENABLE_REDIS
+// The `backends` map above has Redis and S3 commented out, so every case in this suite runs
+// against Direct only — i.e. against PeerToPeer. The whole ClientServer family (Redis, S3) is
+// otherwise untested here, which is how an inclusive-scan ordering bug survived in it.
+//
+// This case pins the ClientServer implementation directly. It uses subtraction (neither
+// commutative nor associative, so left_to_right is on) and values starting at 1: the existing
+// scan_ltr case gives rank 0 the value 0, which is subtraction's identity and happens to mask
+// a wrong fold order. Inclusive scan at rank k must be v0 - v1 - ... - vk, with the rank's own
+// value applied LAST; folding it first instead yields vk - v0 - ... - v(k-1).
+BOOST_AUTO_TEST_CASE(scan_ltr_client_server_ordering) {
+    constexpr int num_peers = 4;
+    int* res = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE,
+                                      MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    BOOST_REQUIRE(res != MAP_FAILED);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    for (int i = 1; i < num_peers; i++) {
+        int pid = fork();
+        if (pid == 0) {
+            peer_id = i;
+            break;
+        }
+    }
+
+    auto f = [] (char* a, char* b) {
+        *reinterpret_cast<int*>(a) = *reinterpret_cast<int*>(a) - *reinterpret_cast<int*>(b);
+    };
+
+    auto ch = FMI::Comm::Channel::get_channel("Redis", redis_test_params, redis_test_model_params);
+    ch->set_peer_id(peer_id);
+    ch->set_num_peers(num_peers);
+    ch->set_comm_name(comm_name + "_cs_scan");
+    int val = peer_id + 1;
+    ch->scan({reinterpret_cast<char*>(&val), sizeof(int)},
+             {reinterpret_cast<char*>(res + peer_id), sizeof(int)}, {f, false, false});
+    // Barrier before finalize: finalize() deletes this rank's uploaded objects, and rank 0
+    // finishes its scan immediately (it folds only its own value), so without this it deletes
+    // the object ranks 1..n-1 still have to download and they time out.
+    ch->barrier();
+    ch->finalize();
+
+    if (peer_id == 0) {
+        int status = 0;
+        while (wait(&status) > 0);
+        int expected = 1;                       // v0
+        BOOST_CHECK_EQUAL(expected, res[0]);
+        for (int i = 1; i < num_peers; i++) {
+            expected = expected - (i + 1);      // ... - vi
+            BOOST_CHECK_EQUAL(expected, res[i]);
+        }
+    } else {
+        exit(0);
+    }
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END();
