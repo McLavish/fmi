@@ -95,8 +95,15 @@ struct FMI::FT::ControlPlane::Impl {
 
 #if FMI_ENABLE_REDIS
     void connect() {
+        // Clear the pointer as soon as it is freed: connect_redis throws when Redis is
+        // unreachable, and leaving the freed pointer in place left ~Impl() to free it a
+        // second time (double free) and any retried command() to read context->err after
+        // free. This is reachable whenever Redis drops mid-run, because command() calls
+        // connect() exactly when the context is already broken (context->err) or a command
+        // came back with no reply.
         if (context != nullptr) {
             redisFree(context);
+            context = nullptr;
         }
         context = connect_redis(config);
     }
