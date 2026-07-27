@@ -462,6 +462,15 @@ std::string render_action(const Action& action,
     case ActionKind::Synchronize:
         output << "sync";
         break;
+    case ActionKind::Bcast:
+    case ActionKind::Gather:
+    case ActionKind::Scatter:
+    case ActionKind::Reduce:
+    case ActionKind::Allreduce:
+    case ActionKind::Scan:
+        // The bounded explorer's state space is p2p-only; collectives are catalog-only actions.
+        output << to_string(action.kind) << "(root=" << action.root << ')';
+        break;
     }
     return output.str();
 }

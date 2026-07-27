@@ -17,11 +17,23 @@ target_compile_definitions (Boost_Tests_run PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_E
 
 if(FMI_ENABLE_CRIU)
     find_package(Threads REQUIRED)
+    # Behavioural acceptance corpus.  One translation unit per axis; each self-registers via
+    # FMI_REGISTER_SCENARIOS, so authors never edit a shared list.  Add new axes here only.
+    set(FMI_MIGRATION_CORPUS_SOURCES
+        corpus/corpus_collectives.cpp
+        corpus/corpus_divergent_p2p.cpp
+        corpus/corpus_timing_targets.cpp
+        corpus/corpus_sizes_framing.cpp
+        corpus/corpus_failure_recovery.cpp
+        corpus/corpus_backends_policy.cpp
+    )
+
     add_executable(
         fmi_migration_counterexamples
         migration_counterexample_runner.cpp
         migration_counterexample_scenarios.cpp
         migration_cut_model.cpp
+        ${FMI_MIGRATION_CORPUS_SOURCES}
     )
     target_link_libraries(fmi_migration_counterexamples FMI Threads::Threads)
     target_compile_definitions(

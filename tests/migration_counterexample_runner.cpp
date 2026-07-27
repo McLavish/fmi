@@ -53,12 +53,29 @@ std::string direct_config_path() {
     return std::string(FMI_SOURCE_DIR) + "/config/fmi_ft_stress_test.json";
 }
 
+// Direct pairing names travel to the TCPunch rendezvous server, so they stay short.
+std::string short_direct_id(const Scenario& scenario) {
+    if (scenario.id == "direct_moved_link_backlog") return "moved";
+    if (scenario.id == "direct_survivor_link_crosses_epoch") return "survivor";
+    std::uint32_t hash = 2166136261u;
+    for (const char character : scenario.id) {
+        hash ^= static_cast<std::uint8_t>(character);
+        hash *= 16777619u;
+    }
+    return "c" + std::to_string(hash % 100000000u);
+}
+
+std::string scenario_config_path(const Scenario& scenario) {
+    if (scenario.backend == Backend::Direct) return direct_config_path();
+    return scenario.state_transfer == StateTransfer::None ? no_state_transfer_config_path()
+                                                          : config_path();
+}
+
 std::string unique_comm_name(const Scenario& scenario, bool migrate) {
     const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(
             Clock::now().time_since_epoch()).count();
     if (scenario.backend == Backend::Direct) {
-        const std::string short_id =
-                scenario.id == "direct_moved_link_backlog" ? "moved" : "survivor";
+        const std::string short_id = short_direct_id(scenario);
         return "mce-" + short_id + "-" + (migrate ? "m" : "b") + "-p" +
                std::to_string(static_cast<long long>(getpid())) + "-t" +
                std::to_string(ticks);
@@ -70,17 +87,24 @@ std::string unique_comm_name(const Scenario& scenario, bool migrate) {
 }
 
 std::string action_name(ActionKind kind) {
-    switch (kind) {
-    case ActionKind::Send:
-        return "send";
-    case ActionKind::Receive:
-        return "receive";
-    case ActionKind::Barrier:
-        return "barrier";
-    case ActionKind::Synchronize:
-        return "synchronize";
-    }
-    return "unknown";
+    return to_string(kind);
+}
+
+// Reduce/Allreduce/Scan size their result buffer from the contribution unless the scenario
+// deliberately states a different one in order to express an ill-formed program.
+std::size_t result_elements(const Action& action) {
+    return action.receive_elements != 0 ? action.receive_elements : action.payload.size();
+}
+
+// The declared commutative/associative flags are handed to FMI verbatim: they select the
+// algorithm (include/Communicator.h:103 and :128) and are therefore part of scenario identity.
+FMI::Utils::Function<std::vector<int>> make_function(const ReduceFunction& function) {
+    const auto op = function.op;
+    return FMI::Utils::Function<std::vector<int>>(
+            [op](std::vector<int> left, std::vector<int> right) {
+                return apply_reduce_op(op, left, right);
+            },
+            function.commutative, function.associative);
 }
 
 class PhaseGate {
@@ -530,6 +554,20 @@ Observation infrastructure_skip(std::string detail) {
     return observation;
 }
 
+Observation unsupported(std::string detail) {
+    Observation observation;
+    observation.classification = Classification::Unsupported;
+    observation.detail = std::move(detail);
+    return observation;
+}
+
+Observation not_yet_drivable(std::string detail) {
+    Observation observation;
+    observation.classification = Classification::NotYetDrivable;
+    observation.detail = std::move(detail);
+    return observation;
+}
+
 bool promotion_remains_closed(FMI::FT::ControlPlane& orchestrator,
                               std::uint64_t next_epoch,
                               Clock::time_point deadline,
@@ -560,7 +598,7 @@ Observation run_program_case_named(const Scenario& scenario, bool migrate,
         observation.detail = "the Task 3 executor supports Redis program scenarios only";
         return observation;
     }
-    if (scenario.phases.empty() || scenario.request_before_phase >= scenario.phases.size()) {
+    if (scenario.phases.empty() || scenario.trigger.phase >= scenario.phases.size()) {
         observation.detail = "invalid phase program or migration request point";
         return observation;
     }
@@ -580,8 +618,9 @@ Observation run_program_case_named(const Scenario& scenario, bool migrate,
     std::vector<std::thread> ranks;
     ranks.reserve(scenario.world);
 
+    const std::string config = scenario_config_path(scenario);
     try {
-        FMI::FT::ControlPlane orchestrator(config_path(), comm_name, scenario.world);
+        FMI::FT::ControlPlane orchestrator(config, comm_name, scenario.world);
         orchestrator.clear_job_state();
         orchestrator.clear_criu_state();
         ControlPlaneCleanup cleanup(orchestrator);
@@ -592,7 +631,7 @@ Observation run_program_case_named(const Scenario& scenario, bool migrate,
                 std::size_t action_index = 0;
                 ActionKind action_kind = ActionKind::Synchronize;
                 try {
-                    FMI::Communicator comm(rank, scenario.world, config_path(), comm_name, 128,
+                    FMI::Communicator comm(rank, scenario.world, config, comm_name, 128,
                                            "counterexample-rank-" + std::to_string(rank));
                     gate.arrive_ready();
                     for (phase_index = 0; phase_index < scenario.phases.size(); ++phase_index) {
@@ -618,6 +657,65 @@ Observation run_program_case_named(const Scenario& scenario, bool migrate,
                                 break;
                             case ActionKind::Synchronize:
                                 break;
+                            case ActionKind::Bcast: {
+                                FMI::Comm::Data<std::vector<int>> data(
+                                        rank == action.root
+                                                ? action.payload
+                                                : std::vector<int>(action.receive_elements));
+                                comm.bcast(data, action.root);
+                                state.received[rank].push_back(data.get());
+                                break;
+                            }
+                            case ActionKind::Gather: {
+                                FMI::Comm::Data<std::vector<int>> senddata(action.payload);
+                                FMI::Comm::Data<std::vector<int>> recvdata(
+                                        std::vector<int>(action.payload.size() * scenario.world));
+                                comm.gather(senddata, recvdata, action.root);
+                                if (rank == action.root) {
+                                    state.received[rank].push_back(recvdata.get());
+                                }
+                                break;
+                            }
+                            case ActionKind::Scatter: {
+                                const std::size_t total =
+                                        action.receive_elements * scenario.world;
+                                FMI::Comm::Data<std::vector<int>> senddata(
+                                        rank == action.root ? action.payload
+                                                            : std::vector<int>(total));
+                                FMI::Comm::Data<std::vector<int>> recvdata(
+                                        std::vector<int>(action.receive_elements));
+                                comm.scatter(senddata, recvdata, action.root);
+                                state.received[rank].push_back(recvdata.get());
+                                break;
+                            }
+                            case ActionKind::Reduce: {
+                                FMI::Comm::Data<std::vector<int>> senddata(action.payload);
+                                FMI::Comm::Data<std::vector<int>> recvdata(
+                                        std::vector<int>(result_elements(action)));
+                                comm.reduce(senddata, recvdata, action.root,
+                                            make_function(action.function));
+                                if (rank == action.root) {
+                                    state.received[rank].push_back(recvdata.get());
+                                }
+                                break;
+                            }
+                            case ActionKind::Allreduce: {
+                                FMI::Comm::Data<std::vector<int>> senddata(action.payload);
+                                FMI::Comm::Data<std::vector<int>> recvdata(
+                                        std::vector<int>(result_elements(action)));
+                                comm.allreduce(senddata, recvdata,
+                                               make_function(action.function));
+                                state.received[rank].push_back(recvdata.get());
+                                break;
+                            }
+                            case ActionKind::Scan: {
+                                FMI::Comm::Data<std::vector<int>> senddata(action.payload);
+                                FMI::Comm::Data<std::vector<int>> recvdata(
+                                        std::vector<int>(result_elements(action)));
+                                comm.scan(senddata, recvdata, make_function(action.function));
+                                state.received[rank].push_back(recvdata.get());
+                                break;
+                            }
                             }
                         }
                         gate.complete(rank, phase_index);
@@ -665,7 +763,7 @@ Observation run_program_case_named(const Scenario& scenario, bool migrate,
                     break;
                 }
 
-                const bool request_now = migrate && phase == scenario.request_before_phase;
+                const bool request_now = migrate && phase == scenario.trigger.phase;
                 std::uint64_t next_epoch = 0;
                 if (request_now) {
                     next_epoch = orchestrator.epoch() + 1;
@@ -721,7 +819,12 @@ Observation run_program_case_named(const Scenario& scenario, bool migrate,
                         ? Classification::LostMessage
                         : Classification::OperationStuck;
             } else {
-                observation.classification = Classification::SetupError;
+                // A rank aborted with a diagnostic.  That is the CORRECT outcome only for a
+                // scenario that contracts a loud abort; for every other scenario it is a
+                // harness/setup problem.
+                observation.classification = scenario.expected_v1 == Classification::LoudFail
+                        ? Classification::LoudFail
+                        : Classification::SetupError;
             }
         } else if (observation.detail.empty() &&
                    observation.classification != Classification::PromotionStuck) {
@@ -1041,7 +1144,7 @@ Observation run_incomplete_membership(const Scenario& scenario, bool migrate,
 Observation run_stale_barrier_object(const Scenario& scenario, bool migrate,
                                      const std::string& comm_name) {
     const auto deadline = Clock::now() + scenario.deadline - std::chrono::milliseconds(750);
-    const std::string config = no_state_transfer_config_path();
+    const std::string config = scenario_config_path(scenario);
     FMI::FT::ControlPlane orchestrator(config, comm_name, scenario.world);
     orchestrator.clear_job_state();
     ControlPlaneCleanup control_cleanup(orchestrator);
@@ -1395,6 +1498,13 @@ Observation run_specialized_case_named(const Scenario& scenario, bool migrate,
 
 Observation run_case_named(const Scenario& scenario, bool migrate,
                            const std::string& comm_name) {
+    if (scenario.backend == Backend::S3) {
+        return unsupported("the S3 backend is not wired into the counterexample executor");
+    }
+    if (!is_drivable(scenario.trigger)) {
+        return not_yet_drivable("trigger " + to_string(scenario.trigger.kind) +
+                                " cannot be staged against the current protocol");
+    }
     if (scenario.backend == Backend::Direct) {
         if (scenario.id == "direct_moved_link_backlog") {
             return run_direct_moved_link(scenario, migrate, comm_name);
@@ -1501,7 +1611,7 @@ std::optional<Observation> decode_observation(const std::vector<std::uint8_t>& f
     std::uint32_t classification = 0;
     if (!decoder.u32(magic) || magic != observation_magic ||
         !decoder.u32(classification) ||
-        classification > static_cast<std::uint32_t>(Classification::InfrastructureSkip)) {
+        classification > static_cast<std::uint32_t>(Classification::NotYetDrivable)) {
         return std::nullopt;
     }
 
@@ -1563,12 +1673,15 @@ std::string payload_text(const std::vector<int>& payload) {
     return output.str();
 }
 
+// Mirrors the order in which the executor concatenates the per-rank receive histories: rank
+// major, then phase, then action.  Every action that records a value contributes one tag.
 std::vector<std::string> receive_tags(const Scenario& scenario) {
     std::vector<std::string> tags;
     for (FMI::Utils::peer_num rank = 0; rank < scenario.world; ++rank) {
         for (const auto& phase : scenario.phases) {
+            if (rank >= phase.rank_actions.size()) continue;
             for (const auto& action : phase.rank_actions[rank]) {
-                if (action.kind == ActionKind::Receive) tags.push_back(action.tag);
+                if (records_result(action, rank)) tags.push_back(action.tag);
             }
         }
     }
@@ -1593,7 +1706,7 @@ Observation compare_with_baseline(const Scenario& scenario, const Observation& b
         return migrated;
     }
 
-    migrated.classification = scenario.expected_current_failure;
+    migrated.classification = scenario.expected_v1;
     const auto tags = receive_tags(scenario);
     const auto comparable = std::min(baseline.received_payloads.size(),
                                      migrated.received_payloads.size());
@@ -1729,11 +1842,12 @@ struct Options {
     bool explore = false;
     std::optional<std::string> case_id;
     std::optional<Backend> backend;
+    std::optional<std::string> axis;
 };
 
 void usage(std::ostream& output) {
     output << "usage: fmi_migration_counterexamples [--list] [--case <id>] "
-              "[--backend redis|direct] [--explore]\n";
+              "[--backend redis|direct|s3] [--axis <name>] [--explore]\n";
 }
 
 bool parse_backend(const std::string& value, Backend& backend) {
@@ -1743,6 +1857,10 @@ bool parse_backend(const std::string& value, Backend& backend) {
     }
     if (value == "direct") {
         backend = Backend::Direct;
+        return true;
+    }
+    if (value == "s3") {
+        backend = Backend::S3;
         return true;
     }
     return false;
@@ -1789,17 +1907,34 @@ std::optional<Options> parse_options(int argc, char* argv[]) {
                 return std::nullopt;
             }
             options.backend = backend;
+        } else if (argument == "--axis") {
+            if (options.axis || ++index == argc) {
+                std::cerr << "--axis requires one name and may only be specified once\n";
+                return std::nullopt;
+            }
+            if (std::string(argv[index]).rfind("--", 0) == 0) {
+                std::cerr << "--axis requires one name and may only be specified once\n";
+                return std::nullopt;
+            }
+            options.axis = argv[index];
         } else {
             std::cerr << "unknown option: " << argument << '\n';
             return std::nullopt;
         }
     }
 
-    if (options.explore && (options.list || options.case_id || options.backend)) {
+    if (options.explore &&
+        (options.list || options.case_id || options.backend || options.axis)) {
         std::cerr << "--explore cannot be combined with scenario selection options\n";
         return std::nullopt;
     }
     return options;
+}
+
+bool selected_by(const Options& options, const Scenario& scenario) {
+    if (options.backend && scenario.backend != *options.backend) return false;
+    if (options.axis && scenario.axis != *options.axis) return false;
+    return true;
 }
 
 std::vector<const Scenario*> select_scenarios(const Options& options) {
@@ -1809,50 +1944,108 @@ std::vector<const Scenario*> select_scenarios(const Options& options) {
         if (scenario == nullptr) {
             return selected;
         }
-        if (!options.backend || scenario->backend == *options.backend) {
+        if (selected_by(options, *scenario)) {
             selected.push_back(scenario);
         }
         return selected;
     }
     for (const auto& scenario : scenarios()) {
-        if (!options.backend || scenario.backend == *options.backend) {
+        if (selected_by(options, scenario)) {
             selected.push_back(&scenario);
         }
     }
     return selected;
 }
 
-int aggregate_exit(const std::vector<Classification>& classifications) {
+struct Outcome {
+    const Scenario* scenario = nullptr;
+    Classification classification = Classification::SetupError;
+};
+
+// LoudFail passes only for a scenario that contracts a loud abort; Unsupported and
+// NotYetDrivable are reporting states, never failures.
+bool outcome_is_acceptable(const Outcome& outcome) {
+    switch (outcome.classification) {
+    case Classification::Preserved:
+    case Classification::InfrastructureSkip:
+    case Classification::Unsupported:
+    case Classification::NotYetDrivable:
+        return true;
+    case Classification::LoudFail:
+        return outcome.scenario != nullptr &&
+               outcome.scenario->expected_v1 == Classification::LoudFail;
+    default:
+        return false;
+    }
+}
+
+int aggregate_exit(const std::vector<Outcome>& outcomes) {
     bool semantic_counterexample = false;
-    for (const auto classification : classifications) {
-        if (classification == Classification::SetupError) {
+    for (const auto& outcome : outcomes) {
+        if (outcome.classification == Classification::SetupError) {
             return 1;
         }
-        if (classification != Classification::Preserved &&
-            classification != Classification::InfrastructureSkip) {
+        if (!outcome_is_acceptable(outcome)) {
             semantic_counterexample = true;
         }
     }
     return semantic_counterexample ? 2 : 0;
 }
 
+int aggregate_exit(const std::vector<Classification>& classifications) {
+    std::vector<Outcome> outcomes;
+    outcomes.reserve(classifications.size());
+    for (const auto classification : classifications) {
+        outcomes.push_back({nullptr, classification});
+    }
+    return aggregate_exit(outcomes);
+}
+
 int run_selected(const std::vector<const Scenario*>& selected) {
-    std::vector<Classification> classifications;
-    classifications.reserve(selected.size());
+    std::vector<Outcome> outcomes;
+    outcomes.reserve(selected.size());
     for (const auto* scenario : selected) {
+        // Reporting states are decided without executing anything.
+        if (scenario->backend == Backend::S3) {
+            std::cout << scenario->id << ": baseline="
+                      << to_string(Classification::Unsupported) << " migrated="
+                      << to_string(Classification::Unsupported)
+                      << " detail=the S3 backend is not wired into the executor\n";
+            outcomes.push_back({scenario, Classification::Unsupported});
+            continue;
+        }
+        if (!is_drivable(scenario->trigger)) {
+            std::cout << scenario->id << ": baseline="
+                      << to_string(Classification::NotYetDrivable) << " migrated="
+                      << to_string(Classification::NotYetDrivable) << " detail=trigger "
+                      << to_string(scenario->trigger.kind)
+                      << " cannot be staged against the current protocol\n";
+            outcomes.push_back({scenario, Classification::NotYetDrivable});
+            continue;
+        }
+
         const Observation baseline = run_isolated(*scenario, false);
         std::cout << scenario->id << ": baseline=" << to_string(baseline.classification)
                   << std::flush;
         if (baseline.classification == Classification::InfrastructureSkip) {
             std::cout << " migrated=" << to_string(Classification::InfrastructureSkip)
                       << " detail=" << baseline.detail << '\n';
-            classifications.push_back(Classification::InfrastructureSkip);
+            outcomes.push_back({scenario, Classification::InfrastructureSkip});
+            continue;
+        }
+        if (baseline.classification == Classification::LoudFail &&
+            scenario->expected_v1 == Classification::LoudFail) {
+            // An ill-formed or unsupported program aborts loudly with or without migration;
+            // there is no meaningful no-migration oracle to compare against.
+            std::cout << " migrated=" << to_string(Classification::LoudFail)
+                      << " detail=" << baseline.detail << '\n';
+            outcomes.push_back({scenario, Classification::LoudFail});
             continue;
         }
         if (baseline.classification != Classification::Preserved) {
             std::cout << " migrated=" << to_string(Classification::SetupError)
                       << " detail=" << baseline.detail << '\n';
-            classifications.push_back(Classification::SetupError);
+            outcomes.push_back({scenario, Classification::SetupError});
             continue;
         }
 
@@ -1862,9 +2055,9 @@ int run_selected(const std::vector<const Scenario*>& selected) {
                   << " promoted=" << (migrated.promoted ? "yes" : "no");
         if (!migrated.detail.empty()) std::cout << " detail=" << migrated.detail;
         std::cout << '\n';
-        classifications.push_back(migrated.classification);
+        outcomes.push_back({scenario, migrated.classification});
     }
-    return aggregate_exit(classifications);
+    return aggregate_exit(outcomes);
 }
 
 int run_explorer() {
@@ -1922,7 +2115,7 @@ int main(int argc, char* argv[]) {
     if (options->list) {
         for (const auto* scenario : selected) {
             std::cout << scenario->id << '\t' << to_string(scenario->backend) << '\t'
-                      << scenario->property << '\n';
+                      << scenario->property << '\t' << scenario->axis << '\n';
         }
         return 0;
     }
