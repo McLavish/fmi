@@ -11,7 +11,7 @@ void FMI::Comm::ClientServer::send(channel_data buf, FMI::Utils::peer_num dest) 
     } else {
         operation_num = num_operation_entry->second;
     }
-    std::string file_name = comm_name + std::to_string(peer_id) + "_" + std::to_string(dest) + "_" + std::to_string(operation_num);
+    std::string file_name = data_plane_name() + std::to_string(peer_id) + "_" + std::to_string(dest) + "_" + std::to_string(operation_num);
     operation_num++;
     num_operations["send" + std::to_string(dest)] = operation_num;
     upload(buf, file_name);
@@ -25,14 +25,14 @@ void FMI::Comm::ClientServer::recv(channel_data buf, FMI::Utils::peer_num dest) 
     } else {
         operation_num = num_operation_entry->second;
     }
-    std::string file_name = comm_name + std::to_string(dest) + "_" + std::to_string(peer_id) + "_" + std::to_string(operation_num);
+    std::string file_name = data_plane_name() + std::to_string(dest) + "_" + std::to_string(peer_id) + "_" + std::to_string(operation_num);
     operation_num++;
     num_operations["recv" + std::to_string(dest)] = operation_num;
     download(buf, file_name);
 }
 
 void FMI::Comm::ClientServer::bcast(channel_data buf, FMI::Utils::peer_num root) {
-    std::string file_name = comm_name + std::to_string(root) + "_bcast_" + std::to_string(num_operations["bcast"]);
+    std::string file_name = data_plane_name() + std::to_string(root) + "_bcast_" + std::to_string(num_operations["bcast"]);
     num_operations["bcast"]++;
     if (peer_id == root) {
         upload(buf, file_name);
@@ -44,7 +44,7 @@ void FMI::Comm::ClientServer::bcast(channel_data buf, FMI::Utils::peer_num root)
 void FMI::Comm::ClientServer::barrier() {
     auto barrier_num = num_operations["barrier"];
     std::string barrier_suffix = "_barrier_" + std::to_string(barrier_num);
-    std::string file_name = comm_name + std::to_string(peer_id) + barrier_suffix;
+    std::string file_name = data_plane_name() + std::to_string(peer_id) + barrier_suffix;
     num_operations["barrier"]++;
     char b = '1';
     upload({&b, sizeof(b)}, file_name);
@@ -64,7 +64,21 @@ void FMI::Comm::ClientServer::barrier() {
     throw Utils::Timeout();
 }
 
+bool FMI::Comm::ClientServer::reconfigure_for_epoch(const std::string& new_comm_name,
+                                                   const std::vector<FMI::Utils::peer_num>& moved_ranks) {
+    (void) moved_ranks;
+    // Adopt the new name for diagnostics only. num_operations and created_objects deliberately
+    // survive: keys come from data_comm_name, which never carries the epoch, so resetting the
+    // counters here would let an operation after the migration rebuild a key that an operation
+    // before it had already written.
+    comm_name = new_comm_name;
+    return true;
+}
+
 void FMI::Comm::ClientServer::finalize() {
+    // Reached only at communicator destruction now that reconfigure_for_epoch keeps the channel
+    // across an epoch change. Barrier and collective objects are therefore retained for the whole
+    // job rather than being dropped at each reconfiguration.
     for (const auto& object_name : created_objects) {
         delete_object(object_name);
     }
@@ -106,7 +120,7 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
                 if (received[i]) {
                     continue;
                 }
-                std::string file_name = comm_name + std::to_string(i) + "_reduce_" + std::to_string(num_operations["reduce"]);
+                std::string file_name = data_plane_name() + std::to_string(i) + "_reduce_" + std::to_string(num_operations["reduce"]);
                 if (download_object({data.data() + i * buffer_length, buffer_length}, file_name)) {
                     received[i] = true;
                 }
@@ -130,7 +144,7 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
             throw Utils::Timeout();
         }
     } else {
-        std::string file_name = comm_name + std::to_string(peer_id) + "_reduce_" + std::to_string(num_operations["reduce"]);
+        std::string file_name = data_plane_name() + std::to_string(peer_id) + "_reduce_" + std::to_string(num_operations["reduce"]);
         num_operations["reduce"]++;
         upload(sendbuf, file_name);
     }
@@ -138,7 +152,7 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
 
 void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, raw_function f) {
     if (peer_id != num_peers - 1) {
-        std::string file_name = comm_name + std::to_string(peer_id) + "_scan_" + std::to_string(num_operations["scan"]);
+        std::string file_name = data_plane_name() + std::to_string(peer_id) + "_scan_" + std::to_string(num_operations["scan"]);
         upload(sendbuf, file_name);
     }
     bool left_to_right = !(f.commutative && f.associative);
@@ -202,7 +216,7 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
             if (received[i]) {
                 continue;
             }
-            std::string file_name = comm_name + std::to_string(i) + "_scan_" + std::to_string(num_operations["scan"]);
+            std::string file_name = data_plane_name() + std::to_string(i) + "_scan_" + std::to_string(num_operations["scan"]);
             if (download_object({data.data() + static_cast<std::size_t>(i) * buffer_length, buffer_length}, file_name)) {
                 received[i] = true;
             }

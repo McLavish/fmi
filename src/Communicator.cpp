@@ -63,6 +63,9 @@ namespace FMI {
             // belongs here, after the rank joins epoch N+1 and before it resumes user work.
             control_plane->join_epoch(active_epoch, peer_id, resolved_worker_id, placement);
 
+            // Keep the un-qualified name for the data plane: only Direct's pairing names are
+            // epoch-qualified, ClientServer keys must stay stable across epochs.
+            this->data_comm_name = comm_name;
             this->comm_name = FMI::FT::epoch_comm_name(comm_name, active_epoch);
             build_channels(config);
 
@@ -76,6 +79,7 @@ namespace FMI {
                     [this]() { finalize_channels(); });
         } else {
             this->comm_name = comm_name;
+            this->data_comm_name = comm_name;
             build_channels(config);
         }
 
@@ -126,6 +130,7 @@ namespace FMI {
         c->set_peer_id(peer_id);
         c->set_num_peers(num_peers);
         c->set_comm_name(comm_name);
+        c->set_data_comm_name(data_comm_name);
         channels[name] = c;
     }
 

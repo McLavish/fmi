@@ -99,6 +99,14 @@ namespace FMI::Comm {
         //! Helper utility to set the communicator name, should be set before first collective operation to avoid conflicts with empty communicator name.
         void set_comm_name(std::string communication_name) {comm_name = communication_name; }
 
+        //! Job-lifetime communicator name. Never epoch-qualified.
+        /*!
+         * Backends key their *data plane* on this name; only Direct's TCPunch pairing names use
+         * the epoch-qualified comm_name. Defaults to comm_name when never set, so channels
+         * supplied by the user and every non-FT run are unaffected.
+         */
+        void set_data_comm_name(std::string name) { data_comm_name = std::move(name); }
+
         //! Called before communicator is destructed, can be used by channels to clean up (e.g., delete resources)
         /*!
          * Note that we provide an explicit finalize function on purpose (and do not use a virtual destructor),
@@ -149,6 +157,17 @@ namespace FMI::Comm {
          * Some channels might not need this because other mechanisms exist, but every channel has to ensure that multiple concurrent communicators work as expected.
          */
         std::string comm_name;
+        //! Job-lifetime name for data-plane keys; see set_data_comm_name.
+        /*!
+         * Read it through data_plane_name() rather than directly, which falls back to comm_name
+         * while it is unset.
+         */
+        std::string data_comm_name;
+
+        //! The name data-plane keys are built from: data_comm_name once set, comm_name until then.
+        const std::string& data_plane_name() const {
+            return data_comm_name.empty() ? comm_name : data_comm_name;
+        }
 
     };
 

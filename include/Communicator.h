@@ -187,6 +187,12 @@ namespace FMI {
         FMI::Utils::peer_num peer_id;
         FMI::Utils::peer_num num_peers;
         std::string comm_name;
+        //! The name as the caller gave it, without any epoch qualification.
+        /*!
+         * comm_name gains an epoch suffix under fault tolerance and changes at every
+         * reconfiguration; this one never does, and is what channels build data-plane keys from.
+         */
+        std::string data_comm_name;
         std::string config_path;
         unsigned int faas_memory = 128;
         FMI::Utils::Hint channel_hint = FMI::Utils::Hint::cheap;
