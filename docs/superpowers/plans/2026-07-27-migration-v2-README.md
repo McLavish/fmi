@@ -2,14 +2,16 @@
 
 **Status:** index. Not normative; the spec is. If this file and the spec disagree, the spec wins.
 
-**Branch state (2026-07-28).** These documents live on `docs/migration-protocol-v2`; the code lives
-on `exp/checkpoint-mechanics`. The two **diverged at `523128a`** and neither contains the other.
-Plan A has already begun landing on the implementation branch — `1aa9beb` (concurrent-pairing test),
-`9c7e533` (ClientServer reconfigures in place with job-lifetime data keys), and `7460d68` in the
-`extern/TCPunch` submodule (idle/dead pairing-registration sweep). Every `file:line` citation in
-these four documents resolves against `exp/checkpoint-mechanics` at `9c7e533`, **not** against the
-branch they live on. Merging the two branches is the first thing a maintainer should do; re-resolve
-citations afterwards.
+**Branch state (2026-07-28).** Everything now lives on **`new_migration_protocol`**. The design
+documents and the code were briefly split across `docs/migration-protocol-v2` and
+`exp/checkpoint-mechanics` (diverged at `523128a`); they were merged in `c733d02` and the branch
+renamed, so the spec, the plans, `docs/tla/` and the code are co-located and every `file:line`
+citation resolves natively in the working tree.
+
+**Plan A has already begun landing** — `1aa9beb` (concurrent-pairing test), `9c7e533` (ClientServer
+reconfigures in place with job-lifetime data keys), and `7460d68` in the `extern/TCPunch` submodule
+(idle/dead pairing-registration sweep). Check each Plan A task against the log before starting it;
+several steps are already done and are marked as such in the plan.
 
 ## Start here (read this paragraph first if you are picking this up cold)
 

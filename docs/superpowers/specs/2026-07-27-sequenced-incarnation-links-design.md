@@ -9,12 +9,13 @@ all exhausted. Contracts 1, 2 and 3 each have a module; see [Verification status
 for what is proven, what is only assumed, and the composition gap that none of them closes.
 
 **Citation baseline:** every `file:line` reference in this document and in the three downstream
-plans is resolved against the **implementation** branch `exp/checkpoint-mechanics` (at `9c7e533`),
-not against the branch this document lives on. The two have diverged since `523128a`: the
-implementation branch carries the first Plan A commits (`1aa9beb`, `9c7e533`, and `7460d68` in the
-`extern/TCPunch` submodule) and this branch carries the design documents and `docs/tla/`. Re-resolve
-citations after any merge; `tests/channels.cpp` and `src/comm/ClientServer.cpp` in particular differ
-by tens of lines between the two.
+plans resolves against this branch, `new_migration_protocol`, as of `9c7e533`. The design documents
+and the code were briefly on separate branches (`docs/migration-protocol-v2` and
+`exp/checkpoint-mechanics`, diverged at `523128a`); they were merged in `c733d02` and the branch
+renamed, so citations now resolve natively in the working tree. Plan A has already begun landing
+here — `1aa9beb`, `9c7e533`, and `7460d68` in the `extern/TCPunch` submodule. Re-resolve citations
+after any further rebase; `tests/channels.cpp` and `src/comm/ClientServer.cpp` are the two files
+whose line numbers move most.
 
 ## Purpose
 
