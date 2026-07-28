@@ -10,4 +10,5 @@ build*
 extern*
 __pycache__/
 .codex/
+.superpowers/
 .env
