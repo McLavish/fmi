@@ -40,7 +40,9 @@ cmake --build build -j"$(nproc)"
 
 CMake options (defaults in `CMakeLists.txt`): `FMI_ENABLE_S3` (ON, pulls AWS SDK for C++),
 `FMI_ENABLE_REDIS` (ON, pulls hiredis), `FMI_ENABLE_CRIU` (OFF, experimental CRIU
-checkpoint/restore raw material), `FMI_USE_STATIC_BOOST` (ON), `FMI_BUILD_TESTS` (OFF),
+checkpoint/restore raw material), `FMI_ENABLE_TCPUNCH` (ON, builds the `Direct` backend and
+links the TCPunch submodule — turn it OFF on platforms with direct peer connectivity and the
+submodule is not needed at all), `FMI_USE_STATIC_BOOST` (ON), `FMI_BUILD_TESTS` (OFF),
 `FMI_BUILD_TOOLS` (ON when top-level, OFF when consumed via `add_subdirectory`). The library
 target is `FMI` (alias `FMI::FMI`), built STATIC, and publishes its public headers via
 `include/` (exported to a parent scope as `FMI_INCLUDE_DIRS`).
@@ -98,8 +100,17 @@ with `FMI_ENABLE_CRIU=ON`, `CriuFaultTolerance` (`criu_fault_tolerance.cpp`). **
 need live infrastructure:** Redis-backed cases need a running Redis; `Direct` cases need a
 `tcpunchd` rendezvous server on port 10000
 (`./extern/TCPunch/server/build*/tcpunchd 10000`); S3 cases need AWS credentials + a bucket.
+`DirectTCP` cases need only a running Redis — no `tcpunchd`.
 A `Direct` case that logs `ACTIVE` and then throws a `std::string` exception before pairing
-means the TCPunch client could not reach the rendezvous server.
+means the TCPunch client could not reach the rendezvous server. Note that bare `std::string`
+throw is uncaught inside the OpenMP two-thread cases and terminates the process, so a
+`Direct` failure there shows up as `terminate called` / `stack smashing`, not a test failure.
+
+The cheapest way to exercise the `Channels` suite is a `-DFMI_ENABLE_TCPUNCH=OFF` build: only
+`DirectTCP` is registered, so the suite runs against a single backend with no rendezvous
+server and none of TCPunch's flakiness (it has been green 5/5 that way, against `Direct`'s
+0–33 failures per run).
+
 The CRIU tests are designed to run against a *mock* `criu` binary because real
 checkpoint/restore needs kernel capabilities usually unavailable in dev environments.
 
@@ -150,9 +161,36 @@ fault tolerance layered around the user API.
   a static `get_channel(name, ...)` factory keyed by backend name. Two abstract families
   implement the collectives differently:
   - `PeerToPeer` derives collectives (binomial trees, etc.) from `send_routine`/
-    `recv_routine` primitives. Concrete backend: `Direct` (TCP via TCPunch NAT hole-punch).
+    `recv_routine` primitives. Concrete backends: `Direct` (TCP via TCPunch NAT hole-punch)
+    and `DirectTCP` (plain TCP, no rendezvous server). Both sit on `TcpChannelBase`, which
+    owns everything about moving bytes over a socket; a subclass supplies only `establish()`.
   - `ClientServer` derives collectives over a shared medium via `upload`/`download`.
     Concrete backends: `S3`, `Redis`.
+
+- **`DirectTCP`** (`include/comm/DirectTCP.h`) is the TCPunch-free peer-to-peer transport, for
+  platforms where ranks can reach each other directly (VMs, containers on a shared network,
+  pods, bare metal). Instead of a rendezvous server, each rank binds an ephemeral port and
+  publishes `ip:port:nonce` to a Redis hash `fmi:direct:<comm_name>`; the lower rank listens,
+  the higher connects, and the listener acknowledges a 32-byte hello so a connect that lands on
+  a recycled port is detected rather than silently used. Discovery is one `HGETALL`, publishing
+  is a pipelined `HSET`+`EXPIRE`, and links are built lazily as collectives touch them. Config
+  keys are deliberately distinct from `Direct`'s (`registry_host`/`registry_port`, `bind_host`,
+  `advertise_host`) so a `Direct` block cannot be silently reinterpreted. Example config:
+  `config/fmi_direct_tcp.json`. Reset a stale registry with
+  `redis-cli DEL fmi:direct:<comm_name>`.
+  - Establishment is dramatically cheaper than TCPunch — measured first-barrier time on
+    loopback: 107 ms → 0.5 ms at 2 peers, 315 ms → 6.8 ms at 8, and it completes in ~10 ms at
+    32 peers where `Direct` fails outright.
+  - **Not usable behind NAT**, or anywhere ranks cannot accept inbound connections (Lambda,
+    Knative scale-from-zero). Those are exactly what `Direct` is for.
+  - On multi-homed hosts and in containers, set `advertise_host` explicitly (in K8s, the pod IP
+    via the downward API — never a Service VIP, which load-balances to an arbitrary pod).
+    Otherwise the rank advertises whichever local address routes to the registry.
+  - Scope today is plain messaging: it is not registered as checkpoint-safe
+    (`include/ft/experimental/CriuRequirements.h`) and no runbook uses it.
+  - Note `ChannelPolicy` breaks ties by `std::map` order, so `Direct` beats `DirectTCP`
+    alphabetically at equal modelled cost — `model.DirectTCP.overhead` is set below `Direct`'s
+    to reflect its cheaper connection setup, which is also what makes the policy pick it.
 
 - **Data & reductions**: `FMI::Comm::Data<T>` (`include/comm/Data.h`) flattens scalars or
   vectors into a raw byte buffer (`data()`, `size_in_bytes()`). `FMI::Utils::Function<T>`
