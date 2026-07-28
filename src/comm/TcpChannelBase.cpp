@@ -1,5 +1,7 @@
 #include "../../include/comm/TcpChannelBase.h"
 
+#include "../../include/comm/OperationScope.h"
+
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netinet/tcp.h>
@@ -11,6 +13,44 @@
 
 void FMI::Comm::TcpChannelBase::parse_tcp_params(std::map<std::string, std::string>& params) {
     max_timeout = std::stoi(params["max_timeout"]);
+    framed = params.count("framed") > 0 && params["framed"] == "true";
+}
+
+void FMI::Comm::TcpChannelBase::ensure_link_state() {
+    if (next_send_seq.size() != num_peers) {
+        next_send_seq.assign(num_peers, 0);
+        next_recv_seq.assign(num_peers, 0);
+    }
+}
+
+namespace {
+    //! Identity the local rank believes it is exchanging, for a message of @p len bytes.
+    /*!
+     * Built from the operation the Communicator published, so a collective fragment and an
+     * application send of the same size are different identities even though the bytes on the
+     * wire are indistinguishable.
+     */
+    FMI::Comm::FrameHeader expected_identity(std::size_t len) {
+        const auto& op = FMI::Comm::active_operation();
+        FMI::Comm::FrameHeader h;
+        h.lane = op.lane;
+        h.op_kind = op.op_kind;
+        h.collective_index = op.collective_index;
+        h.root = op.root;
+        h.commutative = op.commutative;
+        h.associative = op.associative;
+        h.total_length = len;
+        h.payload_length = static_cast<std::uint32_t>(len);
+        return h;
+    }
+
+    std::string describe(const FMI::Comm::FrameHeader& h) {
+        return "lane=" + std::to_string(static_cast<int>(h.lane))
+               + " op=" + std::to_string(static_cast<int>(h.op_kind))
+               + " collective=" + std::to_string(h.collective_index)
+               + " root=" + std::to_string(h.root)
+               + " len=" + std::to_string(h.total_length);
+    }
 }
 
 void FMI::Comm::TcpChannelBase::parse_tcp_model_params(std::map<std::string, std::string>& model_params) {
@@ -32,14 +72,13 @@ std::string FMI::Comm::TcpChannelBase::link_name(Utils::peer_num partner_id, boo
     return comm_name + "|" + std::to_string(low) + "-" + std::to_string(high);
 }
 
-void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rcpt_id) {
-    check_socket(rcpt_id, link_name(rcpt_id, true));
+void FMI::Comm::TcpChannelBase::write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len) {
     // MSG_NOSIGNAL: a peer that closed mid-migration must surface as EPIPE, not kill the
     // process with SIGPIPE. Loop: a blocking send under SO_SNDTIMEO may accept only part of
     // a large buffer, and a silent short send would desynchronize the byte stream.
     std::size_t sent = 0;
-    while (sent < buf.len) {
-        long n = ::send(sockets[rcpt_id], buf.buf + sent, buf.len - sent, MSG_NOSIGNAL);
+    while (sent < len) {
+        long n = ::send(sockets[rcpt_id], data + sent, len - sent, MSG_NOSIGNAL);
         if (n == -1) {
             if (errno == EINTR) {
                 continue;
@@ -49,28 +88,27 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
             }
             throw std::runtime_error(transport_tag + ": send to peer " + std::to_string(rcpt_id) +
                                      " failed after " + std::to_string(sent) + "/" +
-                                     std::to_string(buf.len) + " bytes: " + strerror(errno));
+                                     std::to_string(len) + " bytes: " + strerror(errno));
         }
         sent += static_cast<std::size_t>(n);
     }
 }
 
-void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num sender_id) {
-    check_socket(sender_id, link_name(sender_id, false));
+void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, std::size_t len) {
     // Never return with a partially filled buffer: EOF or an error mid-message must be loud.
     // A silent short read here hands garbage to the collective and corrupts the reduction.
     // MSG_WAITALL under SO_RCVTIMEO can legitimately return a partial chunk on timeout, so
     // loop while progress is made and only throw Timeout when a call yields nothing.
     std::size_t received = 0;
-    while (received < buf.len) {
-        long n = ::recv(sockets[sender_id], buf.buf + received, buf.len - received, MSG_WAITALL);
+    while (received < len) {
+        long n = ::recv(sockets[sender_id], data + received, len - received, MSG_WAITALL);
         if (n == 0) {
             if (received == 0 && eof_before_data_is_timeout) {
                 throw Utils::Timeout();
             }
             throw std::runtime_error(transport_tag + ": connection to peer " + std::to_string(sender_id) +
                                      " closed after " + std::to_string(received) + "/" +
-                                     std::to_string(buf.len) + " bytes");
+                                     std::to_string(len) + " bytes");
         }
         if (n == -1) {
             if (errno == EINTR) {
@@ -87,10 +125,71 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
             }
             throw std::runtime_error(transport_tag + ": recv from peer " + std::to_string(sender_id) +
                                      " failed after " + std::to_string(received) + "/" +
-                                     std::to_string(buf.len) + " bytes: " + strerror(errno));
+                                     std::to_string(len) + " bytes: " + strerror(errno));
         }
         received += static_cast<std::size_t>(n);
     }
+}
+
+void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rcpt_id) {
+    check_socket(rcpt_id, link_name(rcpt_id, true));
+    if (!framed) {
+        write_all(rcpt_id, buf.buf, buf.len);
+        return;
+    }
+
+    ensure_link_state();
+    if (buf.len > 0xFFFFFFFFull) {
+        throw std::runtime_error(transport_tag + ": message of " + std::to_string(buf.len) +
+                                 " bytes exceeds the framed maximum");
+    }
+    FrameHeader header = expected_identity(buf.len);
+    header.message_id = next_send_seq[rcpt_id];
+    header.transport_seq = next_send_seq[rcpt_id]++;
+    char encoded[frame_header_bytes];
+    encode_header(header, encoded);
+    // Header immediately precedes its payload with nothing interleaved, which holds because a
+    // channel is only ever driven by one application thread at a time.
+    write_all(rcpt_id, encoded, frame_header_bytes);
+    write_all(rcpt_id, buf.buf, buf.len);
+}
+
+void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num sender_id) {
+    check_socket(sender_id, link_name(sender_id, false));
+    if (!framed) {
+        read_all(sender_id, buf.buf, buf.len);
+        return;
+    }
+
+    ensure_link_state();
+    char encoded[frame_header_bytes];
+    read_all(sender_id, encoded, frame_header_bytes);
+
+    FrameHeader arrived;
+    const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);
+    if (status != DecodeStatus::Ok) {
+        throw std::runtime_error(transport_tag + ": malformed frame from peer " +
+                                 std::to_string(sender_id) + " (decode status " +
+                                 std::to_string(static_cast<int>(status)) + ")");
+    }
+
+    const FrameHeader expected = expected_identity(buf.len);
+    if (!same_identity(arrived, expected)) {
+        // The peer is in a different logical operation. Under the unframed protocol this is
+        // exactly where a divergent schedule silently consumed the wrong payload.
+        throw std::runtime_error(transport_tag + ": message identity mismatch from peer " +
+                                 std::to_string(sender_id) + " - expected [" +
+                                 describe(expected) + "] but received [" +
+                                 describe(arrived) + "]");
+    }
+    if (arrived.transport_seq != next_recv_seq[sender_id]) {
+        throw std::runtime_error(transport_tag + ": sequence gap from peer " +
+                                 std::to_string(sender_id) + " - expected " +
+                                 std::to_string(next_recv_seq[sender_id]) + " but received " +
+                                 std::to_string(arrived.transport_seq));
+    }
+    ++next_recv_seq[sender_id];
+    read_all(sender_id, buf.buf, buf.len);
 }
 
 void FMI::Comm::TcpChannelBase::check_socket(FMI::Utils::peer_num partner_id, const std::string& name) {

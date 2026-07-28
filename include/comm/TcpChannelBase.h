@@ -2,6 +2,7 @@
 #define FMI_TCPCHANNELBASE_H
 
 #include "PeerToPeer.h"
+#include "LinkFrame.h"
 
 #include <map>
 #include <string>
@@ -79,6 +80,28 @@ namespace FMI::Comm {
 
         //! Parse the parameters every TCP transport shares. Missing keys throw, as before.
         void parse_tcp_params(std::map<std::string, std::string>& params);
+
+        //! Wrap every message in a LinkFrame carrying its operation identity.
+        /*!
+         * Off by default, in which case the byte stream is exactly what it was before framing
+         * existed. On, each message is preceded by a fixed-size header and the receiver
+         * rejects a frame belonging to a different logical operation instead of copying it
+         * into the application's buffer.
+         */
+        bool framed = false;
+
+        //! Per-peer link sequence, used for the on-wire transport_seq. Job-lifetime.
+        std::vector<std::uint64_t> next_send_seq;
+        std::vector<std::uint64_t> next_recv_seq;
+
+        //! Grow the per-peer sequence vectors to num_peers on first use.
+        void ensure_link_state();
+
+        //! Write exactly @p len bytes to @p rcpt_id, looping over partial writes.
+        void write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len);
+
+        //! Read exactly @p len bytes from @p sender_id, looping over partial reads.
+        void read_all(Utils::peer_num sender_id, char* data, std::size_t len);
 
         void parse_tcp_model_params(std::map<std::string, std::string>& model_params);
 
