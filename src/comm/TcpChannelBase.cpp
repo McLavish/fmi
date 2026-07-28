@@ -65,6 +65,9 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
     while (received < buf.len) {
         long n = ::recv(sockets[sender_id], buf.buf + received, buf.len - received, MSG_WAITALL);
         if (n == 0) {
+            if (received == 0 && eof_before_data_is_timeout) {
+                throw Utils::Timeout();
+            }
             throw std::runtime_error(transport_tag + ": connection to peer " + std::to_string(sender_id) +
                                      " closed after " + std::to_string(received) + "/" +
                                      std::to_string(buf.len) + " bytes");
@@ -74,6 +77,12 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                throw Utils::Timeout();
+            }
+            // A peer that tears the connection down before sending any of this message has
+            // abandoned the collective; it reaches us as ECONNRESET rather than EOF whenever it
+            // closed with data of ours still unread. Same condition as the n == 0 case above.
+            if (received == 0 && errno == ECONNRESET && eof_before_data_is_timeout) {
                 throw Utils::Timeout();
             }
             throw std::runtime_error(transport_tag + ": recv from peer " + std::to_string(sender_id) +

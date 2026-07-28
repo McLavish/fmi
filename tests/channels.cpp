@@ -67,15 +67,44 @@ std::map<std::string, std::string> direct_test_model_params = {
         {"include_infrastructure_costs", "true"}
 };
 
+std::map<std::string, std::string> direct_tcp_test_params = {
+        {"registry_host", "127.0.0.1"},
+        {"registry_port", "6379"},
+        {"max_timeout", "3000"},
+        {"registry_poll_interval_ms", "2"},
+        {"connect_retry_interval_ms", "5"},
+        // Short TTL: these entries are scratch, and a crashed run should not leave them behind.
+        {"registry_ttl_s", "120"}
+};
+
+// Same cost profile as Direct — it is the same wire — except for a lower connection overhead,
+// which is the point of the backend.
+std::map<std::string, std::string> direct_tcp_test_model_params = {
+        {"bandwidth", "250.0"},
+        {"overhead", "0.20"},
+        {"transfer_price", "0.0"},
+        {"vm_price", "0.0134"},
+        {"requests_per_hour", "1000"},
+        {"include_infrastructure_costs", "true"}
+};
+
 std::map< std::string, std::pair< std::map<std::string, std::string>, std::map<std::string, std::string> > > backends = {
         //{"S3", {s3_test_params, s3_test_model_params}},
        // {"Redis", {redis_test_params, redis_test_model_params}},
 #if FMI_ENABLE_TCPUNCH
         {"Direct", {direct_test_params, direct_test_model_params}},
 #endif
+#if FMI_ENABLE_REDIS
+        {"DirectTCP", {direct_tcp_test_params, direct_tcp_test_model_params}},
+#endif
 };
 
-std::string comm_name = std::to_string(std::time(nullptr)) + "Tests";
+// Nanosecond resolution plus the pid, not std::time(): every case in this suite shares this one
+// name, and at second resolution two runs starting in the same second collide. TCPunch tolerated
+// that (its registrations are consumed pairwise and swept), but a Redis-backed peer registry
+// persists, so a collision means one run dialling another run's live ranks.
+std::string comm_name = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                        "_" + std::to_string(getpid()) + "Tests";
 
 BOOST_AUTO_TEST_CASE(sending_receiving) {
     for (auto const & backend_data : backends) {

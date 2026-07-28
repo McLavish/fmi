@@ -90,6 +90,19 @@ namespace FMI::Comm {
          */
         std::vector<int> sockets;
         unsigned int max_timeout = 0;
+        //! Report a peer that closes without sending a single byte as a Timeout rather than a
+        //! transport error.
+        /*!
+         * Only meaningful for a transport that can hold an established link to a peer which
+         * then abandons the collective — the peer's close is that abandonment, and "the
+         * collective did not complete" is what FMI::Utils::Timeout means. An EOF *part way*
+         * through a message stays a hard error either way: that one is truncation, and it must
+         * never be quiet.
+         *
+         * Off for Direct, whose pairing never completes in the first place when a peer does not
+         * participate, so it surfaces the same condition as a Timeout from pair().
+         */
+        bool eof_before_data_is_timeout = false;
         //! Prefix for error messages ("Direct", "DirectTCP"), so each transport reports as itself.
         std::string transport_tag;
         // Model params
