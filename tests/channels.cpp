@@ -3,11 +3,14 @@
 #include "forked_rank_guard.h"
 
 #include "../include/comm/Channel.h"
+#include <tcpunch.h>
+#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
 #include <new>
 #include <numeric>
 #include <thread>
+#include <vector>
 #include <ctime>
 #include <omp.h>
 #include <sys/mman.h>
@@ -705,6 +708,95 @@ BOOST_AUTO_TEST_CASE(scan_ltr) {
 
 
     }
+}
+
+namespace {
+    // These cases talk to the rendezvous server directly rather than through a Channel, so they
+    // skip rather than fail when it is absent -- the rest of the suite already fails loudly in
+    // that situation and there is no point in adding more noise.
+    bool rendezvous_reachable() {
+        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        if (probe < 0) {
+            return false;
+        }
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(10000);
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        const bool ok = connect(probe, (struct sockaddr*)&addr, sizeof(addr)) == 0;
+        close(probe);
+        return ok;
+    }
+
+    // pair() reports failure as Timeout, but error_exit() in the TCPunch common header throws a
+    // bare std::string, so both have to be caught to tell "did not pair" from a crash.
+    bool pair_fails(const std::string& name, int timeout_ms) {
+        try {
+            int fd = pair(name, "127.0.0.1", 10000, timeout_ms);
+            if (fd >= 0) {
+                close(fd);
+            }
+            return false;
+        } catch (const Timeout&) {
+            return true;
+        } catch (const std::string&) {
+            return true;
+        }
+    }
+}
+
+// One pairing that never finds a partner must not disturb the pairings running beside it, and
+// the name it abandoned must stay usable afterwards. Before the registry was swept, an entry
+// was reclaimed only when a second client registered under the same name, so an abandoned
+// registration survived for the lifetime of the server and the next pairing under that name was
+// handed a peer address belonging to a client that had already gone away.
+//
+// This also covers pair() itself being callable concurrently: it kept its listener state in two
+// file-scope atomics, so two simultaneous calls in one process overwrote each other's result.
+BOOST_AUTO_TEST_CASE(direct_concurrent_pairings_one_timeout) {
+    if (!rendezvous_reachable()) {
+        BOOST_TEST_MESSAGE("no rendezvous server on 127.0.0.1:10000, skipping");
+        return;
+    }
+    const std::string base = "concurrent-" + std::to_string(getpid());
+    const std::string abandoned = base + "-abandoned";
+
+    std::atomic<bool> orphan_timed_out{false};
+    std::thread orphan([&] { orphan_timed_out = pair_fails(abandoned, 500); });
+
+    std::atomic<int> paired{0};
+    std::vector<std::thread> peers;
+    for (int k = 0; k < 3; k++) {
+        for (int side = 0; side < 2; side++) {
+            peers.emplace_back([&, k] {
+                if (!pair_fails(base + "-" + std::to_string(k), 20000)) {
+                    paired++;
+                }
+            });
+        }
+    }
+    for (auto& t : peers) {
+        t.join();
+    }
+    orphan.join();
+
+    BOOST_CHECK(orphan_timed_out.load());
+    BOOST_CHECK_EQUAL(paired.load(), 6);
+
+    // The abandoned name must be usable again by a real pair of peers.
+    std::atomic<int> repaired{0};
+    std::vector<std::thread> retry;
+    for (int side = 0; side < 2; side++) {
+        retry.emplace_back([&] {
+            if (!pair_fails(abandoned, 20000)) {
+                repaired++;
+            }
+        });
+    }
+    for (auto& t : retry) {
+        t.join();
+    }
+    BOOST_CHECK_EQUAL(repaired.load(), 2);
 }
 
 #if FMI_ENABLE_REDIS
