@@ -8,6 +8,7 @@
 #include <vector>
 #include "../utils/Function.h"
 #include "../utils/Common.h"
+#include "OperationScope.h"
 
 //! Type of functions that is passed to channels
 /*!
@@ -149,6 +150,14 @@ namespace FMI::Comm {
         virtual double get_operation_price(Utils::OperationInfo op_info) = 0;
 
     protected:
+        //! Identity of the FMI operation currently in flight on this thread.
+        /*!
+         * Set by the Communicator around every user-visible call, so a backend can tell an
+         * application send from a collective fragment without the Channel interface gaining a
+         * parameter that user-supplied channels would have to implement.
+         */
+        static const OperationIdentity& current_operation() { return active_operation(); }
+
         FMI::Utils::peer_num peer_id;
         FMI::Utils::peer_num num_peers;
         //! Can optionally be used by channels to avoid resource conflicts that may occur because of multiple concurrent communicators.

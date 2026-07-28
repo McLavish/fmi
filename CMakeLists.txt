@@ -61,6 +61,7 @@ set(FMI_SOURCES
     src/comm/ClientServer.cpp
     src/utils/ChannelPolicy.cpp
     src/comm/PeerToPeer.cpp
+    src/comm/OperationScope.cpp
     src/comm/SequencedLink.cpp
     src/comm/TcpChannelBase.cpp
     src/ft/ControlPlane.cpp

@@ -3,6 +3,7 @@
 
 #include "./utils/Configuration.h"
 #include "comm/Channel.h"
+#include "comm/OperationScope.h"
 #include "utils/ChannelPolicy.h"
 
 namespace FMI::FT {
@@ -30,6 +31,8 @@ namespace FMI {
         template<typename T>
         void send(Comm::Data<T> &buf, FMI::Utils::peer_num dest) {
             OperationGuard guard(this);
+            // root is the DESTINATION on both sides, so sender and receiver agree.
+            Comm::OperationScope scope(Comm::p2p_identity(dest));
             std::string channel = policy->get_channel({Utils::send, buf.size_in_bytes()});
             channel_data data {buf.data(), buf.size_in_bytes()};
             channels[channel]->send(data, dest);
@@ -39,6 +42,7 @@ namespace FMI {
         template<typename T>
         void recv(Comm::Data<T> &buf, FMI::Utils::peer_num src) {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::p2p_identity(peer_id));
             std::string channel = policy->get_channel({Utils::send, buf.size_in_bytes()});
             channel_data data {buf.data(), buf.size_in_bytes()};
             channels[channel]->recv(data, src);
@@ -48,6 +52,8 @@ namespace FMI {
         template<typename T>
         void bcast(Comm::Data<T> &buf, FMI::Utils::peer_num root) {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::collective_identity(
+                    Comm::OpKind::Bcast, next_collective_index(), root));
             std::string channel = policy->get_channel({Utils::bcast, buf.size_in_bytes()});
             channel_data data {buf.data(), buf.size_in_bytes()};
             channels[channel]->bcast(data, root);
@@ -56,6 +62,8 @@ namespace FMI {
         //! Barrier synchronization collective
         void barrier() {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::collective_identity(
+                    Comm::OpKind::Barrier, next_collective_index(), 0));
             std::string channel = policy->get_channel({Utils::barrier, 0});
             channels[channel]->barrier();
         }
@@ -68,6 +76,8 @@ namespace FMI {
         template<typename T>
         void gather(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::peer_num root) {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::collective_identity(
+                    Comm::OpKind::Gather, next_collective_index(), root));
             std::string channel = policy->get_channel({Utils::gather, sendbuf.size_in_bytes()});
             channel_data senddata {sendbuf.data(), sendbuf.size_in_bytes()};
             channel_data recvdata {recvbuf.data(), recvbuf.size_in_bytes()};
@@ -82,6 +92,8 @@ namespace FMI {
         template<typename T>
         void scatter(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::peer_num root) {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::collective_identity(
+                    Comm::OpKind::Scatter, next_collective_index(), root));
             std::string channel = policy->get_channel({Utils::scatter, recvbuf.size_in_bytes()});
             channel_data senddata {sendbuf.data(), sendbuf.size_in_bytes()};
             channel_data recvdata {recvbuf.data(), recvbuf.size_in_bytes()};
@@ -97,6 +109,8 @@ namespace FMI {
         template <typename T>
         void reduce(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::peer_num root, FMI::Utils::Function<T> f) {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::collective_identity(
+                    Comm::OpKind::Reduce, next_collective_index(), root, f.commutative, f.associative));
             if (peer_id == root && sendbuf.size_in_bytes() != recvbuf.size_in_bytes()) {
                 throw std::runtime_error("Dimensions of send and receive data must match");
             }
@@ -122,6 +136,8 @@ namespace FMI {
         template <typename T>
         void allreduce(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::Function<T> f) {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::collective_identity(
+                    Comm::OpKind::Allreduce, next_collective_index(), 0, f.commutative, f.associative));
             if (sendbuf.size_in_bytes() != recvbuf.size_in_bytes()) {
                 throw std::runtime_error("Dimensions of send and receive data must match");
             }
@@ -147,6 +163,8 @@ namespace FMI {
         template<typename T>
         void scan(Comm::Data<T> &sendbuf, Comm::Data<T> &recvbuf, FMI::Utils::Function<T> f) {
             OperationGuard guard(this);
+            Comm::OperationScope scope(Comm::collective_identity(
+                    Comm::OpKind::Scan, next_collective_index(), 0, f.commutative, f.associative));
             if (sendbuf.size_in_bytes() != recvbuf.size_in_bytes()) {
                 throw std::runtime_error("Dimensions of send and receive data must match");
             }
@@ -197,6 +215,12 @@ namespace FMI {
         unsigned int faas_memory = 128;
         FMI::Utils::Hint channel_hint = FMI::Utils::Hint::cheap;
         std::shared_ptr<FMI::FT::OperationRuntime> operation_runtime;
+        //! Counts user-visible collectives. Every rank must issue collectives in the same
+        //! order (the usual MPI rule), so the same collective bears the same index everywhere,
+        //! which is exactly what lets a receiver detect a peer executing a different one.
+        std::uint64_t collective_counter = 0;
+
+        std::uint64_t next_collective_index() { return collective_counter++; }
 
         //! Helper utility to convert a typed function to a raw function without type information.
         template <typename T>
