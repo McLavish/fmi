@@ -1,6 +1,8 @@
 #define BOOST_TEST_MODULE FMI
 #include <boost/test/unit_test.hpp>
 
+#include "forked_rank_guard.h"
+
 #include <omp.h>
 #include "../include/fmi.h"
 
@@ -36,7 +38,8 @@ BOOST_AUTO_TEST_CASE(bcast) {
     constexpr int num_peers = 4;
     std::vector<FMI::Comm::Data<int>> d(num_peers);
     d[0] = 1;
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -53,7 +56,8 @@ BOOST_AUTO_TEST_CASE(scatter) {
     constexpr int num_peers = 4;
     FMI::Comm::Data<std::vector<int>> root_data{{1, 2, 3, 4}};
     std::vector<FMI::Comm::Data<std::vector<int>>> d(num_peers, FMI::Comm::Data<std::vector<int>>(1));
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -75,7 +79,8 @@ BOOST_AUTO_TEST_CASE(gather) {
         std::vector<int> data(1, i + 1);
         d[i] = FMI::Comm::Data<std::vector<int>>(data);
     }
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -100,7 +105,8 @@ BOOST_AUTO_TEST_CASE(reduce) {
     }
     FMI::Utils::Function<int> f([] (auto a, auto b) {return a + b;}, true, true);
 
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -126,7 +132,8 @@ BOOST_AUTO_TEST_CASE(reduce_vector) {
                                                     return std::vector<int>{a[0] + b[0], a[1] * b[1]};
                                                 }, true, true);
 
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -151,7 +158,8 @@ BOOST_AUTO_TEST_CASE(allreduce) {
     }
     FMI::Utils::Function<int> f([] (int a, int b) {return a + b;}, true, true);
 
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -176,7 +184,8 @@ BOOST_AUTO_TEST_CASE(allreduce_vector) {
         return std::vector<int>{a[0] + b[0], a[1] * b[1], std::max(a[2], b[2])};
         }, true, true);
 
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -201,7 +210,8 @@ BOOST_AUTO_TEST_CASE(scan) {
     std::vector<std::unique_ptr<FMI::Communicator>> comms(num_peers);
     FMI::Utils::Function<int> f([] (int a, int b) {return a + b;}, true, true);
 
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
@@ -230,7 +240,8 @@ BOOST_AUTO_TEST_CASE(scan_vector) {
         return std::vector<int>{a[0] + b[0], a[1] * b[1], std::max(a[2], b[2])};
         }, true, true);
 
-    int peer_id = 0;
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
     for (int i = 1; i < num_peers; i ++) {
         int pid = fork();
         if (pid == 0) {
