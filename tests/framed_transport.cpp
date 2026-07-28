@@ -2,6 +2,7 @@
 
 #include "forked_rank_guard.h"
 
+#include "../include/fmi.h"
 #include "../include/comm/Channel.h"
 #include "../include/comm/OperationScope.h"
 
@@ -11,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <cstdio>
 
 BOOST_AUTO_TEST_SUITE(FramedTransport)
 
@@ -247,6 +249,102 @@ BOOST_AUTO_TEST_CASE(collectives_issued_in_different_orders_are_refused) {
     BOOST_CHECK_EQUAL(ok[0], 1);
     BOOST_CHECK_MESSAGE(ok[1] == 1, "receiver did not report an identity mismatch");
     BOOST_CHECK_MESSAGE(ok[2] == 0, "receiver SILENTLY ACCEPTED a different collective");
+}
+
+BOOST_AUTO_TEST_CASE(every_collective_works_through_a_framed_communicator) {
+    // The transparency claim, end to end: a stock application driving a real Communicator over
+    // the framed transport, using every collective plus point-to-point, with no annotation of
+    // any kind. Identity is produced by the Communicator and validated on the wire; the
+    // application below is unaware that either happens.
+    constexpr int num_peers = 3;
+    const std::string name = unique_comm("comm-all");
+    const std::string config = "../../config/fmi_framed_test.json";
+    int* ok = shared_flags(num_peers);
+    int* stage = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    for (int i = 1; i < num_peers; i++) {
+        int pid = fork();
+        if (pid == 0) { peer_id = i; break; }
+    }
+
+    ok[peer_id] = 0;
+    stage[peer_id] = 0;
+    try {
+        FMI::Communicator comm(peer_id, num_peers, config, name);
+        stage[peer_id] = 1;
+        FMI::Utils::Function<int> sum([](int a, int b) { return a + b; }, true, true);
+        FMI::Utils::Function<int> ordered([](int a, int b) { return a - b; }, false, false);
+        bool good = true;
+        int failed_check = 0;
+        auto check = [&](bool cond, int id) { if (!cond && failed_check == 0) { failed_check = id; } good = good && cond; };
+
+        // point-to-point
+        FMI::Comm::Data<int> pv = 11, pr = 0;
+        if (peer_id == 0) {
+            comm.send(pv, 1);
+        } else if (peer_id == 1) {
+            comm.recv(pr, 0);
+            check(pr.get() == 11, 1);
+        }
+
+        comm.barrier();
+
+        stage[peer_id] = 2;
+        FMI::Comm::Data<int> b = (peer_id == 0) ? 77 : 0;
+        comm.bcast(b, 0);
+        stage[peer_id] = 3;
+        check(b.get() == 77, 2);
+
+        FMI::Comm::Data<std::vector<int>> mine{{peer_id, peer_id}};
+        FMI::Comm::Data<std::vector<int>> all(2 * num_peers);
+        comm.gather(mine, all, 0);
+        stage[peer_id] = 4;
+
+        // Data<std::vector<A>>::get() returns by value, so the buffer has to be built before
+        // it is wrapped rather than mutated through the accessor.
+        std::vector<int> payload(2 * num_peers);
+        for (int i = 0; i < 2 * num_peers; i++) { payload[i] = i; }
+        FMI::Comm::Data<std::vector<int>> spread(payload);
+        FMI::Comm::Data<std::vector<int>> slice(2);
+        comm.scatter(spread, slice, 0);
+        stage[peer_id] = 5;
+        check(slice.get()[0] == 2 * peer_id, 3);
+
+        FMI::Comm::Data<int> one = 1, red = 0;
+        comm.reduce(one, red, 0, sum);
+        stage[peer_id] = 6;
+        if (peer_id == 0) { check(red.get() == num_peers, 4); }
+
+        FMI::Comm::Data<int> one2 = 1, ar = 0;
+        comm.allreduce(one2, ar, sum);
+        stage[peer_id] = 7;
+        check(ar.get() == num_peers, 5);
+
+        FMI::Comm::Data<int> one3 = 1, sc = 0;
+        comm.scan(one3, sc, sum);
+        stage[peer_id] = 8;
+        check(sc.get() == peer_id + 1, 6);
+
+        // A non-commutative reduction takes an entirely different algorithm, so it exercises a
+        // second set of identities over the same links.
+        FMI::Comm::Data<int> o1 = 1, o2 = 0;
+        comm.allreduce(o1, o2, ordered);
+        stage[peer_id] = 9;
+
+        comm.barrier();
+        if (!good) { std::fprintf(stderr, "[rank %d] failed check %d (slice0=%d ar=%d sc=%d b=%d)\n", peer_id, failed_check, slice.get()[0], ar.get(), sc.get(), b.get()); }
+        ok[peer_id] = good ? 1 : 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] threw at stage %d: %s\n", peer_id, stage[peer_id], e.what());
+        ok[peer_id] = 0;
+    }
+
+    reap(peer_id, num_peers);
+    for (int i = 0; i < num_peers; i++) {
+        BOOST_CHECK_MESSAGE(ok[i] == 1, "rank " << i << " stopped at stage " << stage[i]);
+    }
 }
 
 #endif // FMI_ENABLE_REDIS
