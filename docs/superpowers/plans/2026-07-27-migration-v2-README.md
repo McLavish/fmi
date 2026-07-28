@@ -2,6 +2,15 @@
 
 **Status:** index. Not normative; the spec is. If this file and the spec disagree, the spec wins.
 
+**Branch state (2026-07-28).** These documents live on `docs/migration-protocol-v2`; the code lives
+on `exp/checkpoint-mechanics`. The two **diverged at `523128a`** and neither contains the other.
+Plan A has already begun landing on the implementation branch — `1aa9beb` (concurrent-pairing test),
+`9c7e533` (ClientServer reconfigures in place with job-lifetime data keys), and `7460d68` in the
+`extern/TCPunch` submodule (idle/dead pairing-registration sweep). Every `file:line` citation in
+these four documents resolves against `exp/checkpoint-mechanics` at `9c7e533`, **not** against the
+branch they live on. Merging the two branches is the first thing a maintainer should do; re-resolve
+citations afterwards.
+
 ## Start here (read this paragraph first if you are picking this up cold)
 
 FMI's transparent migration is unsound for divergent point-to-point schedules: the current protocol
@@ -101,7 +110,7 @@ These were double-owned or unowned across drafts and are now assigned exactly on
 | `Classification::LoudFail`, `aggregate_exit`, `--group message-identity` | **Plan A task 9.** C4 verifies, never re-implements. |
 | `tests/migration_cut_model.cpp` disposition (`--expect` change-detector) | **Plan A task 9.** C4 re-targets it at incarnations later. |
 | ClientServer deadline-suspension **seam** (`deadline_suspended()`) | **Plan A task 6** records it; **C3 work item 3** overrides it. |
-| Job-wide policy fingerprint (startup assertion) | **Plan A task 8**; C task 5's handshake consumes the same value. |
+| Policy fingerprint (frozen at first guarded operation, stored in the control plane) | **Plan A task 8**; C task 5's handshake consumes the same value. |
 | `--tcp-close` on both criu legs | **Plan B task 4.** |
 | Foreign-fd (`/proc/<pid>/fd`) preflight | **Plan B task 12.** |
 | `PR_SET_PTRACER` re-arm after restore | **B measures** (task 6); **C2 work item 10** fixes it. |
