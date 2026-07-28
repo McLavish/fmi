@@ -1,59 +1,43 @@
 #ifndef FMI_DIRECT_H
 #define FMI_DIRECT_H
 
-#include "PeerToPeer.h"
-
-#include <atomic>
+#include "TcpChannelBase.h"
 
 namespace FMI::Comm {
     //! Channel that uses the TCPunch TCP NAT Hole Punching Library for connection establishment.
-    class Direct : public PeerToPeer {
+    /*!
+     * Everything about moving bytes once a socket exists lives in TcpChannelBase; this class
+     * only turns a pair name into a connected fd via the rendezvous server.
+     *
+     * Note on error reporting: TCPunch signals a failed pairing two different ways. A pairing
+     * that times out throws TCPunch's own global ::Timeout, which establish() translates to
+     * FMI::Utils::Timeout. Anything else goes through TCPunch's error_exit(), which throws a
+     * bare std::string — that is deliberately NOT caught here. It propagates out of the channel
+     * as the documented "the TCPunch client could not reach the rendezvous server" signal, and
+     * the test suite catches it explicitly to distinguish that case from a real timeout.
+     */
+    class Direct : public TcpChannelBase {
     public:
         explicit Direct(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params);
-
-        void send_object(channel_data buf, Utils::peer_num rcpt_id) override;
-
-        void recv_object(channel_data buf, Utils::peer_num sender_id) override;
-
-        double get_latency(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;
-
-        double get_price(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;
-
-        void finalize() override;
-
-        void prepare_for_checkpoint() override;
-
-        //! Selective re-pair: close only the links to migrated ranks and adopt the new
-        //! epoch-qualified name; surviving peer connections stay open. Safe because the
-        //! consensus cut guarantees every operation below the cut completed everywhere before
-        //! anyone reconfigures, so a kept stream is message-aligned with no epoch-N bytes in
-        //! flight; the re-established (moved) links pair under epoch-qualified names, which
-        //! preserves the fencing invariant for everything that is rebuilt.
-        bool reconfigure_for_epoch(const std::string& new_comm_name,
-                                   const std::vector<FMI::Utils::peer_num>& moved_ranks) override;
 
         //! Process-wide count of completed TCPunch pairings. Cheap telemetry for measuring
         //! reconfiguration cost; also what the selective re-pair test asserts on.
         static unsigned int pairing_count();
 
+    protected:
+        int establish(Utils::peer_num partner_id, const std::string& link_name) override;
+
+        //! TCPunch pairing names, in the original direction-dependent form.
+        /*!
+         * Kept exactly as it was rather than adopting the base class's rank-ordered name: the
+         * fault-tolerance runbooks are verified against this behaviour, and changing how a link
+         * is named changes which registrations pair up on the rendezvous server.
+         */
+        std::string link_name(Utils::peer_num partner_id, bool outbound) const override;
+
     private:
-        //! Contains the socket file descriptor for the communication with the peers.
-        std::vector<int> sockets;
         std::string hostname;
         int port;
-        unsigned int max_timeout;
-        // Model params
-        double bandwidth;
-        double overhead;
-        double transfer_price;
-        double vm_price;
-        unsigned int requests_per_hour;
-        bool include_infrastructure_costs;
-
-        //! Checks if connection with a peer partner_id is already established, otherwise establishes it using TCPunch.
-        void check_socket(Utils::peer_num partner_id, std::string pair_name);
-
-        void close_sockets();
     };
 }
 

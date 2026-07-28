@@ -46,6 +46,7 @@ set(FMI_SOURCES
     src/comm/ClientServer.cpp
     src/utils/ChannelPolicy.cpp
     src/comm/PeerToPeer.cpp
+    src/comm/TcpChannelBase.cpp
     src/comm/Direct.cpp
     src/ft/ControlPlane.cpp
     src/ft/TransparentMigrationRuntime.cpp
