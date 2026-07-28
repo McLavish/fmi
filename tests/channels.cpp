@@ -3,7 +3,9 @@
 #include "forked_rank_guard.h"
 
 #include "../include/comm/Channel.h"
+#if FMI_ENABLE_TCPUNCH
 #include <tcpunch.h>
+#endif
 #include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
@@ -68,7 +70,9 @@ std::map<std::string, std::string> direct_test_model_params = {
 std::map< std::string, std::pair< std::map<std::string, std::string>, std::map<std::string, std::string> > > backends = {
         //{"S3", {s3_test_params, s3_test_model_params}},
        // {"Redis", {redis_test_params, redis_test_model_params}},
-        {"Direct", {direct_test_params, direct_test_model_params}}
+#if FMI_ENABLE_TCPUNCH
+        {"Direct", {direct_test_params, direct_test_model_params}},
+#endif
 };
 
 std::string comm_name = std::to_string(std::time(nullptr)) + "Tests";
@@ -710,6 +714,7 @@ BOOST_AUTO_TEST_CASE(scan_ltr) {
     }
 }
 
+#if FMI_ENABLE_TCPUNCH
 namespace {
     // These cases talk to the rendezvous server directly rather than through a Channel, so they
     // skip rather than fail when it is absent -- the rest of the suite already fails loudly in
@@ -798,6 +803,7 @@ BOOST_AUTO_TEST_CASE(direct_concurrent_pairings_one_timeout) {
     }
     BOOST_CHECK_EQUAL(repaired.load(), 2);
 }
+#endif // FMI_ENABLE_TCPUNCH
 
 #if FMI_ENABLE_REDIS
 // The `backends` map above has Redis and S3 commented out, so every case in this suite runs

@@ -6,7 +6,9 @@
 #if FMI_ENABLE_REDIS
 #include "../../include/comm/Redis.h"
 #endif
+#if FMI_ENABLE_TCPUNCH
 #include "../../include/comm/Direct.h"
+#endif
 
 std::shared_ptr<FMI::Comm::Channel> FMI::Comm::Channel::get_channel(std::string name, std::map<std::string, std::string> params,
                                                                     std::map<std::string, std::string> model_params) {
@@ -23,7 +25,11 @@ std::shared_ptr<FMI::Comm::Channel> FMI::Comm::Channel::get_channel(std::string 
         throw std::runtime_error("Redis backend was disabled at build time");
 #endif
     } else if (name == "Direct") {
+#if FMI_ENABLE_TCPUNCH
         return std::make_shared<Direct>(params, model_params);
+#else
+        throw std::runtime_error("Direct backend was disabled at build time");
+#endif
     } else {
         throw std::runtime_error("Unknown channel name passed");
     }

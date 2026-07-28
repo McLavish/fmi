@@ -10,7 +10,10 @@ endif()
 
 add_executable (Boost_Tests_run ${FMI_TEST_SOURCES})
 target_link_libraries (Boost_Tests_run ${Boost_LIBRARIES} FMI OpenMP::OpenMP_CXX)
-target_compile_definitions (Boost_Tests_run PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}>)
+target_compile_definitions (Boost_Tests_run PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}> FMI_ENABLE_TCPUNCH=$<BOOL:${FMI_ENABLE_TCPUNCH}>)
+if(FMI_ENABLE_TCPUNCH)
+    target_include_directories (Boost_Tests_run PRIVATE ${TCPUNCH_INCLUDE_DIRS})
+endif()
 
 # Opt-in executable that demonstrates why equal operation indices do not by themselves
 # establish a channel-empty migration cut. It is deliberately not part of Boost_Tests_run:

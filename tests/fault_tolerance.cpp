@@ -1,7 +1,11 @@
 #include <boost/test/unit_test.hpp>
 
 #include "../include/fmi.h"
+#if FMI_ENABLE_TCPUNCH
+// Only the selective-re-pair case needs this, for Direct::pairing_count(). That case lives
+// inside the FMI_ENABLE_CRIU block below, and CRIU implies TCPUNCH at configure time.
 #include "../include/comm/Direct.h"
+#endif
 
 #include <array>
 #include <atomic>

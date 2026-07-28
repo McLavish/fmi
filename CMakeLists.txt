@@ -5,7 +5,20 @@ set(CMAKE_CXX_STANDARD 17)
 option(FMI_ENABLE_S3 "Enable the S3 backend" ON)
 option(FMI_ENABLE_REDIS "Enable the Redis backend" ON)
 option(FMI_ENABLE_CRIU "Build experimental CRIU checkpoint/restore support" OFF)
+option(FMI_ENABLE_TCPUNCH "Enable the Direct backend (TCP NAT hole punching via TCPunch)" ON)
 option(FMI_USE_STATIC_BOOST "Prefer static Boost libraries" ON)
+
+# The migration counterexample corpus hardcodes Backend::Direct, and the CRIU runbooks pin
+# preferred_data_backend=Direct. Fail at configure time rather than at link time.
+if(FMI_ENABLE_CRIU AND NOT FMI_ENABLE_TCPUNCH)
+    message(FATAL_ERROR "FMI_ENABLE_CRIU=ON requires FMI_ENABLE_TCPUNCH=ON (the CRIU paths pin the Direct data plane)")
+endif()
+
+# Direct needs TCPunch and DirectTCP needs Redis for its peer registry; with both off there is
+# no peer-to-peer backend left and only the ClientServer ones (S3) can carry traffic.
+if(NOT FMI_ENABLE_TCPUNCH AND NOT FMI_ENABLE_REDIS)
+    message(WARNING "FMI_ENABLE_TCPUNCH=OFF and FMI_ENABLE_REDIS=OFF: no peer-to-peer backend will be available")
+endif()
 
 # The CRIU single-rank state-transfer path uses the Redis-backed FT control plane; the
 # ControlPlane throws without it. Fail at configure time rather than letting the CRIU
@@ -37,7 +50,9 @@ if(NOT FMI_USE_STATIC_BOOST)
     add_compile_definitions(BOOST_LOG_DYN_LINK BOOST_ALL_DYN_LINK)
 endif()
 
-add_subdirectory(extern/TCPunch/client/)
+if(FMI_ENABLE_TCPUNCH)
+    add_subdirectory(extern/TCPunch/client/)
+endif()
 
 set(FMI_SOURCES
     src/Communicator.cpp
@@ -47,7 +62,6 @@ set(FMI_SOURCES
     src/utils/ChannelPolicy.cpp
     src/comm/PeerToPeer.cpp
     src/comm/TcpChannelBase.cpp
-    src/comm/Direct.cpp
     src/ft/ControlPlane.cpp
     src/ft/TransparentMigrationRuntime.cpp
 )
@@ -55,8 +69,12 @@ set(FMI_SOURCES
 set(FMI_LINK_LIBS
     ${Boost_Libraries}
     Boost::log
-    tcpunch
 )
+
+if(FMI_ENABLE_TCPUNCH)
+    list(APPEND FMI_SOURCES src/comm/Direct.cpp)
+    list(APPEND FMI_LINK_LIBS tcpunch)
+endif()
 
 if(FMI_ENABLE_S3)
     find_package(AWSSDK COMPONENTS s3 REQUIRED)
@@ -85,9 +103,11 @@ target_include_directories(FMI
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE
         ${Boost_INCLUDE_DIRS}
-        ${TCPUNCH_INCLUDE_DIRS}
 )
-target_compile_definitions(FMI PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}>)
+if(FMI_ENABLE_TCPUNCH)
+    target_include_directories(FMI PRIVATE ${TCPUNCH_INCLUDE_DIRS})
+endif()
+target_compile_definitions(FMI PRIVATE FMI_ENABLE_S3=$<BOOL:${FMI_ENABLE_S3}> FMI_ENABLE_REDIS=$<BOOL:${FMI_ENABLE_REDIS}> FMI_ENABLE_TCPUNCH=$<BOOL:${FMI_ENABLE_TCPUNCH}>)
 
 if(FMI_ENABLE_CRIU)
     target_compile_definitions(FMI PUBLIC FMI_ENABLE_CRIU)
