@@ -3,8 +3,11 @@
 #include "forked_rank_guard.h"
 
 #include "../include/comm/Channel.h"
+#include <atomic>
 #include <chrono>
+#include <new>
 #include <numeric>
+#include <thread>
 #include <ctime>
 #include <omp.h>
 #include <sys/mman.h>
@@ -719,6 +722,16 @@ BOOST_AUTO_TEST_CASE(scan_ltr_client_server_ordering) {
     int* res = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE,
                                       MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     BOOST_REQUIRE(res != MAP_FAILED);
+    // Shared-memory rendezvous, deliberately not ClientServer::barrier(). upload() records every
+    // name it writes in created_objects -- barrier markers included -- and finalize() deletes all
+    // of them, so the first rank out of the barrier removes its own marker and the ranks still
+    // polling can never reach num_arrived >= num_peers. Using the channel's own barrier here to
+    // order scan against finalize() therefore deadlocks about 7 runs in 10.
+    auto* arrived = static_cast<std::atomic<int>*>(mmap(nullptr, sizeof(std::atomic<int>),
+                                                        PROT_READ | PROT_WRITE,
+                                                        MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    BOOST_REQUIRE(arrived != MAP_FAILED);
+    new (arrived) std::atomic<int>(0);
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
@@ -734,17 +747,24 @@ BOOST_AUTO_TEST_CASE(scan_ltr_client_server_ordering) {
         *reinterpret_cast<int*>(a) = *reinterpret_cast<int*>(a) - *reinterpret_cast<int*>(b);
     };
 
-    auto ch = FMI::Comm::Channel::get_channel("Redis", redis_test_params, redis_test_model_params);
+    // redis_test_params caps max_timeout at 1000 ms, which a loaded machine can exceed on a
+    // legitimately slow download; this case should fail on a wrong fold order, not on timing.
+    std::map<std::string, std::string> params = redis_test_params;
+    params["max_timeout"] = "30000";
+    auto ch = FMI::Comm::Channel::get_channel("Redis", params, redis_test_model_params);
     ch->set_peer_id(peer_id);
     ch->set_num_peers(num_peers);
     ch->set_comm_name(comm_name + "_cs_scan");
     int val = peer_id + 1;
     ch->scan({reinterpret_cast<char*>(&val), sizeof(int)},
              {reinterpret_cast<char*>(res + peer_id), sizeof(int)}, {f, false, false});
-    // Barrier before finalize: finalize() deletes this rank's uploaded objects, and rank 0
-    // finishes its scan immediately (it folds only its own value), so without this it deletes
-    // the object ranks 1..n-1 still have to download and they time out.
-    ch->barrier();
+    // No rank may finalize() until every rank has finished scan: finalize() deletes this rank's
+    // uploaded objects, and rank 0 completes immediately (it folds only its own value), so
+    // without this it deletes the object ranks 1..n-1 still have to download.
+    arrived->fetch_add(1, std::memory_order_acq_rel);
+    while (arrived->load(std::memory_order_acquire) < num_peers) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     ch->finalize();
 
     if (peer_id == 0) {
