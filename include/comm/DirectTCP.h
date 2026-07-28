@@ -85,8 +85,20 @@ namespace FMI::Comm {
 
         std::string registry_key() const;
 
-        //! Bind an ephemeral port, listen, and advertise the result. Idempotent per comm_name.
-        void ensure_published();
+        //! Bind an ephemeral port and listen, if this rank has no listener yet. Touches no Redis.
+        void ensure_listener();
+
+        //! (Re)advertise this rank's address, refreshing the registry key's TTL.
+        /*!
+         * Called on every establishment attempt, not once per listener. The registry key
+         * carries a TTL, so publishing once would let a long-lived rank's entry expire and
+         * make it permanently undiscoverable to any peer that needs a link to it later — links
+         * are established lazily, so "later" is normal. Re-publishing here is sufficient
+         * precisely because a connector only ever needs the *listener's* entry, and the
+         * listener necessarily runs its own establishment for that same link in order to accept
+         * it. One pipelined round trip, on the cold path only.
+         */
+        void publish_self(long deadline_ms);
 
         //! Resolve the address peers should dial this rank on.
         std::string resolve_advertise_ip() const;
@@ -128,8 +140,6 @@ namespace FMI::Comm {
         int listen_port = 0;
         std::uint64_t listener_nonce = 0;
         std::string advertised_ip;
-        //! comm_name this rank last published under; empty means "must (re)publish".
-        std::string published_for_name;
 
         //! Links built by the mesh pass but not yet handed to check_socket. Kept separate from
         //! the base's sockets vector, which check_socket alone owns.

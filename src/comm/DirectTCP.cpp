@@ -139,8 +139,9 @@ public:
 
     //! HSET + EXPIRE pipelined into a single round trip.
     void publish(const std::string& key, const std::string& field, const std::string& value,
-                 unsigned int ttl_s) {
+                 unsigned int ttl_s, long timeout_ms) {
         std::lock_guard<std::mutex> lock(mutex);
+        set_timeout_locked(timeout_ms);
         std::vector<std::vector<std::string>> batch{{"HSET", key, field, value}};
         if (ttl_s > 0) {
             batch.push_back({"EXPIRE", key, std::to_string(ttl_s)});
@@ -149,8 +150,9 @@ public:
     }
 
     //! Whole rank -> "ip:port:nonce" map in one round trip. Never one HGET per peer.
-    std::map<FMI::Utils::peer_num, std::string> snapshot(const std::string& key) {
+    std::map<FMI::Utils::peer_num, std::string> snapshot(const std::string& key, long timeout_ms) {
         std::lock_guard<std::mutex> lock(mutex);
+        set_timeout_locked(timeout_ms);
         auto replies = pipeline_locked({{"HGETALL", key}});
         std::map<FMI::Utils::peer_num, std::string> out;
         redisReply* reply = replies.front();
@@ -186,9 +188,24 @@ private:
         }
     }
 
+    //! Clamp every subsequent connect and command to what is left of the caller's deadline.
+    /*!
+     * Without this, redisConnect and redisGetReply block on the socket with no timeout at all,
+     * so an unreachable or wedged registry hangs establishment indefinitely — the mesh deadline
+     * is only ever checked between calls, never inside one.
+     */
+    void set_timeout_locked(long timeout_ms) {
+        long clamped = std::max<long>(timeout_ms, 1);
+        io_timeout.tv_sec = clamped / 1000;
+        io_timeout.tv_usec = (clamped % 1000) * 1000;
+        if (context != nullptr && !context->err) {
+            redisSetTimeout(context, io_timeout);
+        }
+    }
+
     void connect_locked() {
         close_locked();
-        context = redisConnect(host.c_str(), port);
+        context = redisConnectWithTimeout(host.c_str(), port, io_timeout);
         if (context == nullptr || context->err) {
             std::string error = "DirectTCP: could not connect to the peer registry at " + host +
                                 ":" + std::to_string(port);
@@ -202,6 +219,7 @@ private:
             }
             throw std::runtime_error(error);
         }
+        redisSetTimeout(context, io_timeout);
         owner_pid = ::getpid();
     }
 
@@ -265,6 +283,8 @@ private:
     std::string host;
     int port;
     redisContext* context = nullptr;
+    //! Connect and command timeout; reset from the caller's remaining deadline before each op.
+    struct timeval io_timeout{1, 0};
     pid_t owner_pid = -1;
     std::vector<redisReply*> owned;
     std::mutex mutex;
@@ -343,10 +363,7 @@ std::string FMI::Comm::DirectTCP::resolve_advertise_ip() const {
     return "127.0.0.1";
 }
 
-void FMI::Comm::DirectTCP::ensure_published() {
-    if (published_for_name == comm_name && listen_fd >= 0) {
-        return;
-    }
+void FMI::Comm::DirectTCP::ensure_listener() {
     if (listen_fd < 0) {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -390,11 +407,17 @@ void FMI::Comm::DirectTCP::ensure_published() {
         listener_nonce = random_nonce();
         advertised_ip = resolve_advertise_ip();
     }
+}
+
+void FMI::Comm::DirectTCP::publish_self(long deadline_ms) {
+    long remaining = deadline_ms - monotonic_ms();
+    if (remaining <= 0) {
+        throw Utils::Timeout();
+    }
     registry->publish(registry_key(), std::to_string(peer_id),
                       advertised_ip + ":" + std::to_string(listen_port) + ":" +
                               std::to_string(listener_nonce),
-                      registry_ttl_s);
-    published_for_name = comm_name;
+                      registry_ttl_s, remaining);
 }
 
 std::string FMI::Comm::DirectTCP::frame_for(Utils::peer_num partner_id,
@@ -616,7 +639,7 @@ bool FMI::Comm::DirectTCP::accept_one() {
 }
 
 void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) {
-    ensure_published();
+    ensure_listener();
 
     auto have_link = [&](Utils::peer_num rank) {
         return pending_links.count(rank) > 0 || (rank < sockets.size() && sockets[rank] >= 0);
@@ -634,6 +657,8 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
 
     std::map<Utils::peer_num, int> unconfirmed;
     long next_connect_attempt = 0;
+    long next_publish_attempt = 0;
+    bool published = false;
 
     // One event loop, and it keeps servicing the listener the whole time it waits — accepting
     // from any peer, not just the one we want. That is what makes lazy establishment safe: the
@@ -650,28 +675,56 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             throw Utils::Timeout();
         }
 
+        // Re-advertise on every establishment, refreshing the key's TTL. A registry that is
+        // briefly unreachable is retried rather than fatal — the deadline above is what ends it.
+        if (!published && now >= next_publish_attempt) {
+            try {
+                publish_self(deadline_ms);
+                published = true;
+            } catch (const std::runtime_error&) {
+                next_publish_attempt = monotonic_ms() + registry_poll_interval_ms;
+            }
+        }
+
         if (!want_connect.empty() && now >= next_connect_attempt) {
             // One HGETALL for the whole map rather than an HGET per peer, and one batch of
             // concurrent connects rather than a round trip each.
             std::map<Utils::peer_num, PeerAddr> addrs;
-            for (const auto& [rank, entry] : registry->snapshot(registry_key())) {
-                auto first = entry.find(':');
-                auto second = entry.rfind(':');
-                if (first == std::string::npos || second == first) {
-                    continue;
+            bool registry_reachable = true;
+            try {
+                for (const auto& [rank, entry] :
+                     registry->snapshot(registry_key(), deadline_ms - monotonic_ms())) {
+                    auto first = entry.find(':');
+                    auto second = entry.rfind(':');
+                    if (first == std::string::npos || second == first) {
+                        continue;
+                    }
+                    PeerAddr addr;
+                    addr.ip = entry.substr(0, first);
+                    try {
+                        addr.port = std::stoi(entry.substr(first + 1, second - first - 1));
+                        addr.nonce = std::stoull(entry.substr(second + 1));
+                    } catch (const std::exception&) {
+                        continue;
+                    }
+                    addrs[rank] = addr;
                 }
-                PeerAddr addr;
-                addr.ip = entry.substr(0, first);
-                try {
-                    addr.port = std::stoi(entry.substr(first + 1, second - first - 1));
-                    addr.nonce = std::stoull(entry.substr(second + 1));
-                } catch (const std::exception&) {
-                    continue;
-                }
-                addrs[rank] = addr;
+            } catch (const std::runtime_error&) {
+                registry_reachable = false;
             }
             want_connect = connect_batch(addrs, want_connect, unconfirmed, deadline_ms);
-            next_connect_attempt = monotonic_ms() + connect_retry_interval_ms;
+            // Two different waits: a peer whose address is not published yet is a registry
+            // question, and that is what registry_poll_interval_ms is for. A peer we have an
+            // address for but could not reach is a connection question.
+            bool waiting_on_registry = !registry_reachable;
+            for (auto rank : want_connect) {
+                if (addrs.find(rank) == addrs.end()) {
+                    waiting_on_registry = true;
+                    break;
+                }
+            }
+            next_connect_attempt = monotonic_ms() + (waiting_on_registry ? registry_poll_interval_ms
+                                                                        : connect_retry_interval_ms);
         }
 
         // Always poll the listener, even when the peer we want is one we connect to: a lower
@@ -686,9 +739,14 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             pfd_rank.push_back(rank);
         }
 
+        // Sleep no longer than the nearest pending retry, so a scheduled registry poll or
+        // publish is not delayed until the next socket event.
         long budget = deadline_ms - monotonic_ms();
         if (!want_connect.empty()) {
-            budget = std::min<long>(budget, connect_retry_interval_ms);
+            budget = std::min<long>(budget, std::max<long>(next_connect_attempt - monotonic_ms(), 1));
+        }
+        if (!published) {
+            budget = std::min<long>(budget, std::max<long>(next_publish_attempt - monotonic_ms(), 1));
         }
         int pr = ::poll(pfds.data(), pfds.size(), static_cast<int>(std::max<long>(budget, 0)));
         if (pr < 0) {
@@ -768,10 +826,10 @@ void FMI::Comm::DirectTCP::close_transport_state() {
     }
     listen_port = 0;
     listener_nonce = 0;
-    // Forces a fresh listener and a fresh advertisement on next use. After a CRIU restore the
-    // process resumes on another host, so the port it used to hold is gone and the address it
-    // used to advertise is wrong.
-    published_for_name.clear();
+    // Clearing the listener is what forces a fresh bind and a fresh advertisement on next use.
+    // After a CRIU restore the process resumes on another host, so the port it used to hold is
+    // gone and the address it used to advertise is wrong.
+    advertised_ip.clear();
     if (registry) {
         registry->disconnect();
     }
@@ -790,7 +848,7 @@ bool FMI::Comm::DirectTCP::reconfigure_for_epoch(const std::string& new_comm_nam
     }
     TcpChannelBase::reconfigure_for_epoch(new_comm_name, moved_ranks);
     // The registry key is derived from comm_name, so the new epoch needs this rank advertised
-    // again under the new key. The listener itself is kept: its address has not changed.
-    published_for_name.clear();
+    // again under the new key. That happens on its own: every establishment re-publishes, and
+    // the listener is kept because its address has not changed.
     return true;
 }

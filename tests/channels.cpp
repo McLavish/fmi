@@ -835,6 +835,71 @@ BOOST_AUTO_TEST_CASE(direct_concurrent_pairings_one_timeout) {
 #endif // FMI_ENABLE_TCPUNCH
 
 #if FMI_ENABLE_REDIS
+// DirectTCP publishes its address under a registry key that carries a TTL, and links are
+// established lazily — so a rank that goes a while without needing a new peer would have its
+// entry expire out from under it and become permanently undiscoverable. Publishing once per
+// listener was not enough; every establishment has to re-advertise.
+//
+// Rank 0 talks to rank 1 before the TTL lapses and to rank 2 after it. The TTL is 1s (Redis
+// EXPIRE has second granularity), hence the sleep; without the re-publish, rank 2 never finds
+// rank 0 and both ends time out.
+BOOST_AUTO_TEST_CASE(direct_tcp_registration_survives_registry_ttl) {
+    std::map<std::string, std::string> params = direct_tcp_test_params;
+    params["registry_ttl_s"] = "1";
+    params["max_timeout"] = "3000";
+
+    constexpr int num_peers = 3;
+    const std::string ttl_comm_name = comm_name + "-ttl";
+    int* ok = static_cast<int*>(mmap(nullptr, num_peers * sizeof(int), PROT_READ | PROT_WRITE,
+                                     MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    for (int i = 1; i < num_peers; i++) {
+        int pid = fork();
+        if (pid == 0) { peer_id = i; break; }
+    }
+
+    ok[peer_id] = 0;
+    try {
+        auto ch = FMI::Comm::Channel::get_channel("DirectTCP", params, direct_tcp_test_model_params);
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(ttl_comm_name);
+        int val = 11;
+        if (peer_id == 0) {
+            ch->send({reinterpret_cast<char*>(&val), sizeof(val)}, 1);
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            int later = 22;
+            ch->send({reinterpret_cast<char*>(&later), sizeof(later)}, 2);
+        } else if (peer_id == 1) {
+            int got = 0;
+            ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+            ok[peer_id] = (got == 11);
+        } else {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            int got = 0;
+            ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+            ok[peer_id] = (got == 22);
+        }
+        if (peer_id == 0) { ok[peer_id] = 1; }
+        ch->finalize();
+    } catch (...) {
+        // ok[peer_id] stays 0; the parent reports which rank failed.
+    }
+
+    if (peer_id == 0) {
+        int status = 0;
+        while (wait(&status) > 0);
+        for (int i = 0; i < num_peers; i++) {
+            BOOST_TEST(ok[i] == 1, "rank " << i << " did not complete across the registry TTL");
+        }
+    } else {
+        exit(0);
+    }
+}
+#endif // FMI_ENABLE_REDIS
+
+#if FMI_ENABLE_REDIS
 // The `backends` map above has Redis and S3 commented out, so every case in this suite runs
 // against Direct only — i.e. against PeerToPeer. The whole ClientServer family (Redis, S3) is
 // otherwise untested here, which is how an inclusive-scan ordering bug survived in it.
