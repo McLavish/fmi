@@ -1,0 +1,148 @@
+#ifndef FMI_SEQUENCEDLINK_H
+#define FMI_SEQUENCEDLINK_H
+
+#include "LinkFrame.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <string>
+#include <vector>
+
+namespace FMI::Comm {
+
+    //! Per-directed-link state machine for the sequenced link layer.
+    /*!
+     * Deliberately owns no socket, no file descriptor and no I/O. It is a pure function of
+     * (state, event), which is what makes it exhaustively unit-testable and what lets the same
+     * logic be driven by a blocking transport today and an event loop later.
+     *
+     * Two watermarks, per docs/tla/SequencedLink.tla:
+     *   next_received — highest contiguous transport_seq accepted; drives dedup and replay.
+     *   ack_safe      — highest seq the peer may prune. Under a CRIU-style checkpoint this is
+     *                   "received and durably held", i.e. it tracks next_received, because the
+     *                   drain queues live in memory that the checkpoint image captures.
+     *
+     * The invariant that makes an arbitrary-instant freeze safe is that an ack is only ever
+     * issued for a frame already committed to a drain queue. Everything still sitting in a
+     * kernel socket buffer is therefore unacked by construction, and is replayed from the
+     * sender's retention after the link is re-established.
+     */
+    class SequencedLink {
+    public:
+        //! Outcome of offering a frame, or of draining one into an application buffer.
+        enum class Accept {
+            Delivered,         //!< accepted and committed, or drained into the caller's buffer
+            Duplicate,         //!< already seen; a benign replay, must not be delivered twice
+            FatalGap,          //!< a hole in the sequence that retention can no longer fill
+            IdentityMismatch   //!< the frame belongs to a different logical operation
+        };
+
+        struct Config {
+            //! Maximum unacked frames the sender may have outstanding.
+            std::uint32_t window_frames = 64;
+            //! Largest payload accepted or produced in a single frame.
+            std::uint32_t max_frame_bytes = 1u << 20;
+            //! Hard cap on retained bytes. Reaching it blocks admission of new sends; it never
+            //! discards a retained frame, because that would break the delivery obligation.
+            std::size_t retention_limit_bytes = 64u << 20;
+        };
+
+        //! A frame the sender still owes the peer, held until it is cumulatively acked.
+        struct Retained {
+            FrameHeader header;
+            std::vector<char> payload;
+        };
+
+        SequencedLink() = default;
+        explicit SequencedLink(Config cfg) : config(cfg) {}
+
+        // ---- sender ------------------------------------------------------------------
+
+        //! True when the window or the retention cap forbids admitting another frame.
+        [[nodiscard]] bool send_blocked() const;
+
+        //! Retain a copy of @p payload and stamp it with the next transport_seq.
+        /*!
+         * The retained copy exists before the caller may put a single byte on the wire — that
+         * ordering is what makes the delivery obligation survive a freeze. Returns false and
+         * writes nothing when send_blocked().
+         */
+        bool admit(const FrameHeader& identity, const char* payload, std::size_t len,
+                   FrameHeader& stamped);
+
+        //! Release retention up to and including @p cumulative.
+        void on_ack(std::uint64_t cumulative);
+
+        //! Exactly the unacked suffix, in sequence order: what a re-established link replays.
+        [[nodiscard]] const std::deque<Retained>& replay_suffix() const { return retention; }
+
+        [[nodiscard]] std::uint64_t next_send_seq() const { return next_send; }
+        [[nodiscard]] std::uint64_t lowest_retained() const;
+        [[nodiscard]] std::size_t retained_bytes() const { return retention_bytes; }
+
+        // ---- receiver ----------------------------------------------------------------
+
+        //! Offer an arriving frame. Dedups by transport_seq and commits to the frame's lane.
+        /*!
+         * Commits before the caller may make the corresponding ack writable. Identity is NOT
+         * checked here: a frame may legitimately arrive before the application posts the
+         * matching receive. Identity is validated at drain time, in deliver_into().
+         */
+        Accept accept(const FrameHeader& header, const char* payload);
+
+        //! Drain the head of @p expected's lane into @p dst, validating message identity.
+        /*!
+         * This is where a divergent schedule is caught: if the frame at the head of the lane
+         * belongs to a different logical operation than the one the application is waiting
+         * for, the result is IdentityMismatch rather than a silently wrong payload.
+         */
+        Accept deliver_into(const FrameHeader& expected, char* dst, std::size_t len);
+
+        //! Frames committed to a lane but not yet drained by the application.
+        [[nodiscard]] std::size_t pending(Lane lane) const;
+
+        [[nodiscard]] std::uint64_t next_received() const { return next_recv; }
+        [[nodiscard]] std::uint64_t ack_safe() const { return ack_safe_seq; }
+
+        // ---- (re-)establishment ------------------------------------------------------
+
+        [[nodiscard]] HandshakePayload local_handshake(std::uint64_t policy_fingerprint = 0) const;
+
+        //! Adopt the peer's cumulative ack and reject impossible states loudly.
+        /*!
+         * @param error set to a human-readable reason when the handshake is rejected.
+         */
+        bool reconcile(const HandshakePayload& peer, std::string& error);
+
+        // ---- checkpoint / replacement seeding ----------------------------------------
+
+        //! Opaque, versioned serialization of the whole link state.
+        [[nodiscard]] std::string snapshot() const;
+        bool seed(const std::string& blob);
+
+        [[nodiscard]] const Config& configuration() const { return config; }
+
+    private:
+        Config config;
+
+        // sender
+        std::uint64_t next_send = 0;
+        std::deque<Retained> retention;
+        std::size_t retention_bytes = 0;
+
+        // receiver
+        std::uint64_t next_recv = 0;
+        std::uint64_t ack_safe_seq = 0;
+        struct Committed {
+            FrameHeader header;
+            std::vector<char> payload;
+        };
+        //! One drain queue per lane; index is the Lane enumerator.
+        std::deque<Committed> lanes[2];
+
+        static std::size_t lane_index(Lane lane) { return static_cast<std::size_t>(lane); }
+    };
+}
+
+#endif //FMI_SEQUENCEDLINK_H

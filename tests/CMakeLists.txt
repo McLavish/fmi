@@ -3,7 +3,7 @@ find_package (Boost REQUIRED COMPONENTS unit_test_framework)
 find_package(OpenMP REQUIRED)
 include_directories (${Boost_INCLUDE_DIRS})
 
-set(FMI_TEST_SOURCES channels.cpp clientserver_keys.cpp communicator.cpp fault_tolerance.cpp)
+set(FMI_TEST_SOURCES channels.cpp clientserver_keys.cpp communicator.cpp fault_tolerance.cpp link_layer.cpp)
 if(FMI_ENABLE_CRIU)
     list(APPEND FMI_TEST_SOURCES criu_fault_tolerance.cpp)
 endif()
