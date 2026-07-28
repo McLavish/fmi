@@ -192,6 +192,24 @@ def wait_for_snapshot(control_plane, epoch, predicate, description, timeout_s, i
     raise TimeoutError(f"timed out waiting for {description}; last={format_snapshot(last_snapshot)}")
 
 
+def promote_when_gate_opens(control_plane, timeout_s=60, interval_s=0.2):
+    # promote_epoch is gated in the control plane: it throws while the migration target has
+    # not QUIESCED or while any survivor has not reached the consensus cut boundary. Both
+    # clear on their own (survivors park at the cut as soon as they hit it), so the correct
+    # orchestrator behavior is to retry until the gate opens — a single un-retried call races
+    # the survivors' progress and fails intermittently.
+    deadline = time.time() + timeout_s
+    last_error = None
+    while time.time() < deadline:
+        try:
+            control_plane.promote_epoch()
+            return
+        except RuntimeError as error:
+            last_error = error
+            time.sleep(interval_s)
+    raise TimeoutError(f"promotion gate never opened within {timeout_s}s: {last_error}")
+
+
 def format_snapshot(snapshot):
     if isinstance(snapshot, dict):
         entries = snapshot.values()
@@ -277,8 +295,8 @@ def run(comm_name, n):
     }
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         replacement = pool.submit(invoke_worker_sync, client, replacement_payload, 120)
-        print("[orchestrator] promoting migration epoch", flush=True)
-        control_plane.promote_epoch()
+        print("[orchestrator] promoting migration epoch (waiting for the gate)", flush=True)
+        promote_when_gate_opens(control_plane)
         lambda_response = replacement.result(timeout=180)
     print(f"[orchestrator] Lambda response: {lambda_response}", flush=True)
 
