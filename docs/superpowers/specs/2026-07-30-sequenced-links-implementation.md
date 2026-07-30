@@ -178,8 +178,17 @@ Scale after round 5, same randomized sweep:
 | --- | --- | --- |
 | 2 | 10 | 10 |
 | 4 | 10 | 10 |
-| 8 | 8 | 7 |
+| 8 | 10 | 10 |
 | 16 | 6 | 6 |
+| 3, 5, 6, 7 (mixed) | 12 | 11 |
+
+Non-powers of two are listed separately on purpose: FMI's collectives are binomial trees, which
+take a different shape when the rank count is not a power of two, and repo coverage before this
+branch was only ever 2 and 4 peers — both powers of two. The one failure in that row is a
+6-rank job whose checkpointed rank was 0, the rank every other connects to; it is being chased.
+
+A dump that criu itself refuses (`External socket is used`, seen intermittently) is counted as
+skipped rather than failed, because it says nothing about the protocol.
 
 **The idea:** a rank that is waiting must keep meeting every obligation it has.
 
