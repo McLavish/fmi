@@ -125,7 +125,16 @@ CONSTANTS
                            \*   one outbound edge that an EXTERNAL ACTOR can
                            \*   drive") when the local agent is the thing that
                            \*   failed.
-    UnboundedRestoreRetries
+    UnboundedRestoreRetries,
+
+    (* ---- the fix TLC demanded -------------------------------------------- *)
+    (* Contract 3 as first written bounded nothing about the restore phase, so *)
+    (* a rank could ping-pong CHECKPOINTED <-> RESTORE_RESERVED forever while  *)
+    (* `paused` stayed set --- suspending every survivor's deadline job-wide.  *)
+    (* RestoreBudgetEnabled adds a bounded attempt count with a terminal        *)
+    (* escalation back to ACTIVE at the UNCHANGED incarnation.                  *)
+    RestoreBudgetEnabled,
+    MaxRestoreAttempts
                            \* TRUE  = spec as written: nothing bounds how often the
                            \*         restore phase may be retried, so the lease may
                            \*         expire before `criu restore` finishes and
@@ -141,6 +150,8 @@ ASSUME MaxIncarnation \in Nat /\ MaxCrashes \in Nat
 ASSUME AbortEdgesEnabled \in BOOLEAN /\ ClearPauseAtCommit \in BOOLEAN
 ASSUME FencedSigCont \in BOOLEAN /\ KeepFrozenOriginal \in BOOLEAN
 ASSUME UnboundedRestoreRetries \in BOOLEAN
+ASSUME RestoreBudgetEnabled \in BOOLEAN
+ASSUME MaxRestoreAttempts \in Nat
 ASSUME OrchestratorAbortPauseFromPausing \in BOOLEAN
 
 ORIG    == "ORIG"     \* the process that called `join`; not owned by any agent
@@ -180,10 +191,11 @@ VARIABLES
     dumpfail,  \* [Ranks -> BOOLEAN]        criu dump exhausted its retries
     nmig,      \* Nat                       request_pause events so far
     nabort,    \* Nat                       abort_activation-on-a-live-agent so far
-    poisoned   \* BOOLEAN                   a survivor threw Utils::Timeout mid-op
+    poisoned,  \* BOOLEAN                   a survivor threw Utils::Timeout mid-op,
+    rtry       \* [Ranks -> Nat]           restore attempts spent on this migration
 
 vars == << rstate, inc, paused, mid, lease, procs, cur, rinc, won, winner,
-           crashed, image, dumpfail, nmig, nabort, poisoned >>
+           crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 -----------------------------------------------------------------------------
 (* Helpers *)
@@ -226,6 +238,7 @@ TypeOK ==
     /\ nmig     \in 0..MaxMigrations
     /\ nabort   \in 0..MaxSuspectedAborts
     /\ poisoned \in BOOLEAN
+    /\ rtry     \in [Ranks -> 0..MaxRestoreAttempts]
 
 Init ==
     /\ rstate   = [r \in Ranks |-> "UNJOINED"]
@@ -244,6 +257,7 @@ Init ==
     /\ nmig     = 0
     /\ nabort   = 0
     /\ poisoned = FALSE
+    /\ rtry     = [r \in Ranks |-> 0]
 
 -----------------------------------------------------------------------------
 (* ---------------------------- directory scripts ------------------------- *)
@@ -255,7 +269,7 @@ JoinA(r) ==
     /\ procs'  = [procs  EXCEPT ![r][ORIG] = "RUNNING"]
     /\ cur'    = [cur    EXCEPT ![r] = ORIG]
     /\ UNCHANGED << inc, paused, mid, lease, rinc, won, winner, crashed,
-                    image, dumpfail, nmig, nabort, poisoned >>
+                    image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 Join == \E r \in Ranks : JoinA(r)
 
@@ -265,7 +279,7 @@ MarkActiveFromStartingA(r) ==
     /\ procs[r][cur[r]] = "RUNNING"
     /\ rstate' = [rstate EXCEPT ![r] = "ACTIVE"]
     /\ UNCHANGED << inc, paused, mid, lease, procs, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 MarkActiveFromStarting == \E r \in Ranks : MarkActiveFromStartingA(r)
 
@@ -278,6 +292,7 @@ RequestPauseA(r) ==
     /\ paused' = [paused EXCEPT ![r] = TRUE]
     /\ mid'    = [mid    EXCEPT ![r] = nmig + 1]
     /\ nmig'   = nmig + 1
+    /\ rtry'   = [rtry   EXCEPT ![r] = 0]   \* each migration gets a fresh budget
     /\ UNCHANGED << inc, lease, procs, cur, rinc, won, winner, crashed,
                     image, dumpfail, nabort, poisoned >>
 
@@ -291,7 +306,7 @@ MarkCheckpointedA(a, r) ==
     /\ image[r]
     /\ rstate' = [rstate EXCEPT ![r] = "CHECKPOINTED"]
     /\ UNCHANGED << inc, paused, mid, lease, procs, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 MarkCheckpointed == \E a \in Agents, r \in Ranks : MarkCheckpointedA(a, r)
 
@@ -304,12 +319,38 @@ AcquireRestoreLeaseA(a, r) ==
     /\ image[r]
     /\ lease[r] = NoAgent
     /\ rstate[r] \in {"CHECKPOINTED", "RESTORE_RESERVED"}
+    /\ (RestoreBudgetEnabled => rtry[r] < MaxRestoreAttempts)
     /\ lease'  = [lease  EXCEPT ![r] = a]
     /\ rstate' = [rstate EXCEPT ![r] = "RESTORE_RESERVED"]
+    \* Saturates: once the budget is spent it stays spent, which also keeps the
+    \* counter finite when the budget is disabled entirely.
+    /\ rtry'   = [rtry EXCEPT ![r] = IF rtry[r] < MaxRestoreAttempts
+                                     THEN rtry[r] + 1 ELSE rtry[r]]
     /\ UNCHANGED << inc, paused, mid, procs, cur, rinc, won, winner, crashed,
                     image, dumpfail, nmig, nabort, poisoned >>
 
 AcquireRestoreLease == \E a \in Agents, r \in Ranks : AcquireRestoreLeaseA(a, r)
+
+(* Terminal escalation.  Once the budget is spent the orchestrator drives the *)
+(* rank back to ACTIVE at the UNCHANGED incarnation, clearing the pause entry  *)
+(* --- and with it the job-wide deadline suspension --- rather than retrying   *)
+(* a restore that is not converging.  This is the edge whose absence TLC found *)
+(* as a lasso through AcquireRestoreLease.                                     *)
+EscalateAbortPauseA(r) ==
+    /\ RestoreBudgetEnabled
+    /\ AbortEdgesEnabled
+    /\ rtry[r] >= MaxRestoreAttempts
+    /\ rstate[r] \in {"CHECKPOINTED", "RESTORE_RESERVED"}
+    /\ rstate' = [rstate EXCEPT ![r] = "ACTIVE"]
+    /\ lease'  = [lease  EXCEPT ![r] = NoAgent]
+    /\ paused' = [paused EXCEPT ![r] = FALSE]
+    /\ rtry'   = [rtry   EXCEPT ![r] = 0]
+    /\ procs'  = [procs  EXCEPT ![r][ORIG] = "RUNNING"]
+    /\ cur'    = [cur    EXCEPT ![r] = ORIG]
+    /\ UNCHANGED << inc, mid, rinc, won, winner, crashed, image, dumpfail,
+                    nmig, nabort, poisoned >>
+
+EscalateAbortPause == \E r \in Ranks : EscalateAbortPauseA(r)
 
 (* `commit_restore(rank, expected_inc, attempt_id)` --- CAS incarnation+1.    *)
 (* NOTE: per the spec the CAS is on (run_id, rank, expected incarnation,      *)
@@ -327,7 +368,7 @@ CommitRestoreA(a, r) ==
     /\ lease'  = [lease  EXCEPT ![r] = NoAgent]
     /\ paused' = IF ClearPauseAtCommit THEN [paused EXCEPT ![r] = FALSE] ELSE paused
     /\ UNCHANGED << mid, procs, cur, rinc, crashed, image, dumpfail,
-                    nmig, nabort, poisoned >>
+                    nmig, nabort, poisoned, rtry >>
 
 CommitRestore == \E a \in Agents, r \in Ranks : CommitRestoreA(a, r)
 
@@ -345,7 +386,7 @@ MarkActiveFromActivatingA(r) ==
     /\ image'    = [image    EXCEPT ![r] = FALSE]
     /\ dumpfail' = [dumpfail EXCEPT ![r] = FALSE]
     /\ UNCHANGED << inc, lease, procs, cur, rinc, won, winner, crashed,
-                    nmig, nabort, poisoned >>
+                    nmig, nabort, poisoned, rtry >>
 
 MarkActiveFromActivating == \E r \in Ranks : MarkActiveFromActivatingA(r)
 
@@ -367,7 +408,7 @@ AbortPauseOnDumpFailureA(a, r) ==
     /\ lease'    = [lease    EXCEPT ![r] = NoAgent]
     /\ dumpfail' = [dumpfail EXCEPT ![r] = FALSE]
     /\ UNCHANGED << inc, procs, cur, rinc, won, winner, crashed, image,
-                    nmig, nabort, poisoned >>
+                    nmig, nabort, poisoned, rtry >>
 
 AbortPauseOnDumpFailure ==
     \E a \in Agents, r \in Ranks : AbortPauseOnDumpFailureA(a, r)
@@ -386,7 +427,7 @@ AbortPauseCancelA(r) ==
     /\ dumpfail' = [dumpfail EXCEPT ![r] = FALSE]
     /\ image'    = [image    EXCEPT ![r] = FALSE]
     /\ UNCHANGED << inc, procs, cur, rinc, won, winner, crashed,
-                    nmig, nabort, poisoned >>
+                    nmig, nabort, poisoned, rtry >>
 
 AbortPauseCancel == \E r \in Ranks : AbortPauseCancelA(r)
 
@@ -398,7 +439,7 @@ AbortRestoreA(r) ==
     /\ rstate' = [rstate EXCEPT ![r] = "CHECKPOINTED"]
     /\ lease'  = [lease  EXCEPT ![r] = NoAgent]
     /\ UNCHANGED << inc, paused, mid, procs, cur, rinc, won, winner, crashed,
-                    image, dumpfail, nmig, nabort, poisoned >>
+                    image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 AbortRestore == \E r \in Ranks : AbortRestoreA(r)
 
@@ -424,7 +465,7 @@ AbortActivationDeadA(r) ==
     /\ AbortActivationBody(r)
     /\ winner[r] \in crashed
     /\ UNCHANGED << inc, paused, mid, lease, procs, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 AbortActivationDead == \E r \in Ranks : AbortActivationDeadA(r)
 
@@ -434,7 +475,7 @@ AbortActivationSuspectedA(r) ==
     /\ nabort < MaxSuspectedAborts
     /\ nabort' = nabort + 1
     /\ UNCHANGED << inc, paused, mid, lease, procs, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, poisoned >>
+                    crashed, image, dumpfail, nmig, poisoned, rtry >>
 
 AbortActivationSuspected == \E r \in Ranks : AbortActivationSuspectedA(r)
 
@@ -445,7 +486,7 @@ LeaseExpiryCrashedA(r) ==
     /\ lease[r] \in crashed
     /\ lease' = [lease EXCEPT ![r] = NoAgent]
     /\ UNCHANGED << rstate, inc, paused, mid, procs, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 LeaseExpiryCrashed == \E r \in Ranks : LeaseExpiryCrashedA(r)
 
@@ -455,7 +496,7 @@ LeaseExpirySpuriousA(r) ==
     /\ lease[r] \notin crashed
     /\ lease' = [lease EXCEPT ![r] = NoAgent]
     /\ UNCHANGED << rstate, inc, paused, mid, procs, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 LeaseExpirySpurious == \E r \in Ranks : LeaseExpirySpuriousA(r)
 
@@ -469,7 +510,7 @@ AgentFreezeA(a, r) ==
     /\ procs[r][cur[r]] = "RUNNING"
     /\ procs' = [procs EXCEPT ![r][cur[r]] = "STOPPED"]
     /\ UNCHANGED << rstate, inc, paused, mid, lease, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 AgentFreeze == \E a \in Agents, r \in Ranks : AgentFreezeA(a, r)
 
@@ -491,7 +532,7 @@ AgentDumpA(a, r) ==
                 THEN procs
                 ELSE [procs EXCEPT ![r][cur[r]] = "KILLED"]
     /\ UNCHANGED << rstate, inc, paused, mid, lease, cur, rinc, won, winner,
-                    crashed, dumpfail, nmig, nabort, poisoned >>
+                    crashed, dumpfail, nmig, nabort, poisoned, rtry >>
 
 AgentDump == \E a \in Agents, r \in Ranks : AgentDumpA(a, r)
 
@@ -505,7 +546,7 @@ AgentDumpFailA(a, r) ==
     /\ procs[r][cur[r]] = "STOPPED"
     /\ dumpfail' = [dumpfail EXCEPT ![r] = TRUE]
     /\ UNCHANGED << rstate, inc, paused, mid, lease, procs, cur, rinc, won,
-                    winner, crashed, image, nmig, nabort, poisoned >>
+                    winner, crashed, image, nmig, nabort, poisoned, rtry >>
 
 AgentDumpFail == \E a \in Agents, r \in Ranks : AgentDumpFailA(a, r)
 
@@ -519,7 +560,7 @@ RestoreProcessA(a, r) ==
     /\ procs' = [procs EXCEPT ![r][a] = "STOPPED"]
     /\ rinc'  = [rinc  EXCEPT ![r][a] = inc[r]]
     /\ UNCHANGED << rstate, inc, paused, mid, lease, cur, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 RestoreProcess == \E a \in Agents, r \in Ranks : RestoreProcessA(a, r)
 
@@ -532,7 +573,7 @@ SigContA(a, r) ==
     /\ cur'   = [cur   EXCEPT ![r] = a]
     /\ rinc'  = [rinc  EXCEPT ![r][a] = 0]
     /\ UNCHANGED << rstate, inc, paused, mid, lease, won, winner, crashed,
-                    image, dumpfail, nmig, nabort, poisoned >>
+                    image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 SigCont == \E a \in Agents, r \in Ranks : SigContA(a, r)
 
@@ -548,7 +589,7 @@ SigKillLoserA(a, r) ==
     /\ procs' = [procs EXCEPT ![r][a] = "KILLED"]
     /\ rinc'  = [rinc  EXCEPT ![r][a] = 0]
     /\ UNCHANGED << rstate, inc, paused, mid, lease, cur, won, winner, crashed,
-                    image, dumpfail, nmig, nabort, poisoned >>
+                    image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 SigKillLoser == \E a \in Agents, r \in Ranks : SigKillLoserA(a, r)
 
@@ -564,7 +605,7 @@ ResumeAfterAbortA(a, r) ==
     /\ procs[r][cur[r]] = "STOPPED"
     /\ procs' = [procs EXCEPT ![r][cur[r]] = "RUNNING"]
     /\ UNCHANGED << rstate, inc, paused, mid, lease, cur, rinc, won, winner,
-                    crashed, image, dumpfail, nmig, nabort, poisoned >>
+                    crashed, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 ResumeAfterAbort == \E a \in Agents, r \in Ranks : ResumeAfterAbortA(a, r)
 
@@ -573,7 +614,7 @@ AgentCrashA(a) ==
     /\ Cardinality(crashed) < MaxCrashes
     /\ crashed' = crashed \cup {a}
     /\ UNCHANGED << rstate, inc, paused, mid, lease, procs, cur, rinc, won,
-                    winner, image, dumpfail, nmig, nabort, poisoned >>
+                    winner, image, dumpfail, nmig, nabort, poisoned, rtry >>
 
 AgentCrash == \E a \in Agents : AgentCrashA(a)
 
@@ -599,7 +640,7 @@ SurvivorTimeout ==
          /\ \E s \in Ranks : s # r /\ rstate[s] = "ACTIVE"
     /\ poisoned' = TRUE
     /\ UNCHANGED << rstate, inc, paused, mid, lease, procs, cur, rinc, won,
-                    winner, crashed, image, dumpfail, nmig, nabort >>
+                    winner, crashed, image, dumpfail, nmig, nabort, rtry >>
 
 -----------------------------------------------------------------------------
 (* Terminal stutter.  Without it the bounded model reports a deadlock in the  *)
@@ -622,6 +663,7 @@ Next ==
     \/ AgentDumpFail
     \/ MarkCheckpointed
     \/ AcquireRestoreLease
+    \/ EscalateAbortPause
     \/ RestoreProcess
     \/ CommitRestore
     \/ SigCont
@@ -651,6 +693,7 @@ Fairness ==
     /\ WF_vars(AgentDump)
     /\ WF_vars(MarkCheckpointed)
     /\ WF_vars(AcquireRestoreLease)
+    /\ WF_vars(EscalateAbortPause)
     /\ WF_vars(RestoreProcess)
     /\ WF_vars(CommitRestore)
     /\ WF_vars(SigCont)
