@@ -170,7 +170,11 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
     if (status != DecodeStatus::Ok) {
         throw std::runtime_error(transport_tag + ": malformed frame from peer " +
                                  std::to_string(sender_id) + " (decode status " +
-                                 std::to_string(static_cast<int>(status)) + ")");
+                                 std::to_string(static_cast<int>(status)) +
+                                 ", declared payload " + std::to_string(arrived.payload_length) +
+                                 ", declared total " + std::to_string(arrived.total_length) +
+                                 ", expecting " + std::to_string(buf.len) + " bytes for [" +
+                                 describe(expected_identity(buf.len)) + "])");
     }
 
     const FrameHeader expected = expected_identity(buf.len);
