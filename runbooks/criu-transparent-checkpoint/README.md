@@ -104,8 +104,12 @@ restore several links must be rebuilt at once in an order each rank chooses inde
 the wait-for relation that makes lazy establishment safe stops being acyclic. Caught live and
 diagnosed in
 [`docs/superpowers/specs/2026-07-30-sequenced-links-implementation.md`](../../docs/superpowers/specs/2026-07-30-sequenced-links-implementation.md);
-closing it needs the progress engine the design specifies. Use `--peers 2` for a run you expect
-to pass; higher counts are how you reproduce the defect.
+Three separate causes have been found and fixed (frames piling up, the handshake blocking,
+links not being reconciled after a replacement) and the rate did not move; the fourth is that
+`accept_one` only runs inside `build_mesh`, so a rank blocked in a read accepts nothing.
+Fixing that means a component that owns every socket and never blocks the rank on one — the
+progress engine the design specifies. Use `--peers 2` for a run you expect to pass; higher
+counts are how you reproduce the defect.
 
 Single host. The restored rank re-uses the listening socket and advertised address the image
 captured, which is correct on the same machine and wrong on any other; cross-host restore needs

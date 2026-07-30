@@ -229,23 +229,35 @@ So the remaining cycle is: rank A is establishing link X; rank B has offered A a
 replaced link and is blocked in `exchange_handshake` waiting for A's in return; A will not
 handshake with B until it finishes with X.
 
-**Closing that means making the handshake one-way** — carried as a frame so any reader can
-consume it, with neither end waiting for the other. That is attempt three, and it is not done:
-the first version of it desynchronised the stream (fixed since, by the partial-read change) and
-the second regressed `TransportRecovery` and was reverted rather than shipped half-verified.
+### Three fixes in, and what they proved
 
-**Start attempt three by diagnosing that regression, not by rewriting.** Under the one-way
-handshake, `TransportRecovery/a_severed_link_replays_and_loses_nothing` delivered 7 of 12
-messages, and *why* was never established. That case is the cheapest possible place to find
-out: two threads, a socketpair switchboard that severs on command, no rendezvous, no criu, and
-it runs in seconds. Whatever loses five messages there is almost certainly the same thing that
-would lose them in a real job. Guessing at it — which is what shipping a third rewrite without
-that answer would amount to — is how the first two attempts went wrong.
+Each one removed a real thing that piled up during establishment, and each time the job still
+deadlocked — on the next thing down.
 
-Note also that both suites which impersonate the far end of a link (`CheckpointFreezePoints`
-and `TransportRecovery`'s malformed-handshake case) encode the current wire format and need
-updating in step; a handshake that has become a frame is read as `frame_header_bytes` then
-`handshake_bytes`, not as a bare preamble.
+1. **Frames piled up.** A rank inside `build_mesh` read none of its other links.
+   Fixed: `service_established_links` takes whole frames into the drain queues.
+   *Result: every data link now drains to zero on a wedged job. Still deadlocks.*
+2. **Handshakes blocked.** A rank re-establishing wrote its handshake and blocked reading the
+   peer's, which needs both ends at the new connection at once. Fixed: the handshake is a
+   frame, one way, consumed by any reader.
+   *Result: no unread bytes anywhere on a wedged job. Still deadlocks.*
+3. **Nobody accepts.** With a wedged 4-rank job photographed under the fixed transport: the
+   restored rank sits in `poll` inside `build_mesh`, its three peers sit in socket reads, and
+   **not one byte is queued anywhere**. `DirectTCP::accept_one` only ever runs inside
+   `build_mesh`. A rank blocked in a *read* accepts nothing — so the restored rank's connect
+   reaches the listen backlog and is never acknowledged, while the peer that would acknowledge
+   it is blocked reading a link that depends on the restored rank.
+
+**That third one is the engine, and this is the evidence that it is not optional.** Fixing it
+means servicing the listener from inside a blocking read — which is to say, a component that
+owns every socket and never blocks the rank on one of them. Each fix above is a partial
+re-implementation of that component, and the returns say so: three rounds, three real defects,
+the same failure rate.
+
+The design calls the progress engine "the irreversible commitment point" and stages it
+deliberately. This section is the empirical case for taking that step: the blocking,
+application-threaded transport can carry message identity and durability, and it can survive a
+checkpoint at two ranks, but it cannot service a mesh while any rank is waiting on part of it.
 
 ### What was fixed along the way, and what was not
 
