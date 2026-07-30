@@ -172,6 +172,15 @@ stated as one idea rather than five patches.
 | 4 | letting the peer's handshake through | handshake carried as a frame, one way | 7/10 |
 | 5 | **accepting, and finishing the accept** | `pump` + `adopt_link` | **10/10** |
 
+Scale after round 5, same randomized sweep:
+
+| ranks | trials | passed |
+| --- | --- | --- |
+| 2 | 10 | 10 |
+| 4 | 10 | 10 |
+| 8 | 8 | 7 |
+| 16 | 6 | 6 |
+
 **The idea:** a rank that is waiting must keep meeting every obligation it has.
 
 Every blocking read and write now goes through `pump()`, which polls the descriptor the caller
