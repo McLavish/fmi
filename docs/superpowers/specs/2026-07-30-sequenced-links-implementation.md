@@ -155,6 +155,15 @@ injected faults still in place — every test varied two fields at once, so some
 always caught the break and no test pinned what it appeared to. Any new claim in the table
 above should arrive with a mutation that the new test kills.
 
+Two cautions from running it, both worth more than the score. First, a test can pass for the
+wrong reason and look identical to one that passes for the right one: the case added to pin
+"a blocked rank still accepts" originally let `build_mesh` do the accepting, so the mutation it
+was written to kill sailed straight through. Only reordering it — establish the first link
+*before* blocking — earned the kill. Second, `establishment_reads_no_other_link` was carried as
+a documented known survivor on the reasoning that no test could observe it. The criu sweep kills
+it 0/8 at both 4 and 8 ranks. The label was a statement about the tests that existed, not about
+the code, and it is worth suspecting any other survivor of the same thing.
+
 ## Checkpointing at arbitrary rank counts: what it took
 
 **48 randomized trials across 2, 3, 5, 7, 8 and 16 ranks; 48 passed.** Each trial checkpoints a
@@ -185,6 +194,12 @@ the caller needs in short slices and, between them, services the listener, drain
 other links, and reconciles any link still owing a handshake. `adopt_link` completes an accepted
 connection there and then rather than parking it until the application happens to touch that
 peer.
+
+Each of those six obligations is now pinned by a mutation, and the pinning is unambiguous:
+removing any single one takes the 4-rank sweep from 8 of 8 to **0 of 8**. Not a degraded
+success rate — no run survives a checkpoint at all. Five of the six are killed by the criu
+sweep rather than by the Boost suite, which is the honest home for them, since the property
+only bites once a restore forces several links to be rebuilt at once.
 
 **This is the progress engine's property without its thread.** The design specifies an
 autonomous component owning every socket; what the deadlock actually needed was not concurrency
