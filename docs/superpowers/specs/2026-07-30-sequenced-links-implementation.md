@@ -134,6 +134,36 @@ directory-driven repair, the restore budget. Those are specified and model-check
 implemented is the part the link layer needs to be unambiguous: the incarnation, its fencing
 rules, and where the number comes from.
 
+## Where the suites can actually run
+
+Worth knowing before reading a red result as a regression, because two different things produce
+one here.
+
+The `-DFMI_ENABLE_TCPUNCH=OFF` build runs **13 of the 15 suites clean**, including every suite
+this branch adds. `Communicator` and `FaultTolerance` are the exceptions: both ask for the
+`Direct` backend, which that build does not register, so `Channel::get_channel` throws
+`"Direct backend was disabled at build time"` inside a forked rank and the process aborts
+rather than failing a case. That is **pre-existing** — the same two suites abort identically at
+the branch point (`428b9cb`), verified by building it in the same configuration. It is a
+property of the test configuration, not of this work, and it is the reason the mutation sweep
+runs a named suite list rather than the whole binary.
+
+Those two suites therefore have to run in a `TCPUNCH=ON` build, where they inherit TCPunch's
+documented flakiness. Measured on this machine, four full runs each of
+`Channels,Communicator,FaultTolerance`:
+
+| | run 1 | run 2 | run 3 | run 4 |
+| --- | --- | --- | --- | --- |
+| branch point `428b9cb` | 0 | 19 | 29 | 42 |
+| `feat/sequenced-links` | 3 | 5 | 7 | 30 |
+
+The failing case names differ almost completely between consecutive runs of the *same* binary,
+and every one of them is a `Direct` collective. The branch's numbers are lower, but with a
+spread this wide and n=4 that is **not** a claim of improvement — the honest reading is that
+both are dominated by the same pre-existing flakiness and neither is distinguishable from the
+other. What can be said is that no failure in either column implicates the sequenced link
+layer: with TCPunch out of the build, the same collectives pass.
+
 ## Evidence
 
 | claim | how it is checked |

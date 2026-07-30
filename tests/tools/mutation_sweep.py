@@ -188,6 +188,20 @@ def run(cmd, **kw):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
 
 survived, killed, broken = [], [], []
+
+# Mutations this suite cannot kill but the criu sweep does, with the measurement that says so.
+# They are NOT test holes and must not be reported as such: each one is pinned, just by a
+# different vehicle, because the obligation it removes only bites once a restore forces several
+# links to be rebuilt at once. Anything that appears as a survivor and is NOT listed here is a
+# genuine hole. Before adding a name, run it through
+# runbooks/criu-transparent-checkpoint/sweep.py and record the rate you measured.
+CRIU_KILLED = {
+    "waiting_rank_serves_nobody":        "criu sweep 4 peers, seed 7: 8/8 -> 0/8",
+    "waiting_rank_never_accepts":        "criu sweep 4 peers, seed 7: 8/8 -> 0/8",
+    "waiting_rank_never_reconciles":     "criu sweep 4 peers, seed 7: 8/8 -> 0/8",
+    "adoption_skips_the_handshake_debt": "criu sweep 4 peers, seed 7: 8/8 -> 0/8",
+    "establishment_reads_no_other_link": "criu sweep, seed 7: 0/8 at 4 peers and 0/8 at 8",
+}
 # Every file this sweep will touch, saved up front. A mutation left behind in a source tree is
 # far worse than a sweep that did not finish: it is a deliberately broken protocol that looks
 # like ordinary uncommitted work. Restored in a finally block, and on SIGINT/SIGTERM, because
@@ -225,15 +239,25 @@ try:
                 if r.returncode!=0: failed=True; break
             (killed if failed else survived).append(name)
         open(path,'w').write(src)
-        verdict = 'KILLED  ' if name in killed else 'SURVIVED' if name in survived else 'BROKEN  '
-        detail = f" (by {s})" if name in killed else ""
+        if name in killed:
+            verdict, detail = 'KILLED  ', f" (by {s})"
+        elif name in survived and name in CRIU_KILLED:
+            verdict, detail = 'criu    ', f" (not this suite: {CRIU_KILLED[name]})"
+        elif name in survived:
+            verdict, detail = 'SURVIVED', ""
+        else:
+            verdict, detail = 'BROKEN  ', ""
         print(f"{verdict} {name}{detail}", flush=True)
 finally:
     restore_all()
 
 run(f"cd {WT} && cmake --build build -j16")
+elsewhere = [n for n in survived if n in CRIU_KILLED]
+holes     = [n for n in survived if n not in CRIU_KILLED]
 print("\n===== MUTATION SUMMARY =====")
-print(f"killed   : {len(killed)}")
-print(f"SURVIVED : {len(survived)}  <-- test holes")
-for s in survived: print("   -",s)
+print(f"killed here   : {len(killed)}")
+print(f"killed by criu: {len(elsewhere)}  (pinned, just not by this suite)")
+for n in elsewhere: print(f"   - {n}  [{CRIU_KILLED[n]}]")
+print(f"SURVIVED      : {len(holes)}  <-- genuine test holes")
+for n in holes: print("   -",n)
 for n,why in broken: print("  BROKEN",n,why)
