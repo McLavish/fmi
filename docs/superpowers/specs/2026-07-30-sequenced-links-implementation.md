@@ -167,10 +167,15 @@ delivers, and it is a design-level defect in lazy establishment, not a coding sl
 | shape | trials | passed |
 | --- | --- | --- |
 | 2 peers, one checkpoint | 10 | **10** |
+| 4 peers, one checkpoint | 10 | 7 |
 | 3 and 4 peers, up to 3 checkpoints | 8 valid | 6 |
 | 8 peers, one checkpoint | 6 | 4 |
 | 4 peers, 256 KiB messages | 8 | 6 |
 | 4 peers, checkpoint during mesh establishment | 8 | 4 |
+
+Rows below the first are from before the two fixes in this section were applied except the
+4-peer single-checkpoint row, which is after; the rate did not move, which is the point — the
+fixes address real defects but not this one.
 
 A failing trial ends with every rank throwing `Timeout` after its full deadline, the restored
 rank having logged nothing since its restore.
