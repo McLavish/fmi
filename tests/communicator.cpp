@@ -40,13 +40,7 @@ BOOST_AUTO_TEST_CASE(bcast) {
     d[0] = 1;
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->bcast(d[peer_id], 0);
     BOOST_CHECK_EQUAL(d[peer_id], 1);
@@ -58,13 +52,7 @@ BOOST_AUTO_TEST_CASE(scatter) {
     std::vector<FMI::Comm::Data<std::vector<int>>> d(num_peers, FMI::Comm::Data<std::vector<int>>(1));
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->scatter(root_data, d[peer_id], 0);
     BOOST_CHECK_EQUAL(d[peer_id].get()[0], peer_id + 1);
@@ -81,13 +69,7 @@ BOOST_AUTO_TEST_CASE(gather) {
     }
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->gather(d[peer_id], root_data, 0);
     std::vector<int> expected{{1,2,3,4}};
@@ -107,13 +89,7 @@ BOOST_AUTO_TEST_CASE(reduce) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->reduce(data[peer_id], res, 0, f);
     if (peer_id == 0) {
@@ -134,13 +110,7 @@ BOOST_AUTO_TEST_CASE(reduce_vector) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->reduce(data[peer_id], res, 0, f);
     if (peer_id == 0) {
@@ -160,13 +130,7 @@ BOOST_AUTO_TEST_CASE(allreduce) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->allreduce(data[peer_id], res[peer_id], f);
     BOOST_CHECK_EQUAL(res[peer_id], 10);
@@ -186,13 +150,7 @@ BOOST_AUTO_TEST_CASE(allreduce_vector) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->allreduce(data[peer_id], res[peer_id], f);
     std::vector<int> expected{1 + 2 + 3 + 4, 2 * 4 * 6 * 8, 4};
@@ -212,13 +170,7 @@ BOOST_AUTO_TEST_CASE(scan) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->scan(data[peer_id], res[peer_id], f);
     int prefix_sum = 0;
@@ -242,13 +194,7 @@ BOOST_AUTO_TEST_CASE(scan_vector) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i ++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
     auto ch = std::make_unique<FMI::Communicator>(peer_id, num_peers, config_path, comm_name);
     ch->scan(data[peer_id], res[peer_id], f);
 

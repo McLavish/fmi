@@ -55,14 +55,6 @@ namespace {
                                       MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     }
 
-    void reap(int peer_id, int num_peers) {
-        if (peer_id != 0) {
-            std::_Exit(0);
-        }
-        for (int i = 1; i < num_peers; i++) {
-            wait(nullptr);
-        }
-    }
 }
 
 BOOST_AUTO_TEST_CASE(a_framed_point_to_point_message_round_trips) {
@@ -72,10 +64,7 @@ BOOST_AUTO_TEST_CASE(a_framed_point_to_point_message_round_trips) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     ok[peer_id] = 0;
     try {
@@ -100,7 +89,7 @@ BOOST_AUTO_TEST_CASE(a_framed_point_to_point_message_round_trips) {
         BOOST_TEST_MESSAGE("rank " << peer_id << ": " << e.what());
     }
 
-    reap(peer_id, num_peers);
+    rank_guard.reap_ranks();
     BOOST_CHECK_EQUAL(ok[0], 1);
     BOOST_CHECK_EQUAL(ok[1], 1);
 }
@@ -112,10 +101,7 @@ BOOST_AUTO_TEST_CASE(a_framed_collective_fragment_round_trips) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     ok[peer_id] = 0;
     try {
@@ -140,7 +126,7 @@ BOOST_AUTO_TEST_CASE(a_framed_collective_fragment_round_trips) {
         BOOST_TEST_MESSAGE("rank " << peer_id << ": " << e.what());
     }
 
-    reap(peer_id, num_peers);
+    rank_guard.reap_ranks();
     BOOST_CHECK_EQUAL(ok[0], 1);
     BOOST_CHECK_EQUAL(ok[1], 1);
 }
@@ -158,10 +144,7 @@ BOOST_AUTO_TEST_CASE(a_divergent_receive_fails_loudly_instead_of_substituting) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     ok[peer_id] = 0;
     if (peer_id == 0) { ok[2] = 0; }
@@ -194,7 +177,7 @@ BOOST_AUTO_TEST_CASE(a_divergent_receive_fails_loudly_instead_of_substituting) {
         BOOST_TEST_MESSAGE("rank " << peer_id << " setup: " << e.what());
     }
 
-    reap(peer_id, num_peers);
+    rank_guard.reap_ranks();
     BOOST_CHECK_EQUAL(ok[0], 1);
     BOOST_CHECK_MESSAGE(ok[1] == 1, "receiver did not report an identity mismatch");
     BOOST_CHECK_MESSAGE(ok[2] == 0, "receiver SILENTLY ACCEPTED a foreign payload");
@@ -209,10 +192,7 @@ BOOST_AUTO_TEST_CASE(collectives_issued_in_different_orders_are_refused) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     ok[peer_id] = 0;
     if (peer_id == 0) { ok[2] = 0; }
@@ -245,7 +225,7 @@ BOOST_AUTO_TEST_CASE(collectives_issued_in_different_orders_are_refused) {
         BOOST_TEST_MESSAGE("rank " << peer_id << " setup: " << e.what());
     }
 
-    reap(peer_id, num_peers);
+    rank_guard.reap_ranks();
     BOOST_CHECK_EQUAL(ok[0], 1);
     BOOST_CHECK_MESSAGE(ok[1] == 1, "receiver did not report an identity mismatch");
     BOOST_CHECK_MESSAGE(ok[2] == 0, "receiver SILENTLY ACCEPTED a different collective");
@@ -264,10 +244,7 @@ BOOST_AUTO_TEST_CASE(every_collective_works_through_a_framed_communicator) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     ok[peer_id] = 0;
     stage[peer_id] = 0;
@@ -341,7 +318,7 @@ BOOST_AUTO_TEST_CASE(every_collective_works_through_a_framed_communicator) {
         ok[peer_id] = 0;
     }
 
-    reap(peer_id, num_peers);
+    rank_guard.reap_ranks();
     for (int i = 0; i < num_peers; i++) {
         BOOST_CHECK_MESSAGE(ok[i] == 1, "rank " << i << " stopped at stage " << stage[i]);
     }
@@ -359,10 +336,7 @@ BOOST_AUTO_TEST_CASE(a_replacement_rank_re_pairs_without_a_spurious_sequence_gap
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     ok[peer_id] = 0;
     try {
@@ -408,7 +382,7 @@ BOOST_AUTO_TEST_CASE(a_replacement_rank_re_pairs_without_a_spurious_sequence_gap
         BOOST_TEST_MESSAGE("rank " << peer_id << ": " << e.what());
     }
 
-    reap(peer_id, num_peers);
+    rank_guard.reap_ranks();
     BOOST_CHECK_MESSAGE(ok[0] == 1, "survivor could not send after reconfiguration");
     BOOST_CHECK_MESSAGE(ok[1] == 1, "replacement could not receive after reconfiguration");
 }

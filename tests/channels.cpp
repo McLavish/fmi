@@ -179,13 +179,7 @@ BOOST_AUTO_TEST_CASE(bcast) {
         vals[root] = 42;
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto ch = FMI::Comm::Channel::get_channel(channel_name, test_params, model_params);
         ch->set_peer_id(peer_id);
         ch->set_num_peers(num_peers);
@@ -215,13 +209,7 @@ BOOST_AUTO_TEST_CASE(barrier_unsucc) {
         bool* caught = static_cast<bool*>(mmap(nullptr, num_peers * sizeof(bool), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto ch = FMI::Comm::Channel::get_channel(channel_name, test_params, model_params);
         ch->set_peer_id(peer_id);
         ch->set_num_peers(num_peers);
@@ -259,13 +247,7 @@ BOOST_AUTO_TEST_CASE(barrier_succ) {
         constexpr int num_peers = 2;
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto ch = FMI::Comm::Channel::get_channel(channel_name, test_params, model_params);
         ch->set_peer_id(peer_id);
         ch->set_num_peers(num_peers);
@@ -299,13 +281,7 @@ BOOST_AUTO_TEST_CASE(gather_one) {
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto ch = FMI::Comm::Channel::get_channel(channel_name, test_params, model_params);
         ch->set_peer_id(peer_id);
         ch->set_num_peers(num_peers);
@@ -345,13 +321,7 @@ BOOST_AUTO_TEST_CASE(gather_multiple) {
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto ch = FMI::Comm::Channel::get_channel(channel_name, test_params, model_params);
         ch->set_peer_id(peer_id);
         ch->set_num_peers(num_peers);
@@ -388,13 +358,7 @@ BOOST_AUTO_TEST_CASE(scatter_one) {
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto ch = FMI::Comm::Channel::get_channel(channel_name, test_params, model_params);
         ch->set_peer_id(peer_id);
         ch->set_num_peers(num_peers);
@@ -434,13 +398,7 @@ BOOST_AUTO_TEST_CASE(scatter_multiple) {
         int* rcv_vals = static_cast<int*>(mmap(nullptr, num_peers * 2 * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto ch = FMI::Comm::Channel::get_channel(channel_name, test_params, model_params);
         ch->set_peer_id(peer_id);
         ch->set_num_peers(num_peers);
@@ -475,13 +433,7 @@ BOOST_AUTO_TEST_CASE(reduce_multiple) {
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto f = [] (char* a, char* b) {
             int* dest = reinterpret_cast<int*>(a);
             *dest = *((int*) a) * *((int*) b);
@@ -524,13 +476,7 @@ BOOST_AUTO_TEST_CASE(reduce_multiple_ltr) {
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto f = [] (char* a, char* b) {
             int* dest = reinterpret_cast<int*>(a);
             *dest = *((int*) a) - *((int*) b);
@@ -572,13 +518,7 @@ BOOST_AUTO_TEST_CASE(allreduce_multiple) {
         int* res = static_cast<int*>(mmap(nullptr, num_peers * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto f = [] (char* a, char* b) {
             int* dest = reinterpret_cast<int*>(a);
             *dest = *((int*) a) + *((int*) b);
@@ -619,13 +559,7 @@ BOOST_AUTO_TEST_CASE(allreduce_multiple_ltr) {
         int* res = static_cast<int*>(mmap(nullptr, num_peers * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto f = [] (char* a, char* b) {
             int* dest = reinterpret_cast<int*>(a);
             *dest = *((int*) a) - *((int*) b);
@@ -665,13 +599,7 @@ BOOST_AUTO_TEST_CASE(scan) {
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto f = [] (char* a, char* b) {
             int* dest = reinterpret_cast<int*>(a);
             *dest = *((int*) a) + *((int*) b);
@@ -709,13 +637,7 @@ BOOST_AUTO_TEST_CASE(scan_ltr) {
         int* res = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i ++) {
-            int pid = fork();
-            if (pid == 0) {
-                peer_id = i;
-                break;
-            }
-        }
+        rank_guard.fork_ranks(num_peers);
         auto f = [] (char* a, char* b) {
             int* dest = reinterpret_cast<int*>(a);
             *dest = *((int*) a) - *((int*) b);
@@ -854,10 +776,7 @@ BOOST_AUTO_TEST_CASE(direct_tcp_registration_survives_registry_ttl) {
                                      MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     ok[peer_id] = 0;
     try {
@@ -927,13 +846,7 @@ BOOST_AUTO_TEST_CASE(scan_ltr_client_server_ordering) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) {
-            peer_id = i;
-            break;
-        }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     auto f = [] (char* a, char* b) {
         *reinterpret_cast<int*>(a) = *reinterpret_cast<int*>(a) - *reinterpret_cast<int*>(b);

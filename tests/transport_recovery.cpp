@@ -409,10 +409,7 @@ BOOST_AUTO_TEST_CASE(recovery_over_the_real_rendezvous) {
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     try {
         BreakableDirectTCP ch(dtcp_recover_params(), dtcp_model());
@@ -438,8 +435,7 @@ BOOST_AUTO_TEST_CASE(recovery_over_the_real_rendezvous) {
         std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
     }
 
-    if (peer_id != 0) { std::_Exit(0); }
-    for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+    rank_guard.reap_ranks();
 
     BOOST_CHECK_MESSAGE(out->ok == 1, "receiver did not complete after the connection broke");
     BOOST_REQUIRE_EQUAL(out->count, messages);

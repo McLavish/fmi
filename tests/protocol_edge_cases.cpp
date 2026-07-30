@@ -58,10 +58,7 @@ namespace {
 
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i++) {
-            int pid = fork();
-            if (pid == 0) { peer_id = i; break; }
-        }
+        rank_guard.fork_ranks(num_peers);
 
         try {
             FMI::Communicator comm(peer_id, num_peers, config, name);
@@ -72,8 +69,7 @@ namespace {
             out[peer_id].ok = 0;
         }
 
-        if (peer_id != 0) { std::_Exit(0); }
-        for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+        rank_guard.reap_ranks();
     }
 
     void push(RankResult& r, long long v) {
@@ -295,10 +291,7 @@ BOOST_AUTO_TEST_CASE(two_communicators_in_one_process_do_not_share_identity_stat
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     try {
         FMI::Communicator a(peer_id, num_peers, framed_config, a_name);
@@ -320,8 +313,7 @@ BOOST_AUTO_TEST_CASE(two_communicators_in_one_process_do_not_share_identity_stat
         out[peer_id].ok = 0;
     }
 
-    if (peer_id != 0) { std::_Exit(0); }
-    for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+    rank_guard.reap_ranks();
 
     for (int i = 0; i < num_peers; i++) {
         BOOST_CHECK_MESSAGE(out[i].ok == 1, "rank " << i << " failed with two communicators");
@@ -360,10 +352,7 @@ BOOST_AUTO_TEST_CASE(ranks_disagreeing_on_a_collective_buffer_size_are_caught_wh
 
     ForkedRankGuard rank_guard;
     int& peer_id = rank_guard.peer_id;
-    for (int i = 1; i < num_peers; i++) {
-        int pid = fork();
-        if (pid == 0) { peer_id = i; break; }
-    }
+    rank_guard.fork_ranks(num_peers);
 
     bool refused = false;
     try {
@@ -378,8 +367,7 @@ BOOST_AUTO_TEST_CASE(ranks_disagreeing_on_a_collective_buffer_size_are_caught_wh
     }
     out[peer_id].ok = refused ? 1 : 0;
 
-    if (peer_id != 0) { std::_Exit(0); }
-    for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+    rank_guard.reap_ranks();
 
     BOOST_CHECK_MESSAGE(out[0].ok == 1,
                         "framed gather accepted ranks that disagreed on the buffer size");
@@ -413,10 +401,7 @@ namespace {
 
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i++) {
-            int pid = fork();
-            if (pid == 0) { peer_id = i; break; }
-        }
+        rank_guard.fork_ranks(num_peers);
         try {
             auto ch = FMI::Comm::Channel::get_channel("DirectTCP", raw_dtcp_params(), raw_dtcp_model());
             ch->set_peer_id(peer_id);
@@ -434,8 +419,7 @@ namespace {
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[raw gather p=%d root=%d rank %d] %s\n", num_peers, root, peer_id, e.what());
         }
-        if (peer_id != 0) { std::_Exit(0); }
-        for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+        rank_guard.reap_ranks();
         if (*done != 1) { return 0; }
         for (int i = 0; i < num_peers; i++) {
             if (got[i] != i + 1) { return 0; }

@@ -164,10 +164,7 @@ namespace {
 
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i++) {
-            int pid = fork();
-            if (pid == 0) { peer_id = i; break; }
-        }
+        rank_guard.fork_ranks(num_peers);
         try {
             FMI::Communicator comm(peer_id, num_peers, config, name);
             execute(comm, peer_id, num_peers, steps, out[peer_id]);
@@ -176,8 +173,7 @@ namespace {
             std::fprintf(stderr, "[seed %u rank %d] %s\n", seed, peer_id, e.what());
             out[peer_id].ok = 0;
         }
-        if (peer_id != 0) { std::_Exit(0); }
-        for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+        rank_guard.reap_ranks();
     }
 
     std::string comm_for(unsigned seed, const char* tag) {
@@ -265,10 +261,7 @@ namespace {
 
         ForkedRankGuard rank_guard;
         int& peer_id = rank_guard.peer_id;
-        for (int i = 1; i < num_peers; i++) {
-            int pid = fork();
-            if (pid == 0) { peer_id = i; break; }
-        }
+        rank_guard.fork_ranks(num_peers);
         try {
             FMI::Communicator comm(peer_id, num_peers, config, name);
             RankResult sink{};
@@ -283,8 +276,7 @@ namespace {
                 slots[peer_id].other = 1;
             }
         }
-        if (peer_id != 0) { std::_Exit(0); }
-        for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+        rank_guard.reap_ranks();
 
         Outcome o;
         for (int i = 0; i < num_peers; i++) {
