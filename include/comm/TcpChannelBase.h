@@ -93,6 +93,9 @@ namespace FMI::Comm {
          */
         virtual void service_transport() {}
 
+        //! One-line description of subclass-owned transport state, for stuck-rank diagnostics.
+        virtual std::string transport_state_note() const { return {}; }
+
         //! Wait for @p fd to become ready, serving every other obligation meanwhile.
         /*!
          * The single place the transport ever waits. Polls the descriptor the caller needs
@@ -102,8 +105,14 @@ namespace FMI::Comm {
          */
         bool pump(Utils::peer_num peer, short events, long deadline_ms);
 
-        //! True while pump() is servicing, so servicing cannot recurse into itself.
-        bool pumping = false;
+        //! How deep pump() is nested. Servicing reads and writes, which wait, which pump.
+        /*!
+         * One level of that is the point — a rank servicing its peers must still be able to
+         * wait for the bytes it is reading. Bounding the depth rather than forbidding the
+         * nesting keeps the "always serving" property at the inner level too; only the second
+         * level falls back to waiting on its own descriptor alone, and briefly.
+         */
+        int pump_depth = 0;
 
         //! Ensure a connection to @p partner_id exists, establishing it on first use.
         void check_socket(Utils::peer_num partner_id, const std::string& name);
@@ -205,6 +214,15 @@ namespace FMI::Comm {
          * exactly as if this rank had re-established it itself.
          */
         void adopt_link(Utils::peer_num partner_id, int fd);
+
+        //! Send this end's handshake and replay, if the link is still owed them.
+        /*!
+         * Called from the application's own thread at the top of a send or receive, never from
+         * inside servicing. Replay can be large, and a large write from inside servicing stalls
+         * the rank on one peer while the rest of the mesh goes unread — which is the deadlock
+         * all of this exists to prevent.
+         */
+        void reconcile_if_needed(Utils::peer_num partner_id);
 
         //! Record that the connection to @p partner_id was replaced, not merely established.
         /*!

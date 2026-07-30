@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -190,18 +191,21 @@ std::string FMI::Comm::TcpChannelBase::link_name(Utils::peer_num partner_id, boo
 }
 
 bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long deadline_ms) {
-    // Re-entrancy guard: servicing reads frames, which reads bytes, which pumps. One level of
-    // that is the point; two would recurse without bound.
-    if (pumping) {
+    // Bound the nesting rather than forbid it: servicing reads and writes, and those wait, and
+    // waiting pumps. Two levels are needed, not one — servicing reconciles links, and that
+    // sends a handshake and a replay, which waits in turn. Below that, fall back to this
+    // descriptor alone, and only in short slices: a nested wait that consumed the whole
+    // deadline would leave the rank serving nobody for as long as it lasted.
+    if (pump_depth >= 3) {
+        const long remaining = std::max<long>(deadline_ms - steady_now_ms(), 0);
         struct pollfd solo{sockets[peer], events, 0};
-        const long solo_wait = std::max<long>(deadline_ms - steady_now_ms(), 0);
-        return ::poll(&solo, 1, static_cast<int>(solo_wait)) > 0;
+        return ::poll(&solo, 1, static_cast<int>(std::min<long>(remaining, 20))) > 0;
     }
-    pumping = true;
+    ++pump_depth;
     struct Guard {
-        bool& flag;
-        ~Guard() { flag = false; }
-    } guard{pumping};
+        int& depth;
+        ~Guard() { --depth; }
+    } guard{pump_depth};
 
     while (true) {
         struct pollfd want{sockets[peer], events, 0};
@@ -223,6 +227,26 @@ bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long de
         // Nothing yet on the descriptor we need. Pay what we owe everyone else.
         service_transport();
         service_established_links(peer);
+        {
+            // A rank that has been waiting seconds says what it believes it holds on every
+            // link. Silent in a healthy run - nothing waits this long - and the one thing that
+            // makes a mesh deadlock diagnosable at all when it does happen.
+            const long waited = steady_now_ms() - (deadline_ms - static_cast<long>(max_timeout));
+            if (waited > 3000 && waited % 3000 < 25) {
+                std::fprintf(stderr, "[FMI] rank %u has waited %ldms for peer %u;", peer_id, waited, peer);
+                for (Utils::peer_num q = 0; q < num_peers; q++) {
+                    if (q == peer_id) { continue; }
+                    int avail = -1;
+                    if (q < sockets.size() && sockets[q] >= 0) {
+                        ::ioctl(sockets[q], FIONREAD, &avail);
+                    }
+                    std::fprintf(stderr, " p%u{fd=%d rq=%d rec=%d}", q,
+                                 q < sockets.size() ? sockets[q] : -2, avail,
+                                 q < link_needs_reconcile.size() ? link_needs_reconcile[q] : -1);
+                }
+                std::fprintf(stderr, " %s\n", transport_state_note().c_str());
+            }
+        }
     }
 }
 
@@ -369,6 +393,7 @@ void FMI::Comm::TcpChannelBase::repair_link(Utils::peer_num partner_id) {
 
 void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     check_socket(rcpt_id, link_name(rcpt_id, true));
+    reconcile_if_needed(rcpt_id);
     if (!framed) {
         write_all(rcpt_id, buf.buf, buf.len);
         return;
@@ -420,6 +445,7 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
 
 void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num sender_id) {
     check_socket(sender_id, link_name(sender_id, false));
+    reconcile_if_needed(sender_id);
     if (!framed) {
         read_all(sender_id, buf.buf, buf.len);
         return;
@@ -574,6 +600,16 @@ void FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) 
         if (peer == skip || peer == peer_id || peer >= sockets.size() || sockets[peer] < 0) {
             continue;
         }
+        // Pay off any reconciliation this link is owed. Deferring it to the application's next
+        // send or receive on this peer is not good enough: the peer is waiting for the replay
+        // that goes out with the handshake, and this rank may be blocked on somebody else for
+        // as long as the job lasts. Measured directly - a rank sat 39 seconds holding a link
+        // marked for reconciliation while its peer waited for exactly that.
+        try {
+            reconcile_if_needed(peer);
+        } catch (const std::exception&) {
+            continue;   // the receive path owns repair
+        }
         // Bounded: drain what is already there and return. This runs inside somebody else's
         // establishment loop and must not become one itself.
         for (int taken = 0; taken < 64; taken++) {
@@ -631,10 +667,21 @@ void FMI::Comm::TcpChannelBase::adopt_link(Utils::peer_num partner_id, int fd) {
         return;
     }
     ensure_link_state();
-    if (partner_id < link_needs_reconcile.size() && link_needs_reconcile[partner_id]) {
-        link_needs_reconcile[partner_id] = 0;
-        exchange_handshake(partner_id);
+    // Deliberately does NOT hand over the handshake and replay here. Adoption runs inside
+    // servicing, and replay can be large: a write that blocks there stalls this rank on one
+    // peer while every other link goes unread, which is the deadlock the servicing exists to
+    // prevent. The mark stays set and reconcile_if_needed pays it off from the application's
+    // own thread. Nothing is waiting on it meanwhile — the handshake is one way.
+}
+
+void FMI::Comm::TcpChannelBase::reconcile_if_needed(Utils::peer_num partner_id) {
+    if (!recover_links || partner_id >= link_needs_reconcile.size() ||
+        !link_needs_reconcile[partner_id]) {
+        return;
     }
+    ensure_link_state();
+    link_needs_reconcile[partner_id] = 0;
+    exchange_handshake(partner_id);
 }
 
 void FMI::Comm::TcpChannelBase::note_link_replaced(FMI::Utils::peer_num partner_id) {

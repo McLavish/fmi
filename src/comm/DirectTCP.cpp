@@ -109,37 +109,6 @@ namespace {
         return true;
     }
 
-    //! Is this descriptor still a live connection, or one the far end has torn down?
-    /*!
-     * Asked of a socket this rank still holds a descriptor for but has not touched recently.
-     * TCP_INFO rather than a peek: a peek cannot separate "idle" from "gone" without consuming
-     * data, and there may legitimately be unread bytes on a connection whose peer has since
-     * died. Anything other than ESTABLISHED means the connection is over.
-     *
-     * A descriptor whose state cannot be read AT ALL is dead, not live. That is not a corner
-     * case: a rank restored from a checkpoint holds a descriptor per peer that criu has closed
-     * under it, and getsockopt on one of those fails outright. Answering "live" there made this
-     * rank reject every peer trying to reconnect — the connections were accepted but never
-     * adopted, so their handshakes sat unread while the whole job waited. It cost roughly one
-     * run in fifteen, always with rank 0 (the rank every other connects to) as the target.
-     *
-     * Only reached for real TCP sockets: the test transports supply their own establish() and
-     * never come through here.
-     */
-    bool socket_is_established(int fd) {
-#if defined(TCP_INFO)
-        struct tcp_info info {};
-        socklen_t len = sizeof(info);
-        if (::getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &len) != 0) {
-            return false;
-        }
-        return info.tcpi_state == TCP_ESTABLISHED;
-#else
-        (void) fd;
-        return true;   // no way to ask; keep the previous behaviour
-#endif
-    }
-
     std::string param_or(std::map<std::string, std::string>& params, const std::string& key,
                          const std::string& fallback) {
         auto it = params.find(key);
@@ -678,17 +647,23 @@ FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
     // relies on being impossible — it is, for a first establishment, and is not after a
     // restore. Measured: checkpointing rank 0 of an 8-rank job wedged every rank in the job.
     if (pending_links.count(claimed) > 0) {
-        ::close(fd);
+        ::close(fd);   // already holding a fresh connection for that rank
         return AcceptResult::Rejected;
     }
     if (claimed < sockets.size() && sockets[claimed] >= 0) {
-        if (socket_is_established(sockets[claimed])) {
+        if (!recover_links) {
+            // Without the link layer a replacement cannot be reconciled, so the existing
+            // stream - which may be mid-message - has to win.
             ::close(fd);
             return AcceptResult::Rejected;
         }
-        // Dead, and this connection is the proof. Drop it so the link can be rebuilt, and mark
-        // it as replaced: the peer reached this connection through repair and is waiting to
-        // reconcile, so this end owes it a handshake it would otherwise skip.
+        // With it, this connection IS the evidence. A peer only dials a rank it already had a
+        // link to after deciding that link is gone, and the hello it just passed proves it is
+        // that peer, on this comm, at this epoch. Believing the local descriptor instead is
+        // what wedged a restored rank: after criu the old descriptor can still *report*
+        // ESTABLISHED while nothing is on the other end, so probing it answers "live", the
+        // reconnect is refused, and the peer's handshake sits unread on a connection this rank
+        // accepted but never adopted.
         ::close(sockets[claimed]);
         sockets[claimed] = -1;
         note_link_replaced(claimed);
@@ -702,6 +677,14 @@ FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
     pending_links[claimed] = fd;
     total_connections.fetch_add(1);
     return AcceptResult::Accepted;
+}
+
+std::string FMI::Comm::DirectTCP::transport_state_note() const {
+    std::string note = "listen=" + std::to_string(listen_fd) + " pending={";
+    for (const auto& [rank, fd] : pending_links) {
+        note += std::to_string(rank) + ":" + std::to_string(fd) + " ";
+    }
+    return note + "}";
 }
 
 void FMI::Comm::DirectTCP::service_transport() {

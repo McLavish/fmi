@@ -73,6 +73,9 @@ namespace FMI::Comm {
      */
     void service_transport() override;
 
+    //! Listener and un-adopted connections, for stuck-rank diagnostics.
+    std::string transport_state_note() const override;
+
         void close_transport_state() override;
 
         //! Also drops the cached listener registration, so the rank re-publishes under the new

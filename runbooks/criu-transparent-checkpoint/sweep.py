@@ -48,6 +48,8 @@ def start_job(comm, npeers, rounds, ms, outdir):
     procs = []
     for r in range(npeers):
         log = open(os.path.join(outdir, f"r{r}.log"), "w")
+        # Deliberately does NOT pass env=: handing the child a rebuilt environment makes
+        # criu's dump fail with "External socket is used", every time. Inherit instead.
         p = subprocess.Popen(
             [SUBJECT, str(r), str(npeers), CONFIG, comm, str(rounds), str(ms),
              str(PRINT_EVERY), str(PAYLOAD_INTS)],
