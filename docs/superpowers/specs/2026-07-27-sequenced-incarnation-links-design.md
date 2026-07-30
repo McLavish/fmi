@@ -936,6 +936,20 @@ plan was wrong and is corrected here:
 
 ## Verification status
 
+> **What is built, and the rules the built thing must obey, are in
+> [`2026-07-30-sequenced-links-implementation.md`](2026-07-30-sequenced-links-implementation.md).**
+> Contracts 1 and 2 are implemented on the *blocking* transport rather than on the progress
+> engine this document specifies; contract 3 has its incarnation and fencing rules and none of
+> its state machine; contract 4 is exercised against real criu by
+> `runbooks/criu-transparent-checkpoint`. Four rules the implementation must hold that this
+> document does not state — because it assumed an event loop — are normative there.
+>
+> One of them was found exactly where this section says the model does not look. "Freeze
+> positions 2 and 4 (partial egress / partial parse) are abstracted away" below is not a
+> footnote: the transport committed its receive watermark at header-parse time, so a freeze in
+> that window let the peer prune a message it had never delivered, silently. The model could
+> not have caught it, and did not.
+
 Three TLA+ modules, **36 TLC 2.19 configurations, all exhausted**, live in `docs/tla/`;
 `docs/tla/README.md` is the results document and is authoritative over any summary here. Runs are
 sequential and take ≈ 2 minutes wall clock on 16 workers.
@@ -945,7 +959,7 @@ sequential and take ≈ 2 minutes wall clock on 16 workers.
 | 1 — message identity | `MessageIdentity.tla` | Machine-checked over all divergent program pairs of length ≤ 2 (≤ 3 in two configs). Necessity of `lane`, `collective_index`, `op_kind` and the reduction flags each exhibited; `NoFalseAbort` holds over all 258 `Compatible` pairs. |
 | 2 — transport durability | `SequencedLink.tla` | Machine-checked on one directed link with `Freeze` enabled at every reachable non-aborted state, up to 2 freezes: no loss, duplication or reordering, delivery obligation met (`SequencedLink_correct_large`: 30,567 distinct states). Six injected defects each caught; seven non-vacuity probes all refuted. |
 | 3 — membership | `Membership.tla` | Safety machine-checked across 2,919 states (305,576 safety-only). Liveness **fails as originally written** — that failure is what produced the `LOST` state, the SCC-form normative rule, and the lease/attempt-budget rule above. |
-| 4 — checkpoint mechanics | — | Not modelled as such. Only the process-layer facts contract 3's restore discipline depends on (`SIGCONT` fence, same-host abort, per-pod sidecar) appear, inside `Membership.tla`. |
+| 4 — checkpoint mechanics | — | Not modelled as such. Only the process-layer facts contract 3's restore discipline depends on (`SIGCONT` fence, same-host abort, per-pod sidecar) appear, inside `Membership.tla`. Measured instead, on criu 4.2: [mechanics](2026-07-30-criu-mechanics-findings.md), and end to end against an unmodified FMI program in `runbooks/criu-transparent-checkpoint`. |
 
 Every result above must be read as *"no counterexample exists at these bounds"*. The largest
 configurations are 2 ranks / 3 agents / 2 migrations; 4 messages with a 3-frame window and 2 freezes;

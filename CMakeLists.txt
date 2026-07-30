@@ -144,3 +144,9 @@ endif()
 if (FMI_ENABLE_CRIU AND NOT hasParent)
     add_subdirectory(runbooks/local-criu-state-transfer)
 endif()
+
+# The transparent-checkpoint subject is a plain FMI application driven by criu from outside, so
+# it needs no CRIU support compiled in — only a DirectTCP-capable build (hence Redis).
+if (FMI_ENABLE_REDIS AND NOT hasParent)
+    add_subdirectory(runbooks/criu-transparent-checkpoint)
+endif()
