@@ -3,6 +3,8 @@
 #include "../include/comm/LinkFrame.h"
 #include "../include/comm/OperationScope.h"
 #include "../include/comm/TcpChannelBase.h"
+#include "../include/comm/DirectTCP.h"
+#include "forked_rank_guard.h"
 
 #include <sys/socket.h>
 #include <unistd.h>
@@ -12,6 +14,9 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <cstdio>
 
 //! Retention and replay inside the TRANSPORT, across a connection that actually dies.
 /*!
@@ -276,5 +281,88 @@ BOOST_AUTO_TEST_CASE(a_malformed_handshake_is_rejected_rather_than_reconciled) {
     victim.join();
     BOOST_CHECK_MESSAGE(rejected.load() == 1, "a malformed handshake was accepted");
 }
+
+#if FMI_ENABLE_REDIS
+namespace {
+    //! DirectTCP with a way to tear down a live connection, so recovery can be driven over the
+    //! real rendezvous rather than a controllable socketpair.
+    class BreakableDirectTCP : public DirectTCP {
+    public:
+        using DirectTCP::DirectTCP;
+        //! shutdown() rather than close(): the channel still owns the descriptor.
+        void sever(FMI::Utils::peer_num p) {
+            if (p < sockets.size() && sockets[p] >= 0) { ::shutdown(sockets[p], SHUT_RDWR); }
+        }
+    };
+
+    std::map<std::string, std::string> dtcp_recover_params() {
+        return {{"registry_host", "127.0.0.1"}, {"registry_port", "6379"},
+                {"max_timeout", "5000"}, {"registry_poll_interval_ms", "2"},
+                {"connect_retry_interval_ms", "5"}, {"registry_ttl_s", "120"},
+                {"framed", "true"}, {"recover_links", "true"}};
+    }
+    std::map<std::string, std::string> dtcp_model() {
+        return {{"bandwidth", "250.0"}, {"overhead", "0.20"}, {"transfer_price", "0.0"},
+                {"vm_price", "0.0134"}, {"requests_per_hour", "1000"},
+                {"include_infrastructure_costs", "true"}};
+    }
+}
+
+BOOST_AUTO_TEST_CASE(recovery_over_the_real_rendezvous) {
+    // Contract 2 end to end on the actual backend: break a live DirectTCP connection mid-run
+    // and require every message to still arrive, in order, exactly once. Whether the Redis
+    // registry supports re-pairing an existing link is precisely what this establishes.
+    constexpr int num_peers = 2;
+    constexpr int messages = 10;
+    const std::string name = "recov_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+            "_" + std::to_string(getpid());
+
+    struct Shared { int ok; int count; int values[messages]; };
+    Shared* out = static_cast<Shared*>(mmap(nullptr, sizeof(Shared), PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    out->ok = 0; out->count = 0;
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    for (int i = 1; i < num_peers; i++) {
+        int pid = fork();
+        if (pid == 0) { peer_id = i; break; }
+    }
+
+    try {
+        BreakableDirectTCP ch(dtcp_recover_params(), dtcp_model());
+        ch.set_peer_id(peer_id);
+        ch.set_num_peers(num_peers);
+        ch.set_comm_name(name);
+
+        for (int i = 0; i < messages; i++) {
+            OperationScope scope(p2p_identity(1));
+            if (peer_id == 0) {
+                int val = payload_for(i);
+                ch.send({reinterpret_cast<char*>(&val), sizeof(val)}, 1);
+                if (i == messages / 2) { ch.sever(1); }   // break a live connection
+            } else {
+                int got = 0;
+                ch.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+                if (out->count < messages) { out->values[out->count++] = got; }
+            }
+        }
+        if (peer_id == 1) { out->ok = 1; }
+        ch.finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    if (peer_id != 0) { std::_Exit(0); }
+    for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+
+    BOOST_CHECK_MESSAGE(out->ok == 1, "receiver did not complete after the connection broke");
+    BOOST_REQUIRE_EQUAL(out->count, messages);
+    for (int i = 0; i < messages; i++) {
+        BOOST_CHECK_EQUAL(out->values[i], payload_for(i));
+    }
+}
+#endif // FMI_ENABLE_REDIS
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -111,7 +111,7 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
     while (received < len) {
         long n = ::recv(sockets[sender_id], data + received, len - received, MSG_WAITALL);
         if (n == 0) {
-            if (received == 0 && eof_before_data_is_timeout) {
+            if (received == 0 && eof_before_data_is_timeout && !recover_links) {
                 throw Utils::Timeout();
             }
             throw std::runtime_error(transport_tag + ": connection to peer " + std::to_string(sender_id) +
@@ -128,7 +128,8 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
             // A peer that tears the connection down before sending any of this message has
             // abandoned the collective; it reaches us as ECONNRESET rather than EOF whenever it
             // closed with data of ours still unread. Same condition as the n == 0 case above.
-            if (received == 0 && errno == ECONNRESET && eof_before_data_is_timeout) {
+            if (received == 0 && errno == ECONNRESET && eof_before_data_is_timeout
+                && !recover_links) {
                 throw Utils::Timeout();
             }
             throw std::runtime_error(transport_tag + ": recv from peer " + std::to_string(sender_id) +
@@ -242,16 +243,23 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
     }
 
     ensure_link_state();
+    int repairs = 0;
     while (true) {
         char encoded[frame_header_bytes];
         if (recover_links) {
             try {
                 read_all(sender_id, encoded, frame_header_bytes);
             } catch (const Utils::Timeout&) {
-                throw;   // a quiet peer is not a broken link
+                throw;   // nothing arrived in time; that is not the same as a dead link
             } catch (const std::exception&) {
-                // The connection died. Both ends see this — one as a failed write, the other
-                // as EOF or a reset — so both re-establish, reconcile and replay.
+                // The connection died — one end sees a failed write, the other EOF or a reset
+                // — so both re-establish, reconcile and replay. Bounded, because a peer that
+                // has genuinely gone away would otherwise be repaired forever.
+                if (++repairs > max_link_repairs) {
+                    throw std::runtime_error(transport_tag + ": link to peer " +
+                                             std::to_string(sender_id) + " could not be repaired after " +
+                                             std::to_string(max_link_repairs) + " attempts");
+                }
                 repair_link(sender_id);
                 continue;
             }

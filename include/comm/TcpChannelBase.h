@@ -99,6 +99,9 @@ namespace FMI::Comm {
          */
         bool recover_links = false;
 
+        //! How many times one receive may re-establish before giving up on the peer.
+        int max_link_repairs = 4;
+
         //! Per-peer link state: sequences, retention ring and watermarks.
         std::vector<SequencedLink> links;
 

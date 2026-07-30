@@ -97,6 +97,11 @@ MUTS = [
   "        repair_link(rcpt_id);","        throw;"),
  ("recv_never_repairs","src/comm/TcpChannelBase.cpp",
   "                repair_link(sender_id);\n                continue;","                throw;"),
+ ("eof_folded_into_timeout","src/comm/TcpChannelBase.cpp",
+  "            if (received == 0 && eof_before_data_is_timeout && !recover_links) {",
+  "            if (received == 0 && eof_before_data_is_timeout) {"),
+ ("repairs_unbounded","src/comm/TcpChannelBase.cpp",
+  "                if (++repairs > max_link_repairs) {","                if (false) {"),
 ]
 
 def run(cmd, **kw):
