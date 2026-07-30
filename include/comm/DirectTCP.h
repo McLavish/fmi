@@ -124,7 +124,21 @@ namespace FMI::Comm {
                                                    long deadline_ms);
 
         //! Accept one inbound connection, verify its hello, acknowledge it, and file the link.
-        bool accept_one();
+        //! What one pass over the listener found.
+        /*!
+         * Three outcomes, not two. An earlier signature returned bool and conflated "nothing
+         * waiting" with "took one and rejected it", so a caller looping until false stopped at
+         * the first stale connection in the backlog and left everything behind it unaccepted.
+         * That matters most for rank 0, which every other rank reconnects to at once after a
+         * restore: one duplicate at the head would hold up the entire mesh.
+         */
+        enum class AcceptResult {
+            Accepted,   //!< a connection was taken and belongs to a peer
+            Rejected,   //!< one was taken and dropped; there may be more behind it
+            Empty       //!< the backlog is empty
+        };
+
+        AcceptResult accept_one();
 
         //! Frame builder shared by the hello (connector -> listener) and its acknowledgement.
         std::string frame_for(Utils::peer_num partner_id, std::uint64_t nonce) const;

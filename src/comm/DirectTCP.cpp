@@ -116,20 +116,27 @@ namespace {
      * data, and there may legitimately be unread bytes on a connection whose peer has since
      * died. Anything other than ESTABLISHED means the connection is over.
      *
-     * Conservative when the state cannot be read at all (a non-TCP socket in a test harness,
-     * or a platform without TCP_INFO): reports live, which preserves the previous behaviour.
+     * A descriptor whose state cannot be read AT ALL is dead, not live. That is not a corner
+     * case: a rank restored from a checkpoint holds a descriptor per peer that criu has closed
+     * under it, and getsockopt on one of those fails outright. Answering "live" there made this
+     * rank reject every peer trying to reconnect — the connections were accepted but never
+     * adopted, so their handshakes sat unread while the whole job waited. It cost roughly one
+     * run in fifteen, always with rank 0 (the rank every other connects to) as the target.
+     *
+     * Only reached for real TCP sockets: the test transports supply their own establish() and
+     * never come through here.
      */
     bool socket_is_established(int fd) {
 #if defined(TCP_INFO)
         struct tcp_info info {};
         socklen_t len = sizeof(info);
         if (::getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &len) != 0) {
-            return true;
+            return false;
         }
         return info.tcpi_state == TCP_ESTABLISHED;
 #else
         (void) fd;
-        return true;
+        return true;   // no way to ask; keep the previous behaviour
 #endif
     }
 
@@ -637,11 +644,14 @@ std::vector<FMI::Utils::peer_num> FMI::Comm::DirectTCP::connect_batch(
     return remaining;
 }
 
-bool FMI::Comm::DirectTCP::accept_one() {
+FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
     int fd = ::accept(listen_fd, nullptr, nullptr);
     if (fd < 0) {
-        if (errno == EINTR || errno == ECONNABORTED || errno == EAGAIN || errno == EWOULDBLOCK) {
-            return false;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return AcceptResult::Empty;
+        }
+        if (errno == EINTR || errno == ECONNABORTED) {
+            return AcceptResult::Rejected;   // transient; there may be more behind it
         }
         throw std::runtime_error("DirectTCP: accept failed: " + std::string(strerror(errno)));
     }
@@ -652,7 +662,7 @@ bool FMI::Comm::DirectTCP::accept_one() {
     // from whatever else has held this ephemeral port.
     if (!read_frame(fd, claimed, listener_nonce)) {
         ::close(fd);
-        return false;
+        return AcceptResult::Rejected;
     }
     // Already hold a LIVE link to that rank: a duplicate would silently replace a stream that
     // may be mid-message.
@@ -669,12 +679,12 @@ bool FMI::Comm::DirectTCP::accept_one() {
     // restore. Measured: checkpointing rank 0 of an 8-rank job wedged every rank in the job.
     if (pending_links.count(claimed) > 0) {
         ::close(fd);
-        return false;
+        return AcceptResult::Rejected;
     }
     if (claimed < sockets.size() && sockets[claimed] >= 0) {
         if (socket_is_established(sockets[claimed])) {
             ::close(fd);
-            return false;
+            return AcceptResult::Rejected;
         }
         // Dead, and this connection is the proof. Drop it so the link can be rebuilt, and mark
         // it as replaced: the peer reached this connection through repair and is waiting to
@@ -687,11 +697,11 @@ bool FMI::Comm::DirectTCP::accept_one() {
     // needs to learn that it reached the rank it asked for.
     if (!send_frame(fd, claimed, 0)) {
         ::close(fd);
-        return false;
+        return AcceptResult::Rejected;
     }
     pending_links[claimed] = fd;
     total_connections.fetch_add(1);
-    return true;
+    return AcceptResult::Accepted;
 }
 
 void FMI::Comm::DirectTCP::service_transport() {
@@ -700,9 +710,11 @@ void FMI::Comm::DirectTCP::service_transport() {
     }
     // Bounded, and never blocking: accept_one() returns false the moment the backlog is empty,
     // and this runs inside somebody else's operation.
-    for (int accepted = 0; accepted < 16; accepted++) {
+    // Keep going past a rejection: only an empty backlog ends the pass. The bound is a
+    // backstop, not the exit condition.
+    for (int seen = 0; seen < 64; seen++) {
         try {
-            if (!accept_one()) {
+            if (accept_one() == AcceptResult::Empty) {
                 break;
             }
         } catch (const std::exception&) {
