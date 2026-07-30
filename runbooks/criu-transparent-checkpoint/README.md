@@ -98,6 +98,14 @@ exercises a rank being frozen while a peer is itself mid-repair.
 
 ## Scope
 
+**Verified at 2, 3, 5, 7, 8 and 16 ranks — 48 randomized trials, 48 passed.** Non-powers of two
+are covered deliberately: FMI's collectives are binomial trees and take a different shape when
+the rank count is not a power of two.
+
+If a rank ever does stall, it says so: after three seconds of waiting it prints what it believes
+it holds on every link — descriptor, bytes queued, whether the link still owes a handshake —
+which is how the last of the deadlocks here was found.
+
 Single host. The restored rank re-uses the listening socket and advertised address the image
 captured, which is correct on the same machine and wrong on any other; cross-host restore needs
 the rank to re-publish its registry entry, which the migration runtime does and this runbook

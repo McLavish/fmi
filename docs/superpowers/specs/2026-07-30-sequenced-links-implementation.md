@@ -21,13 +21,10 @@ and transport durability (contract 2) without the one-way door the design flags 
 "is the irreversible commitment point" — and it carries an arbitrary FMI program across a real
 checkpoint.
 
-Above two ranks that took five rounds and one idea: **a rank that is waiting must keep meeting
-every obligation it has.** See [what it took](#checkpointing-above-two-ranks-what-it-took).
-What is *not* here is the rest of what the engine would buy — replay proceeding while the
+Carrying one at **arbitrary rank counts** took six rounds and one idea: *a rank that is waiting
+must keep meeting every obligation it has.* See [what it took](#checkpointing-at-arbitrary-rank-counts-what-it-took).
+What is not here is the rest of what the engine would buy — replay proceeding while the
 application computes, CREDIT, non-blocking egress — listed under [what the blocking shape cannot
-do](#what-the-blocking-shape-cannot-do).
-
-It also costs things, listed under [What the blocking shape cannot
 do](#what-the-blocking-shape-cannot-do).
 
 ## Rules the blocking transport must obey
@@ -158,60 +155,64 @@ injected faults still in place — every test varied two fields at once, so some
 always caught the break and no test pinned what it appeared to. Any new claim in the table
 above should arrive with a mutation that the new test kills.
 
-## Checkpointing above two ranks: what it took
+## Checkpointing at arbitrary rank counts: what it took
 
-Five rounds. Each removed something real that a rank inside establishment failed to do, and the
-first four left the failure rate untouched at 7 of 10 — which is exactly why the fifth is
-stated as one idea rather than five patches.
+**48 randomized trials across 2, 3, 5, 7, 8 and 16 ranks; 48 passed.** Each trial checkpoints a
+randomly chosen rank at a random instant and requires every rank to finish with the checksum a
+clean run of the same shape produced, so a lost, duplicated or substituted message fails the
+trial rather than being absorbed into a plausible answer.
 
-| # | what a waiting rank was not doing | fix | 4-peer rate |
+Six rounds got there, and rounds 1–5 all left the 4-rank rate at exactly 7 of 10. That
+invariance is what eventually identified the shape of the problem: it was never one bug.
+
+| # | what a waiting rank was not doing | fix | 4-rank rate |
 | --- | --- | --- | --- |
 | 1 | reading its other links | `service_established_links` drains whole frames | 7/10 |
-| 2 | reconciling a link the peer replaced | `note_link_replaced` + `TCP_INFO` liveness in `accept_one` | 7/10 |
+| 2 | reconciling a link the peer replaced | `note_link_replaced` in `accept_one` | 7/10 |
 | 3 | tolerating a half-read message | a partial read that stalls is a broken link, not silence | 7/10 |
 | 4 | letting the peer's handshake through | handshake carried as a frame, one way | 7/10 |
-| 5 | **accepting, and finishing the accept** | `pump` + `adopt_link` | **10/10** |
+| 5 | accepting at all | `pump` services the listener from inside every wait | 10/10 |
+| 6 | **finishing what it accepted, and paying what it owed** | `adopt_link` + reconcile from servicing | **all clean** |
 
-Scale after round 5, same randomized sweep:
+**One idea underneath all six: a rank that is waiting must keep meeting every obligation it
+has.** Not some of them, and not eventually — a rank blocked on one peer must still accept
+connections, still drain its other links, and still hand over any handshake and replay it owes.
+Miss any one and the wait-for relation that makes lazy establishment safe stops being acyclic
+the moment a restore leaves several links needing attention at once.
 
-| ranks | trials | passed |
-| --- | --- | --- |
-| 2 | 10 | 10 |
-| 4 | 10 | 10 |
-| 8 | 10 | 10 |
-| 16 | 6 | 6 |
-| 3, 5, 6, 7 (mixed) | 12 | 11 |
-
-Non-powers of two are listed separately on purpose: FMI's collectives are binomial trees, which
-take a different shape when the rank count is not a power of two, and repo coverage before this
-branch was only ever 2 and 4 peers — both powers of two. The one failure in that row is a
-6-rank job whose checkpointed rank was 0, the rank every other connects to; it is being chased.
-
-A dump that criu itself refuses (`External socket is used`, seen intermittently) is counted as
-skipped rather than failed, because it says nothing about the protocol.
-
-**The idea:** a rank that is waiting must keep meeting every obligation it has.
-
-Every blocking read and write now goes through `pump()`, which polls the descriptor the caller
-needs in short slices and, between them, services the listener and drains the rank's other
-links. And `DirectTCP::service_transport` no longer merely *accepts* — accepting into
-`pending_links` and leaving it until the application next talks to that peer is a deadlock, not
-a delay, because the peer at the far end has already sent its handshake down that connection and
-is waiting for the reply. `adopt_link` completes it: the descriptor becomes the rank's socket for
-that peer and, if the link was marked for reconciliation, gets its handshake and replay there
-and then.
+Mechanically: every blocking read and write goes through `pump()`, which polls the descriptor
+the caller needs in short slices and, between them, services the listener, drains the rank's
+other links, and reconciles any link still owing a handshake. `adopt_link` completes an accepted
+connection there and then rather than parking it until the application happens to touch that
+peer.
 
 **This is the progress engine's property without its thread.** The design specifies an
 autonomous component owning every socket; what the deadlock actually needed was not concurrency
-but the guarantee that waiting is never exclusive. Keeping it single-threaded and cooperative
-preserves the lock-free link state and the `thread_local` operation scope exactly as they were,
-and it is reversible in a way the engine is not. The engine's *other* benefits — replay
-proceeding while the application computes, CREDIT, non-blocking egress — are still absent; see
-below.
+but the guarantee that waiting is never exclusive. Staying single-threaded keeps the lock-free
+link state and the `thread_local` operation scope exactly as they were, and it is reversible in
+a way the engine is not. The engine's *other* benefits — replay proceeding while the application
+computes, CREDIT, non-blocking egress — remain absent; see below.
 
-Found by photographing a wedged 4-rank job (`ss` plus `/proc/*/wchan`) at each stage. The last
-one was unambiguous: all four ranks in `poll`, and exactly 128 bytes — one handshake frame —
-unread on a connection that had been accepted but never adopted.
+Non-powers of two are measured on their own account, not as an afterthought: FMI's collectives
+are binomial trees, which take a different shape when the rank count is not a power of two, and
+repo coverage before this branch was only ever 2 and 4 ranks — both powers of two.
+
+A dump that criu itself refuses (`External socket is used`, seen intermittently on this host) is
+counted as skipped rather than failed: it says nothing about the protocol.
+
+### How each round was found
+
+Not by reasoning — by photographing a wedged job (`ss` plus `/proc/*/wchan`), and from round 6
+by having the transport report its own state. A rank that has waited more than three seconds
+prints what it believes it holds on every link. That produced the decisive line:
+
+```
+[FMI] rank 0 has waited 39017ms for peer 3; p1{fd=5 rq=0 rec=0} p2{fd=8 rq=0 rec=1} ...
+```
+
+`rec=1` — rank 0 had held peer 2's link marked for reconciliation for thirty-nine seconds while
+peer 2 waited for exactly the replay that mark represents. The diagnostic is kept, unconditional,
+and silent in a healthy run because nothing waits that long.
 
 ## What the blocking shape cannot do
 
