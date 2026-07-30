@@ -209,6 +209,15 @@ prefers a queued frame to the socket — a frame buffered that way is older than
 on the wire, so delivering the socket first would reorder the stream. Only complete frames are
 taken, so a link is never left half-read.
 
+The drain's *mechanism* is pinned by
+`CheckpointFreezePoints/a_frame_taken_while_establishing_another_link_is_still_delivered`, which
+severs the socket after the drain so a delivery can only have come from the queue. Its *call
+site* is **not**: deleting `service_established_links(target)` from `build_mesh` survives the
+whole suite, because the drain only has an observable effect while a rank is genuinely blocked
+in establishment with a peer sending to it — the same race that deadlocks, and so the same thing
+that resists a deterministic test. The mutation is kept in the sweep as a known survivor rather
+than dropped.
+
 **Measured effect on the pass rate: none** — 4 peers stayed at 6–7 of 10, which is the point.
 **Measured effect on a wedged job: every data link drains to zero.** Before, a wedged 4-rank
 job held whole frames on three separate links. After, `ss` shows `rq=0` everywhere except one

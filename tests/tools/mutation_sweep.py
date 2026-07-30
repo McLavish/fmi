@@ -130,6 +130,12 @@ MUTS = [
   "    if (value > acked_to_peer) {\n        acked_to_peer = value;\n    }",""),
 
  # --- establishment must not stall the rank's other links ---
+ # KNOWN SURVIVOR. Deleting the call site changes nothing any test can see: the drain only has
+ # an observable effect while a rank is genuinely blocked inside build_mesh with a peer sending
+ # to it, which is a >=3-rank establishment race — the same race that deadlocks, and therefore
+ # the same thing that is hard to make deterministic. The MECHANISM is pinned
+ # (drained_frames_are_never_delivered, killed); the WIRING is not. Left in the list on purpose,
+ # so the hole stays visible rather than being quietly dropped.
  ("establishment_reads_no_other_link","src/comm/DirectTCP.cpp",
   "        service_established_links(target);","        (void) 0;"),
  ("drained_frames_are_never_delivered","src/comm/TcpChannelBase.cpp",
