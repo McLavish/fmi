@@ -164,18 +164,18 @@ delivers, and it is a design-level defect in lazy establishment, not a coding sl
 
 `runbooks/criu-transparent-checkpoint/sweep.py` on this host:
 
-| shape | trials | passed |
-| --- | --- | --- |
-| 2 peers, one checkpoint | 10 | **10** |
-| 4 peers, one checkpoint | 10 | 7 |
-| 3 and 4 peers, up to 3 checkpoints | 8 valid | 6 |
-| 8 peers, one checkpoint | 6 | 4 |
-| 4 peers, 256 KiB messages | 8 | 6 |
-| 4 peers, checkpoint during mesh establishment | 8 | 4 |
+| shape | trials | passed | fixes in this section |
+| --- | --- | --- | --- |
+| 2 peers, one checkpoint | 10 | **10** | after |
+| 4 peers, one checkpoint | 10 | 7 | after |
+| 8 peers, one checkpoint | 8 | 6 | after |
+| 8 peers, one checkpoint | 6 | 4 | before |
+| 3 and 4 peers, up to 3 checkpoints | 8 valid | 6 | before |
+| 4 peers, 256 KiB messages | 8 | 6 | before |
+| 4 peers, checkpoint during mesh establishment | 8 | 4 | before |
 
-Rows below the first are from before the two fixes in this section were applied except the
-4-peer single-checkpoint row, which is after; the rate did not move, which is the point — the
-fixes address real defects but not this one.
+**The rate did not move**, and that is the point of the last column: the two fixes below
+address real defects, and neither is this one. Only two ranks is clean.
 
 A failing trial ends with every rank throwing `Timeout` after its full deadline, the restored
 rank having logged nothing since its restore.
