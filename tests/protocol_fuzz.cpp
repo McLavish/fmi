@@ -53,6 +53,9 @@ namespace {
     enum class Op { Barrier, Bcast, Reduce, Allreduce, AllreduceOrdered, Scan, Gather, Scatter, P2P };
 
     struct Step {
+        bool operator==(const Step& o) const {
+            return op == o.op && root == o.root && elements == o.elements && src == o.src && dst == o.dst;
+        }
         Op op;
         int root;
         int elements;   //!< per-rank element count, identical on every rank
@@ -216,6 +219,120 @@ BOOST_AUTO_TEST_CASE(random_valid_programs_are_identical_framed_and_unframed) {
             }
         }
     }
+}
+
+// ------------------------------------------------------- adversarial (divergent) programs
+
+namespace {
+    const std::string framed_fast   = "../../config/fmi_framed_fast_test.json";
+    const std::string unframed_fast = "../../config/fmi_raw_fast_test.json";
+
+    //! Make one rank's program ill-formed by swapping two adjacent collectives of different
+    //! kinds. Every rank must issue collectives in the same order, so this is exactly the
+    //! divergence the envelope exists to catch, and it is guaranteed to mismatch on the wire.
+    std::vector<Step> diverge(std::vector<Step> steps, unsigned seed) {
+        std::mt19937 rng(seed ^ 0xD1E5u);
+        for (std::size_t i = 0; i + 1 < steps.size(); i++) {
+            const std::size_t j = i + 1;
+            if (steps[i].op != steps[j].op &&
+                steps[i].op != Op::P2P && steps[j].op != Op::P2P) {
+                std::swap(steps[i], steps[j]);
+                return steps;
+            }
+        }
+        // No adjacent differing pair: force one by rewriting a step.
+        if (!steps.empty()) {
+            steps[rng() % steps.size()].op = Op::Barrier;
+        }
+        return steps;
+    }
+
+    //! Outcome of running an ill-formed program.
+    struct Outcome {
+        int completed_without_error = 0;   //!< ranks that returned success
+        int identity_mismatch = 0;         //!< ranks that reported a mismatch loudly
+        int other_error = 0;               //!< timeouts and the like
+    };
+
+    Outcome run_divergent(int num_peers, const std::vector<Step>& base,
+                          const std::vector<Step>& skewed, const std::string& config,
+                          const std::string& name) {
+        struct Slot { int ok; int mismatch; int other; };
+        Slot* slots = static_cast<Slot*>(mmap(nullptr, num_peers * sizeof(Slot),
+                                              PROT_READ | PROT_WRITE,
+                                              MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+        for (int i = 0; i < num_peers; i++) { slots[i] = {0, 0, 0}; }
+
+        ForkedRankGuard rank_guard;
+        int& peer_id = rank_guard.peer_id;
+        for (int i = 1; i < num_peers; i++) {
+            int pid = fork();
+            if (pid == 0) { peer_id = i; break; }
+        }
+        try {
+            FMI::Communicator comm(peer_id, num_peers, config, name);
+            RankResult sink{};
+            // Rank 1 alone runs the skewed program.
+            execute(comm, peer_id, num_peers, peer_id == 1 ? skewed : base, sink);
+            slots[peer_id].ok = 1;
+        } catch (const std::exception& e) {
+            const std::string what = e.what();
+            if (what.find("identity mismatch") != std::string::npos) {
+                slots[peer_id].mismatch = 1;
+            } else {
+                slots[peer_id].other = 1;
+            }
+        }
+        if (peer_id != 0) { std::_Exit(0); }
+        for (int i = 1; i < num_peers; i++) { wait(nullptr); }
+
+        Outcome o;
+        for (int i = 0; i < num_peers; i++) {
+            o.completed_without_error += slots[i].ok;
+            o.identity_mismatch += slots[i].mismatch;
+            o.other_error += slots[i].other;
+        }
+        return o;
+    }
+}
+
+BOOST_AUTO_TEST_CASE(divergent_programs_never_complete_silently_when_framed) {
+    // The protocol's central safety claim, fuzzed: an ill-formed program must not run to
+    // completion as though it were valid. It may abort loudly or stall, but it may never
+    // report success while ranks were in different logical operations.
+    const char* env = std::getenv("FMI_FUZZ_SEEDS");
+    const int seeds = env != nullptr ? std::atoi(env) : 8;
+    constexpr int num_peers = 2;
+    constexpr int length = 5;
+
+    int framed_all_ok = 0, framed_caught = 0, unframed_all_ok = 0;
+
+    for (int s = 0; s < seeds; s++) {
+        const unsigned seed = 7000u + static_cast<unsigned>(s);
+        const auto base = make_program(seed, num_peers, length);
+        const auto skewed = diverge(base, seed);
+        if (base == skewed) { continue; }
+
+        const Outcome fr = run_divergent(num_peers, base, skewed, framed_fast,
+                                         comm_for(seed, "dvfr"));
+        const Outcome raw = run_divergent(num_peers, base, skewed, unframed_fast,
+                                          comm_for(seed, "dvraw"));
+
+        if (fr.completed_without_error == num_peers) { framed_all_ok++; }
+        if (fr.identity_mismatch > 0) { framed_caught++; }
+        if (raw.completed_without_error == num_peers) { unframed_all_ok++; }
+
+        BOOST_CHECK_MESSAGE(fr.completed_without_error != num_peers,
+                            "seed " << seed << ": framed run completed an ILL-FORMED program "
+                                    << "with every rank reporting success");
+    }
+
+    BOOST_TEST_MESSAGE("framed: " << framed_caught << " runs caught a mismatch explicitly, "
+                       << framed_all_ok << " completed silently");
+    BOOST_TEST_MESSAGE("unframed: " << unframed_all_ok << " completed silently");
+    // Framing must be strictly better than no framing at detecting this.
+    BOOST_CHECK_MESSAGE(framed_all_ok <= unframed_all_ok,
+                        "framing detected FEWER divergent programs than the raw transport");
 }
 
 #endif // FMI_ENABLE_REDIS

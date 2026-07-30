@@ -15,7 +15,7 @@ Restores every file it touches, including on failure.
 """
 import subprocess, sys, os
 WT="/home/luca/fmi-sequenced-links"
-SUITES=["LinkLayer","OperationIdentity","ProtocolValidation","FramedTransport"]
+SUITES=["LinkLayer","OperationIdentity","ProtocolValidation","LinkRecovery","FramedTransport"]
 
 MUTS = [
  ("identity_ignores_op_kind","include/comm/LinkFrame.h",
@@ -67,6 +67,19 @@ MUTS = [
   "header.transport_seq = next_send_seq[rcpt_id]++;","header.transport_seq = next_send_seq[rcpt_id];"),
  ("recv_never_advances_seq","src/comm/TcpChannelBase.cpp",
   "    ++next_recv_seq[sender_id];",""),
+ # --- durability: retention, replay and reconciliation across a break ---
+ ("replay_returns_nothing","include/comm/SequencedLink.h",
+  "[[nodiscard]] const std::deque<Retained>& replay_suffix() const { return retention; }",
+  "[[nodiscard]] const std::deque<Retained>& replay_suffix() const { static std::deque<Retained> none; return none; }"),
+ ("reconcile_does_not_prune","src/comm/SequencedLink.cpp",
+  "    on_ack(peer.next_expected_seq);\n    return true;","    return true;"),
+ ("ack_safe_never_advances","src/comm/SequencedLink.cpp",
+  "    ack_safe_seq = next_recv;",""),
+ ("retention_pruned_eagerly","src/comm/SequencedLink.cpp",
+  "    while (!retention.empty() && retention.front().header.transport_seq < cumulative) {",
+  "    while (!retention.empty()) {"),
+ ("handshake_reports_zero_expected","src/comm/SequencedLink.cpp",
+  "    h.next_expected_seq = next_recv;","    h.next_expected_seq = 0;"),
 ]
 
 def run(cmd, **kw):
