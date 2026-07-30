@@ -253,6 +253,14 @@ bool FMI::Comm::TcpChannelBase::reconfigure_for_epoch(const std::string& new_com
             close(sockets[rank]);
             sockets[rank] = -1;
         }
+        // The transport sequence is scoped to a link, and re-pairing to a migrated rank
+        // creates a new one: the replacement is a fresh process whose counters necessarily
+        // start at zero. Carrying the old link's counters over would make the survivor's
+        // first framed exchange with the replacement report a gap that never happened.
+        if (rank < next_send_seq.size()) {
+            next_send_seq[rank] = 0;
+            next_recv_seq[rank] = 0;
+        }
     }
     set_comm_name(new_comm_name);
     return true;

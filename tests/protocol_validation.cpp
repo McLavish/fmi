@@ -275,8 +275,10 @@ BOOST_AUTO_TEST_CASE(an_unframed_peer_cannot_be_mistaken_for_a_framed_one) {
     // A raw peer's first bytes are application payload; they will not carry our magic. This is
     // what makes a mixed-configuration job fail loudly instead of corrupting.
     Wire w(true);
-    const char raw[] = "this is a raw application payload, not a frame header at all!!";
-    w.poke(raw, frame_header_bytes);
+    // Sized explicitly: poke() reads frame_header_bytes, so a shorter literal would read
+    // past the end of the array.
+    std::vector<char> raw(frame_header_bytes, 'R');
+    w.poke(raw.data(), raw.size());
 
     int got = 0;
     OperationScope scope(p2p_identity(1));

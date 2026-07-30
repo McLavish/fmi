@@ -347,6 +347,72 @@ BOOST_AUTO_TEST_CASE(every_collective_works_through_a_framed_communicator) {
     }
 }
 
+BOOST_AUTO_TEST_CASE(a_replacement_rank_re_pairs_without_a_spurious_sequence_gap) {
+    // Migration shape: rank 0 survives and reconfigures its existing channel in place, while
+    // rank 1 is replaced by a fresh process whose link sequences necessarily start at zero.
+    // The survivor's per-peer sequence counters must be dropped along with the socket, or its
+    // very first framed receive from the replacement reports a gap that never happened.
+    constexpr int num_peers = 2;
+    const std::string before = unique_comm("epoch0");
+    const std::string after  = unique_comm("epoch1");
+    int* ok = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    for (int i = 1; i < num_peers; i++) {
+        int pid = fork();
+        if (pid == 0) { peer_id = i; break; }
+    }
+
+    ok[peer_id] = 0;
+    try {
+        auto ch = Channel::get_channel("DirectTCP", framed_params(), model_params());
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(before);
+
+        // Enough traffic that the survivor's counters are well past zero.
+        for (int i = 0; i < 3; i++) {
+            int val = 100 + i, got = 0;
+            OperationScope scope(p2p_identity(1));
+            if (peer_id == 0) {
+                ch->send({reinterpret_cast<char*>(&val), sizeof(val)}, 1);
+            } else {
+                ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+            }
+        }
+
+        if (peer_id == 0) {
+            // Survivor: keep the channel, drop the link to the migrated rank.
+            ch->reconfigure_for_epoch(after, {1});
+        } else {
+            // Replacement: a brand new process would have a brand new channel.
+            ch->finalize();
+            ch = Channel::get_channel("DirectTCP", framed_params(), model_params());
+            ch->set_peer_id(peer_id);
+            ch->set_num_peers(num_peers);
+            ch->set_comm_name(after);
+        }
+
+        int val = 777, got = 0;
+        OperationScope scope(p2p_identity(1));
+        if (peer_id == 0) {
+            ch->send({reinterpret_cast<char*>(&val), sizeof(val)}, 1);
+            ok[0] = 1;
+        } else {
+            ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+            ok[1] = (got == 777);
+        }
+        ch->finalize();
+    } catch (const std::exception& e) {
+        BOOST_TEST_MESSAGE("rank " << peer_id << ": " << e.what());
+    }
+
+    reap(peer_id, num_peers);
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "survivor could not send after reconfiguration");
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "replacement could not receive after reconfiguration");
+}
+
 #endif // FMI_ENABLE_REDIS
 
 BOOST_AUTO_TEST_SUITE_END()
