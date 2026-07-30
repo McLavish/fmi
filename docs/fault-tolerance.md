@@ -49,6 +49,31 @@ What it does not do:
   while all ranks are at an aligned point. Details and a worked counterexample:
   [consensus-cut.md](consensus-cut.md#scope-aligned-operation-streams).
 
+## Rank incarnations
+
+A logical rank outlives the processes that serve it, so the control plane also gives each rank
+an **incarnation**: which run of that rank a process is. It is claimed once per process, in the
+`Communicator` constructor, which makes it answer a question nothing else can:
+
+| event | incarnation |
+| --- | --- |
+| the first process to serve a rank | 0 |
+| a replacement rank joining at epoch N+1 | previous + 1 |
+| a survivor rejoining a later epoch | unchanged (rejoining is not construction) |
+| a process restored from a CRIU image | unchanged (it never re-runs the constructor) |
+
+`ControlPlane::current_incarnation(rank)` reads it without claiming one. The counter is
+job-scoped, not epoch-scoped: a rank replaced twice must never be handed the number that fenced
+its first replacement.
+
+What consumes it today: the sequenced TCP link layer, and only when a TCP backend has both
+`framed` and `recover_links` enabled. There it decides whether a reconnecting peer is the same
+lineage (reconcile its sequences), a replacement (start the stream again), or a process that
+has already been replaced and is still running (refuse the link — a zombie's handshake is
+otherwise indistinguishable from the legitimate peer's). Backends that keep no per-link state
+across a replacement ignore it. See
+[`docs/superpowers/specs/2026-07-30-sequenced-links-implementation.md`](superpowers/specs/2026-07-30-sequenced-links-implementation.md).
+
 ## Application-state handling: `fault_tolerance.state_transfer`
 
 The protocol above always reconfigures *communication*. What happens to the migrated rank's
