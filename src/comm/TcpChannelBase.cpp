@@ -3,6 +3,7 @@
 #include "../../include/comm/OperationScope.h"
 
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netinet/tcp.h>
@@ -358,6 +359,25 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
     }
 
     ensure_link_state();
+
+    // A frame already taken off this link — by service_established_links, while this rank was
+    // stuck establishing a different one — is OLDER than anything still on the socket, so it
+    // must be delivered first or the stream is reordered. deliver_into validates identity
+    // exactly as the inline path does.
+    const FrameHeader wanted = expected_identity(buf.len);
+    if (recover_links && links[sender_id].pending(wanted.lane) > 0) {
+        const SequencedLink::Accept drained =
+                links[sender_id].deliver_into(wanted, buf.buf, buf.len);
+        if (drained == SequencedLink::Accept::Delivered) {
+            return;
+        }
+        if (drained == SequencedLink::Accept::IdentityMismatch) {
+            throw std::runtime_error(transport_tag + ": message identity mismatch from peer " +
+                                     std::to_string(sender_id) + " - expected [" +
+                                     describe(wanted) + "] at the head of the drain queue");
+        }
+    }
+
     int repairs = 0;
     // Read that survives the link dying under it. Returns false once the link has been
     // repaired, meaning the caller must start again from the frame header: the replacement
@@ -462,6 +482,57 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         // release what it is holding for us.
         maybe_send_ack(sender_id);
         return;
+    }
+}
+
+void FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) {
+    if (!recover_links || links.size() != num_peers) {
+        return;
+    }
+    for (Utils::peer_num peer = 0; peer < num_peers; peer++) {
+        if (peer == skip || peer == peer_id || peer >= sockets.size() || sockets[peer] < 0) {
+            continue;
+        }
+        if (peer < link_needs_reconcile.size() && link_needs_reconcile[peer]) {
+            continue;   // its first bytes are a handshake preamble, not a frame
+        }
+        // Bounded: drain what is already there and return. This runs inside somebody else's
+        // establishment loop and must not become one itself.
+        for (int taken = 0; taken < 64; taken++) {
+            char encoded[frame_header_bytes];
+            long n = ::recv(sockets[peer], encoded, frame_header_bytes, MSG_PEEK | MSG_DONTWAIT);
+            if (n < 0 || static_cast<std::size_t>(n) < frame_header_bytes) {
+                break;
+            }
+            FrameHeader arrived;
+            if (decode_header(encoded, frame_header_bytes, link_max_frame_bytes, arrived)
+                != DecodeStatus::Ok) {
+                break;   // the receive path reports it properly, with its own diagnostics
+            }
+            // Only take the frame once ALL of it has arrived, so this can never leave a link
+            // half-read — which would put every subsequent frame boundary out.
+            int available = 0;
+            if (::ioctl(sockets[peer], FIONREAD, &available) != 0 ||
+                static_cast<std::size_t>(available) < frame_header_bytes + arrived.payload_length) {
+                break;
+            }
+            try {
+                read_all(peer, encoded, frame_header_bytes);
+                links[peer].on_ack(arrived.cumulative_ack);
+                if (arrived.frame_type == FrameType::Ack) {
+                    continue;
+                }
+                std::vector<char> payload(arrived.payload_length);
+                if (arrived.payload_length > 0) {
+                    read_all(peer, payload.data(), payload.size());
+                }
+                if (links[peer].accept(arrived, payload.data()) == SequencedLink::Accept::Delivered) {
+                    maybe_send_ack(peer);
+                }
+            } catch (const std::exception&) {
+                break;   // the receive path owns repair; leave this link to it
+            }
+        }
     }
 }
 

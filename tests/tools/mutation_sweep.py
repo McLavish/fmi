@@ -129,6 +129,11 @@ MUTS = [
  ("ack_never_marked_sent","src/comm/SequencedLink.cpp",
   "    if (value > acked_to_peer) {\n        acked_to_peer = value;\n    }",""),
 
+ # --- establishment must not stall the rank's other links ---
+ ("establishment_reads_no_other_link","src/comm/DirectTCP.cpp",
+  "        service_established_links(target);","        (void) 0;"),
+ ("drained_frames_are_never_delivered","src/comm/TcpChannelBase.cpp",
+  "    if (recover_links && links[sender_id].pending(wanted.lane) > 0) {","    if (false) {"),
  # --- contract 3: lineage ----------------------------------------------------------------
  ("lineage_ignores_a_superseded_peer","src/comm/SequencedLink.cpp",
   "    if (peer.incarnation < peer_incarnation) {","    if (false) {"),

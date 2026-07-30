@@ -783,6 +783,11 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
                                                                         : connect_retry_interval_ms);
         }
 
+        // Take whatever whole frames are already waiting on this rank's other links. Without
+        // this, a rank stuck here reads nothing else, and after a restore — when several links
+        // rebuild at once — every rank ends up holding a frame another rank is waiting for.
+        service_established_links(target);
+
         // Always poll the listener, even when the peer we want is one we connect to: a lower
         // rank blocked here still owes accepts and acknowledgements to the ranks above it.
         std::vector<struct pollfd> pfds;

@@ -145,6 +145,21 @@ namespace FMI::Comm {
         //! Exchange handshakes on a freshly established link and reconcile the sequences.
         void exchange_handshake(Utils::peer_num partner_id);
 
+        //! Take whole frames off every established link that has one waiting, without blocking.
+        /*!
+         * Called by a subclass while it is stuck establishing ONE link. Without it a rank
+         * inside establishment reads nothing else, and after a restore — when several links
+         * must be rebuilt at once, in an order each rank chooses for itself — the wait-for
+         * relation that makes lazy establishment safe stops being acyclic and the job
+         * deadlocks: every rank waits, and every rank holds a whole frame another needs.
+         *
+         * Only complete frames are taken (the header is peeked and the payload's arrival
+         * confirmed before anything is consumed), so a link is never left half-read. They go
+         * into the per-lane drain queues, and recv_object takes them from there in preference
+         * to the socket. A link that fails here is left alone: the receive path owns repair.
+         */
+        void service_established_links(Utils::peer_num skip);
+
         //! Record that the connection to @p partner_id was replaced, not merely established.
         /*!
          * Called by a subclass that drops a dead socket in favour of an incoming connection.

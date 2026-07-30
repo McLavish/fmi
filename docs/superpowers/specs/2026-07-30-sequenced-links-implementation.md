@@ -201,6 +201,32 @@ to it, so the wait-for relation runs strictly upward and cannot close a cycle.
 which each rank gets round to rebuilding each one is driven by its own collective schedule, not
 by rank order. The wait-for relation is no longer upward-only, and it closes.
 
+### Narrowed, by draining the other links
+
+A rank inside `build_mesh` now takes whole frames off its *other* established links
+(`TcpChannelBase::service_established_links`) into the per-lane drain queues, and `recv_object`
+prefers a queued frame to the socket — a frame buffered that way is older than anything still
+on the wire, so delivering the socket first would reorder the stream. Only complete frames are
+taken, so a link is never left half-read.
+
+**Measured effect on the pass rate: none** — 4 peers stayed at 6–7 of 10, which is the point.
+**Measured effect on a wedged job: every data link drains to zero.** Before, a wedged 4-rank
+job held whole frames on three separate links. After, `ss` shows `rq=0` everywhere except one
+link holding exactly 56 bytes — a **handshake**, which is the one thing `service_established_links`
+cannot consume, because a link awaiting reconciliation opens with a bare handshake preamble
+rather than a frame and only the blocking `exchange_handshake` inside `check_socket` can read it.
+
+So the remaining cycle is: rank A is establishing link X; rank B has offered A a handshake on a
+replaced link and is blocked in `exchange_handshake` waiting for A's in return; A will not
+handshake with B until it finishes with X.
+
+**Closing that means making the handshake one-way** — carried as a frame so any reader can
+consume it, with neither end waiting for the other. That is attempt three, and it is not done:
+the first version of it desynchronised the stream (fixed since, by the partial-read change) and
+the second regressed `TransportRecovery` and was reverted rather than shipped half-verified. The
+change is well understood and bounded; it needs a careful pass over the two suites that
+impersonate the far end of a link, both of which encode the current wire format.
+
 ### What was fixed along the way, and what was not
 
 Two real defects found while chasing this, both fixed and both worth having regardless:

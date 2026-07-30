@@ -119,6 +119,16 @@ namespace {
             return peer < links.size() ? links[peer].replay_suffix().size() : 0;
         }
 
+        //! Test-only: open the link and drive the drain, which normally runs inside establishment.
+        void open_link(FMI::Utils::peer_num peer) {
+            ensure_link_state();
+            check_socket(peer, link_name(peer, false));
+        }
+        void drain_other_links(FMI::Utils::peer_num skip) { service_established_links(skip); }
+        std::size_t queued(FMI::Utils::peer_num peer, Lane lane) {
+            return peer < links.size() ? links[peer].pending(lane) : 0;
+        }
+
     protected:
         int establish(FMI::Utils::peer_num, const std::string&) override { return wire.checkout(); }
         void close_transport_state() override {}
@@ -413,6 +423,38 @@ BOOST_AUTO_TEST_CASE(identity_is_still_enforced_on_a_frame_that_arrives_by_repla
     BOOST_REQUIRE_MESSAGE(handshaken, "the receiver did not repair the link after the freeze");
     BOOST_CHECK_MESSAGE(delivered == -1, "a replayed frame from another operation was delivered");
     BOOST_CHECK_MESSAGE(refused, "the replayed frame was not refused as an identity mismatch");
+}
+
+BOOST_AUTO_TEST_CASE(a_frame_taken_while_establishing_another_link_is_still_delivered) {
+    // A rank stuck establishing one link must keep taking whole frames off its other links,
+    // or after a restore — when several rebuild at once, in an order each rank chooses for
+    // itself — every rank ends up holding a frame another rank is waiting for and the job
+    // deadlocks. Taking them is only half of it: a frame buffered this way is OLDER than
+    // anything still on the socket, so the receive path has to prefer the queue.
+    //
+    // The socket is severed after the drain, so a delivery here can ONLY have come from the
+    // queue.
+    Wire wire;
+    WiredChannel rx(wire, 1, 2);
+    rx.open_link(0);
+
+    char full[frame_header_bytes + 4];
+    encode_header(p2p_frame(0, 1), full);
+    const int payload = 8675309;
+    std::memcpy(full + frame_header_bytes, &payload, 4);
+    BOOST_REQUIRE(write_exact(wire.test_end(), full, sizeof(full)));
+    // Let it land, then take it off the wire the way an establishment loop would.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    rx.drain_other_links(99);
+    BOOST_REQUIRE_MESSAGE(rx.queued(0, Lane::P2P) == 1,
+                          "the frame was not taken off the link during establishment");
+
+    wire.sever();
+    int got = 0;
+    OperationScope scope(p2p_identity(1));
+    BOOST_CHECK_NO_THROW(rx.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0));
+    BOOST_CHECK_MESSAGE(got == payload,
+                        "a frame buffered during establishment was not delivered: got " << got);
 }
 
 BOOST_AUTO_TEST_CASE(a_restored_rank_survives_writing_to_a_connection_the_restore_dropped) {
