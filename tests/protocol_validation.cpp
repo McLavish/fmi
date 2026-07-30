@@ -7,6 +7,7 @@
 
 #include <sys/socket.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <cstring>
 #include <map>
 #include <string>
@@ -423,6 +424,51 @@ BOOST_AUTO_TEST_CASE(a_fragment_longer_than_its_message_is_rejected_before_it_de
     OperationScope scope(p2p_identity(1));
     BOOST_CHECK_THROW(w.channel.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0),
                       std::runtime_error);
+}
+
+namespace {
+    int open_fd_count() {
+        int n = 0;
+        DIR* d = opendir("/proc/self/fd");
+        if (d == nullptr) { return -1; }
+        while (readdir(d) != nullptr) { n++; }
+        closedir(d);
+        return n;
+    }
+}
+
+BOOST_AUTO_TEST_CASE(repeated_channel_lifecycles_do_not_leak_descriptors) {
+    // finalize() must close every peer socket. A leak here is invisible in a short test but
+    // exhausts the descriptor table in a long-running rank, which is exactly the shape of a
+    // job that migrates repeatedly.
+    int before = 0;
+    for (int round = 0; round < 3; round++) {
+        for (int i = 0; i < 20; i++) {
+            int fds[2];
+            socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+            {
+                LoopbackChannel ch(fds[0], true);
+                FrameHeader h = wire_p2p(0, 4);
+                char hdr[frame_header_bytes];
+                encode_header(h, hdr);
+                BOOST_REQUIRE_EQUAL(::write(fds[1], hdr, sizeof hdr),
+                                    static_cast<ssize_t>(sizeof hdr));
+                const int payload = 1;
+                BOOST_REQUIRE_EQUAL(::write(fds[1], &payload, sizeof payload),
+                                    static_cast<ssize_t>(sizeof payload));
+                int got = 0;
+                OperationScope scope(p2p_identity(1));
+                ch.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+                ch.finalize();
+            }
+            ::close(fds[1]);
+        }
+        // Take the baseline after the first round so one-off allocations do not count.
+        if (round == 0) { before = open_fd_count(); }
+    }
+    const int after = open_fd_count();
+    BOOST_CHECK_MESSAGE(after <= before + 2,
+                        "descriptor count grew from " << before << " to " << after);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
