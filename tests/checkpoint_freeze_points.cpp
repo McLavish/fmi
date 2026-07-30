@@ -174,19 +174,32 @@ namespace {
 
     //! Answer the repair handshake, reporting what the peer said it still expects.
     /*!
-     * @param expect_seq what this side claims to have sent, mirrored back so reconcile accepts.
+     * A handshake is a FRAME, and it is one way: the channel writes its own as soon as it
+     * re-establishes and does not wait to be answered. Reading it first here simply matches
+     * the order it happens to arrive in.
+     *
+     * @param peer_sent what this side claims to have produced, so reconcile accepts.
      */
     bool exchange(int fd, std::uint64_t peer_sent, HandshakePayload& theirs) {
+        char header[frame_header_bytes];
+        if (!read_exact(fd, header, frame_header_bytes)) { return false; }
+        FrameHeader parsed;
+        if (decode_header(header, frame_header_bytes, 1u << 20, parsed) != DecodeStatus::Ok ||
+            parsed.frame_type != FrameType::Handshake) {
+            return false;
+        }
         char in[handshake_bytes];
         if (!read_exact(fd, in, handshake_bytes)) { return false; }
         if (decode_handshake(in, handshake_bytes, theirs) != DecodeStatus::Ok) { return false; }
+
         HandshakePayload mine;
         mine.next_send_seq = peer_sent;
         mine.next_expected_seq = 0;   // the channel under test only receives here
         mine.lowest_retained = 0;
-        char out[handshake_bytes];
-        encode_handshake(mine, out);
-        return write_exact(fd, out, handshake_bytes);
+        char frame[frame_header_bytes + handshake_bytes];
+        encode_header(make_handshake_frame(), frame);
+        encode_handshake(mine, frame + frame_header_bytes);
+        return write_exact(fd, frame, sizeof frame);
     }
 }
 

@@ -54,7 +54,9 @@ namespace FMI::Comm {
      */
     enum class FrameType : std::uint8_t {
         Data = 0,
-        Ack = 1
+        Ack = 1,
+        //! Link state offered on a fresh connection; carries a HandshakePayload as its payload.
+        Handshake = 2
     };
 
     //! "FMI2" — guards against a raw (unframed) peer and against stream desynchronisation.
@@ -254,7 +256,7 @@ namespace FMI::Comm {
         out.commutative = (flags & flag_commutative) != 0;
         out.associative = (flags & flag_associative) != 0;
         const std::uint8_t type = detail::get_u8(in, off);
-        if (type > static_cast<std::uint8_t>(FrameType::Ack)) {
+        if (type > static_cast<std::uint8_t>(FrameType::Handshake)) {
             return DecodeStatus::BadFrameType;
         }
         out.frame_type = static_cast<FrameType>(type);
@@ -330,6 +332,17 @@ namespace FMI::Comm {
     };
 
     inline constexpr std::size_t handshake_bytes = 56;
+
+    //! The handshake frame. Its payload is an encoded HandshakePayload.
+    inline FrameHeader make_handshake_frame() {
+        FrameHeader h;
+        h.frame_type = FrameType::Handshake;
+        h.lane = Lane::P2P;
+        h.op_kind = OpKind::Send;
+        h.total_length = handshake_bytes;
+        h.payload_length = handshake_bytes;
+        return h;
+    }
 
     inline void encode_handshake(const HandshakePayload& h, char* out) {
         std::size_t off = 0;

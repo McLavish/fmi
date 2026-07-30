@@ -95,20 +95,19 @@ namespace {
                 int pair[2];
                 BOOST_REQUIRE_EQUAL(socketpair(AF_UNIX, SOCK_STREAM, 0, pair), 0);
                 std::thread([far = pair[1]] {
-                    // Answer a handshake if one arrives, then die either way. The FIRST
-                    // connection carries a frame header rather than a handshake — handshakes
-                    // only happen on repair — so this must not block waiting for one.
+                    // Offer a handshake frame and die. One way, like the protocol: this must
+                    // not wait to be spoken to first, because the channel does not wait either.
+                    HandshakePayload reply;   // fresh link: nothing sent, nothing expected
+                    char frame[frame_header_bytes + handshake_bytes];
+                    encode_header(make_handshake_frame(), frame);
+                    encode_handshake(reply, frame + frame_header_bytes);
+                    ssize_t n = ::write(far, frame, sizeof frame);
+                    (void) n;
                     struct timeval tv {0, 200000};
                     setsockopt(far, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-                    char in[handshake_bytes];
+                    char in[frame_header_bytes];
                     ssize_t got = ::recv(far, in, sizeof in, MSG_WAITALL);
-                    if (got == static_cast<ssize_t>(sizeof in)) {
-                        HandshakePayload reply;   // fresh link: nothing sent, nothing expected
-                        char out[handshake_bytes];
-                        encode_handshake(reply, out);
-                        ssize_t n = ::write(far, out, sizeof out);
-                        (void) n;
-                    }
+                    (void) got;
                     ::close(far);
                 }).detach();
                 issued.push_back(pair[0]);
@@ -314,7 +313,10 @@ BOOST_AUTO_TEST_CASE(a_malformed_handshake_is_rejected_rather_than_reconciled) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     board.sever();
     {
-        std::vector<char> junk(handshake_bytes, '\x5A');
+        // A well-formed handshake FRAME whose payload is not a handshake: the frame layer
+        // accepts it, so reconciliation has to be the thing that refuses.
+        std::vector<char> junk(frame_header_bytes + handshake_bytes, '\x5A');
+        encode_header(make_handshake_frame(), junk.data());
         const int fd = board.checkout(0);
         ssize_t n = ::write(fd, junk.data(), junk.size());
         (void) n;

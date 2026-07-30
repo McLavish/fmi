@@ -116,6 +116,18 @@ void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budg
             return;   // let the receive path report it properly, with its own diagnostics
         }
         links[partner_id].on_ack(peeked.cumulative_ack);
+        if (peeked.frame_type == FrameType::Handshake) {
+            int available = 0;
+            if (::ioctl(sockets[partner_id], FIONREAD, &available) != 0 ||
+                static_cast<std::size_t>(available) < frame_header_bytes + handshake_bytes) {
+                return;
+            }
+            read_all(partner_id, encoded, frame_header_bytes);
+            char offered[handshake_bytes];
+            read_all(partner_id, offered, handshake_bytes);
+            reconcile_handshake(partner_id, offered);
+            continue;
+        }
         if (peeked.frame_type != FrameType::Ack) {
             // A data frame belongs to recv_object, so it stays in the stream untouched. Its
             // ack has already been applied, which is the only thing needed here.
@@ -266,26 +278,31 @@ void FMI::Comm::TcpChannelBase::write_frame(Utils::peer_num rcpt_id, const Frame
 }
 
 void FMI::Comm::TcpChannelBase::exchange_handshake(Utils::peer_num partner_id) {
-    // Both ends write before either reads. The payload is far smaller than a socket buffer, so
-    // neither side can block waiting for the other to drain.
+    // One way; nothing is read here. The peer's handshake arrives as an ordinary frame.
     const HandshakePayload mine = links[partner_id].local_handshake();
-    char out[handshake_bytes];
-    encode_handshake(mine, out);
-    write_all(partner_id, out, handshake_bytes);
+    char payload[handshake_bytes];
+    encode_handshake(mine, payload);
+    write_frame(partner_id, make_handshake_frame(), payload);
 
-    char in[handshake_bytes];
-    read_all(partner_id, in, handshake_bytes);
+    for (const auto& retained : links[partner_id].replay_suffix()) {
+        FrameHeader header = retained.header;
+        header.cumulative_ack = links[partner_id].next_received();
+        write_frame(partner_id, header, retained.payload.data());
+    }
+}
+
+void FMI::Comm::TcpChannelBase::reconcile_handshake(Utils::peer_num partner_id,
+                                                    const char* payload) {
     HandshakePayload theirs;
-    const DecodeStatus status = decode_handshake(in, handshake_bytes, theirs);
+    const DecodeStatus status = decode_handshake(payload, handshake_bytes, theirs);
     if (status != DecodeStatus::Ok) {
-        throw std::runtime_error(transport_tag + ": malformed handshake from peer " +
-                                 std::to_string(partner_id) + " (decode status " +
-                                 std::to_string(static_cast<int>(status)) + ")");
+        throw LinkProtocolError(transport_tag + ": malformed handshake from peer " +
+                                std::to_string(partner_id));
     }
     std::string error;
     if (!links[partner_id].reconcile(theirs, error)) {
-        throw std::runtime_error(transport_tag + ": irreconcilable link to peer " +
-                                 std::to_string(partner_id) + ": " + error);
+        throw LinkProtocolError(transport_tag + ": irreconcilable link to peer " +
+                                std::to_string(partner_id) + ": " + error);
     }
 }
 
@@ -393,6 +410,8 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
             return true;
         } catch (const Utils::Timeout&) {
             throw;   // nothing arrived in time; that is not the same as a dead link
+        } catch (const LinkProtocolError&) {
+            throw;
         } catch (const std::exception&) {
             // The connection died — one end sees a failed write, the other EOF or a reset —
             // so both re-establish, reconcile and replay. Bounded, because a peer that has
@@ -414,7 +433,13 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         }
 
         FrameHeader arrived;
-        const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);
+        // The cap is the LINK's maximum frame, not the application's buffer. Using buf.len
+        // here conflates two different limits and rejects any frame larger than the message
+        // being waited for — including a handshake frame, which is 56 bytes and arrives while
+        // the application is waiting for four. What the application's length actually
+        // constrains is checked below, once the frame is known to be data.
+        const DecodeStatus status =
+                decode_header(encoded, frame_header_bytes, link_max_frame_bytes, arrived);
         if (status != DecodeStatus::Ok) {
             throw std::runtime_error(transport_tag + ": malformed frame from peer " +
                                      std::to_string(sender_id) + " (decode status " +
@@ -430,8 +455,14 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         links[sender_id].on_ack(arrived.cumulative_ack);
 
         if (arrived.frame_type == FrameType::Ack) {
-            // A pure watermark: no payload, no sequence, nothing to deliver. Its only effect
-            // is the on_ack above.
+            continue;
+        }
+        if (arrived.frame_type == FrameType::Handshake) {
+            char offered[handshake_bytes];
+            if (!guarded_read(offered, handshake_bytes)) {
+                continue;
+            }
+            reconcile_handshake(sender_id, offered);
             continue;
         }
 
@@ -493,9 +524,6 @@ void FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) 
         if (peer == skip || peer == peer_id || peer >= sockets.size() || sockets[peer] < 0) {
             continue;
         }
-        if (peer < link_needs_reconcile.size() && link_needs_reconcile[peer]) {
-            continue;   // its first bytes are a handshake preamble, not a frame
-        }
         // Bounded: drain what is already there and return. This runs inside somebody else's
         // establishment loop and must not become one itself.
         for (int taken = 0; taken < 64; taken++) {
@@ -525,6 +553,10 @@ void FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) 
                 std::vector<char> payload(arrived.payload_length);
                 if (arrived.payload_length > 0) {
                     read_all(peer, payload.data(), payload.size());
+                }
+                if (arrived.frame_type == FrameType::Handshake) {
+                    reconcile_handshake(peer, payload.data());
+                    continue;
                 }
                 if (links[peer].accept(arrived, payload.data()) == SequencedLink::Accept::Delivered) {
                     maybe_send_ack(peer);
@@ -562,11 +594,6 @@ void FMI::Comm::TcpChannelBase::check_socket(FMI::Utils::peer_num partner_id, co
         link_needs_reconcile[partner_id] = 0;
         ensure_link_state();
         exchange_handshake(partner_id);
-        for (const auto& retained : links[partner_id].replay_suffix()) {
-            FrameHeader header = retained.header;
-            header.cumulative_ack = links[partner_id].next_received();
-            write_frame(partner_id, header, retained.payload.data());
-        }
     }
 }
 

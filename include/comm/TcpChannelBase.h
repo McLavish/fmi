@@ -6,10 +6,16 @@
 #include "SequencedLink.h"
 
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace FMI::Comm {
+    //! A link said something the protocol does not allow; re-establishing cannot fix it.
+    struct LinkProtocolError : public std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
+
     //! Peer-to-peer channel over one blocking TCP socket per peer.
     /*!
      * Holds everything about TCP byte-stream messaging that does not depend on *how* the
@@ -142,8 +148,11 @@ namespace FMI::Comm {
         //! The lineage of this rank that owns the link state; see SequencedLink::set_incarnation.
         std::uint64_t local_incarnation = 0;
 
-        //! Exchange handshakes on a freshly established link and reconcile the sequences.
+        //! Offer this end's link state on a fresh link and replay what it owes. Reads nothing.
         void exchange_handshake(Utils::peer_num partner_id);
+
+        //! Adopt a handshake that arrived as a frame payload.
+        void reconcile_handshake(Utils::peer_num partner_id, const char* payload);
 
         //! Take whole frames off every established link that has one waiting, without blocking.
         /*!
