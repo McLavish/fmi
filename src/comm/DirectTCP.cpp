@@ -1,5 +1,7 @@
 #include "../../include/comm/DirectTCP.h"
 
+#include "../../include/utils/Signals.h"
+
 #include <hiredis/hiredis.h>
 
 #include <arpa/inet.h>
@@ -128,7 +130,13 @@ namespace {
  */
 class FMI::Comm::DirectTCP::Registry {
 public:
-    Registry(std::string host, int port) : host(std::move(host)), port(port) {}
+    Registry(std::string host, int port) : host(std::move(host)), port(port) {
+        // Here, not at connect time: the first command after a criu restore is issued on the
+        // context the checkpoint captured, whose socket the restore already dropped. That
+        // write happens *before* any reconnect, so a disposition installed on the reconnect
+        // path would arrive one dead write too late.
+        FMI::Utils::suppress_sigpipe();
+    }
 
     ~Registry() { disconnect(); }
 

@@ -1,5 +1,6 @@
 #include "../../include/ft/ControlPlane.h"
 #include "../../include/utils/Configuration.h"
+#include "../../include/utils/Signals.h"
 
 #include <algorithm>
 #include <chrono>
@@ -258,6 +259,10 @@ struct FMI::FT::ControlPlane::Impl {
 };
 
 FMI::FT::ControlPlane::ControlPlane(std::string config_path, std::string comm_name, FMI::Utils::peer_num num_peers) {
+    // The control-plane socket is dropped by a criu restore like any other, and the first
+    // command afterwards is issued on the captured context. Without this the rank dies of
+    // SIGPIPE inside hiredis before it can reconnect. See Utils::suppress_sigpipe.
+    Utils::suppress_sigpipe();
     Utils::Configuration config(std::move(config_path));
     auto ft_config = config.get_fault_tolerance_config();
     if (!ft_config.enabled) {

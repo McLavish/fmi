@@ -1,4 +1,5 @@
 #include "../../include/comm/Redis.h"
+#include "../../include/utils/Signals.h"
 #include <boost/log/trivial.hpp>
 #include <cmath>
 
@@ -18,6 +19,9 @@ FMI::Comm::Redis::Redis(std::map<std::string, std::string> params, std::map<std:
     }
 
     context = nullptr;
+    // See Utils::suppress_sigpipe: hiredis writes without MSG_NOSIGNAL, and after a restore
+    // the first write lands on the socket the checkpoint captured and the restore dropped.
+    Utils::suppress_sigpipe();
     ensure_connection();
 }
 
