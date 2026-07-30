@@ -240,7 +240,8 @@ deadlocked — on the next thing down.
 2. **Handshakes blocked.** A rank re-establishing wrote its handshake and blocked reading the
    peer's, which needs both ends at the new connection at once. Fixed: the handshake is a
    frame, one way, consumed by any reader.
-   *Result: no unread bytes anywhere on a wedged job. Still deadlocks.*
+   *Result: no unread bytes anywhere on a wedged job. Still deadlocks — 4 peers, 7 of 10,
+   unchanged to the trial.*
 3. **Nobody accepts.** With a wedged 4-rank job photographed under the fixed transport: the
    restored rank sits in `poll` inside `build_mesh`, its three peers sit in socket reads, and
    **not one byte is queued anywhere**. `DirectTCP::accept_one` only ever runs inside
