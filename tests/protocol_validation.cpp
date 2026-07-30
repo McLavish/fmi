@@ -426,6 +426,40 @@ BOOST_AUTO_TEST_CASE(a_fragment_longer_than_its_message_is_rejected_before_it_de
                       std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(a_replayed_frame_is_discarded_rather_than_delivered_as_the_next_message) {
+    // Dedup on the wire. After a repair a peer may retransmit a frame the receiver already
+    // took; its payload must be consumed and dropped, not handed to the next receive, which
+    // would shift every subsequent message by one.
+    Wire w(true);
+    FrameHeader first = wire_p2p(0, 4);
+    FrameHeader second = wire_p2p(1, 4);
+    char hdr[frame_header_bytes];
+
+    encode_header(first, hdr);
+    w.poke(hdr, sizeof hdr);
+    const int a = 111;
+    w.poke(&a, sizeof a);
+
+    // The same frame again — a replay the sender had not seen acknowledged.
+    encode_header(first, hdr);
+    w.poke(hdr, sizeof hdr);
+    w.poke(&a, sizeof a);
+
+    encode_header(second, hdr);
+    w.poke(hdr, sizeof hdr);
+    const int b = 222;
+    w.poke(&b, sizeof b);
+
+    OperationScope scope(p2p_identity(1));
+    int got = 0;
+    w.channel.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+    BOOST_CHECK_EQUAL(got, 111);
+    // The duplicate must be skipped entirely, so the next receive yields the SECOND message.
+    got = 0;
+    w.channel.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+    BOOST_CHECK_EQUAL(got, 222);
+}
+
 namespace {
     int open_fd_count() {
         int n = 0;

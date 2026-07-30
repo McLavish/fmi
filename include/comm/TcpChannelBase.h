@@ -3,6 +3,7 @@
 
 #include "PeerToPeer.h"
 #include "LinkFrame.h"
+#include "SequencedLink.h"
 
 #include <map>
 #include <string>
@@ -90,12 +91,33 @@ namespace FMI::Comm {
          */
         bool framed = false;
 
-        //! Per-peer link sequence, used for the on-wire transport_seq. Job-lifetime.
-        std::vector<std::uint64_t> next_send_seq;
-        std::vector<std::uint64_t> next_recv_seq;
+        //! Retain every sent frame until the peer acknowledges it, and replay after a break.
+        /*!
+         * Off by default. On, a connection that dies is re-established and the unacknowledged
+         * suffix is retransmitted, so a completed send remains a delivery obligation across
+         * the break. Requires framed.
+         */
+        bool recover_links = false;
 
-        //! Grow the per-peer sequence vectors to num_peers on first use.
+        //! Per-peer link state: sequences, retention ring and watermarks.
+        std::vector<SequencedLink> links;
+
+        //! Link-layer bounds, from the backend config block.
+        std::uint32_t link_window_frames = 256;
+        std::uint32_t link_max_frame_bytes = 1u << 24;
+        std::size_t link_retention_limit_bytes = 256u << 20;
+
+        //! Grow the per-peer link state to num_peers on first use.
         void ensure_link_state();
+
+        //! Re-establish a dead link and retransmit whatever the peer has not acknowledged.
+        void repair_link(Utils::peer_num partner_id);
+
+        //! Exchange handshakes on a freshly established link and reconcile the sequences.
+        void exchange_handshake(Utils::peer_num partner_id);
+
+        //! Serialize and write one frame.
+        void write_frame(Utils::peer_num rcpt_id, const FrameHeader& header, const char* payload);
 
         //! Write exactly @p len bytes to @p rcpt_id, looping over partial writes.
         void write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len);

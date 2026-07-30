@@ -30,7 +30,8 @@
       "registry_poll_interval_ms": 5,
       "connect_retry_interval_ms": 10,
       "registry_ttl_s": 3600,
-      "framed": true
+      "framed": true,
+      "recover_links": true
     }
   },
   "model": {

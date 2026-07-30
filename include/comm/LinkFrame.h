@@ -52,10 +52,10 @@ namespace FMI::Comm {
 
     //! Serialized header size. Fixed: every frame starts with exactly this many bytes.
     /*!
-     * Field widths below sum to 60; the frame is padded to 64 so a payload copied directly
+     * Field widths below sum to 68; the frame is padded to 72 so a payload copied directly
      * after the header stays 8-byte aligned. encode_header_checked() asserts the two agree.
      */
-    inline constexpr std::size_t frame_header_bytes = 64;
+    inline constexpr std::size_t frame_header_bytes = 72;
 
     inline constexpr std::uint8_t flag_commutative = 0x1u;
     inline constexpr std::uint8_t flag_associative = 0x2u;
@@ -81,6 +81,15 @@ namespace FMI::Comm {
         std::uint32_t payload_length = 0;
         //! Link-scoped reliability sequence. Job-lifetime, never reset.
         std::uint64_t transport_seq = 0;
+        //! Cumulative ack for the REVERSE direction: every sequence below this is durably held
+        //! by the sender of this frame.
+        /*!
+         * Piggybacked rather than carried in its own frame because the transport is blocking
+         * and has no thread that could write a standalone ack while the application is inside
+         * a receive. Any traffic in the opposite direction therefore prunes retention, and
+         * collectives — which ping-pong by construction — keep it flowing.
+         */
+        std::uint64_t cumulative_ack = 0;
     };
 
     //! Result of decoding a header. Every malformed input is a status, never an exception:
@@ -184,6 +193,7 @@ namespace FMI::Comm {
         detail::put_u32(out, off, h.payload_length);
         detail::put_u32(out, off, 0);  // reserved
         detail::put_u64(out, off, h.transport_seq);
+        detail::put_u64(out, off, h.cumulative_ack);
         while (off < frame_header_bytes) {
             detail::put_u8(out, off, 0);  // tail padding to frame_header_bytes
         }
@@ -237,6 +247,7 @@ namespace FMI::Comm {
         out.payload_length = detail::get_u32(in, off);
         detail::get_u32(in, off);  // reserved
         out.transport_seq = detail::get_u64(in, off);
+        out.cumulative_ack = detail::get_u64(in, off);
 
         if (out.payload_length > max_payload) {
             return DecodeStatus::PayloadTooLarge;

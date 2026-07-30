@@ -71,6 +71,13 @@ namespace FMI::Comm {
         bool admit(const FrameHeader& identity, const char* payload, std::size_t len,
                    FrameHeader& stamped);
 
+        //! Advance the send sequence without retaining anything.
+        /*!
+         * For framed-without-recovery, where frames carry a sequence so gaps are detected but
+         * nothing is replayed and therefore nothing needs holding.
+         */
+        void note_sent() { ++next_send; }
+
         //! Release retention up to and including @p cumulative.
         void on_ack(std::uint64_t cumulative);
 
@@ -90,6 +97,16 @@ namespace FMI::Comm {
          * matching receive. Identity is validated at drain time, in deliver_into().
          */
         Accept accept(const FrameHeader& header, const char* payload);
+
+        //! Account for an arriving frame WITHOUT buffering its payload.
+        /*!
+         * For a blocking transport that reads the payload straight into the application's
+         * buffer there is nothing to drain, so the lane queues stay empty and only the
+         * watermarks move. Dedup and gap detection are identical to accept(); on Duplicate the
+         * caller must still consume the payload bytes off the wire and discard them, or the
+         * stream desynchronises.
+         */
+        Accept accept_inline(const FrameHeader& header);
 
         //! Drain the head of @p expected's lane into @p dst, validating message identity.
         /*!

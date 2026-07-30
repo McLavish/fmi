@@ -15,7 +15,7 @@ Restores every file it touches, including on failure.
 """
 import subprocess, sys, os
 WT="/home/luca/fmi-sequenced-links"
-SUITES=["LinkLayer","OperationIdentity","ProtocolValidation","LinkRecovery","FramedTransport"]
+SUITES=["LinkLayer","OperationIdentity","ProtocolValidation","LinkRecovery","TransportRecovery","FramedTransport"]
 
 MUTS = [
  ("identity_ignores_op_kind","include/comm/LinkFrame.h",
@@ -57,16 +57,22 @@ MUTS = [
   "if (peer.next_expected_seq > next_send) {","if (false) {"),
  ("wire_skips_identity_check","src/comm/TcpChannelBase.cpp",
   "if (!same_identity(arrived, expected)) {","if (false) {"),
- ("wire_skips_seq_check","src/comm/TcpChannelBase.cpp",
-  "if (arrived.transport_seq != next_recv_seq[sender_id]) {","if (false) {"),
+ ("wire_skips_gap_check","src/comm/TcpChannelBase.cpp",
+  "        if (accepted == SequencedLink::Accept::FatalGap) {","        if (false) {"),
+ # Two decode-status checks now exist; target each precisely rather than by first match.
+ ("handshake_skips_decode_check","src/comm/TcpChannelBase.cpp",
+  "    HandshakePayload theirs;\n    const DecodeStatus status = decode_handshake(in, handshake_bytes, theirs);\n    if (status != DecodeStatus::Ok) {",
+  "    HandshakePayload theirs;\n    const DecodeStatus status = decode_handshake(in, handshake_bytes, theirs);\n    if (false) {"),
  ("wire_skips_decode_check","src/comm/TcpChannelBase.cpp",
-  "if (status != DecodeStatus::Ok) {","if (false) {"),
+  "        const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);\n        if (status != DecodeStatus::Ok) {",
+  "        const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);\n        if (false) {"),
  ("repair_forgets_to_reset_seq","src/comm/TcpChannelBase.cpp",
-  "        if (rank < next_send_seq.size()) {\n            next_send_seq[rank] = 0;\n            next_recv_seq[rank] = 0;\n        }",""),
- ("send_reuses_seq","src/comm/TcpChannelBase.cpp",
-  "header.transport_seq = next_send_seq[rcpt_id]++;","header.transport_seq = next_send_seq[rcpt_id];"),
- ("recv_never_advances_seq","src/comm/TcpChannelBase.cpp",
-  "    ++next_recv_seq[sender_id];",""),
+  "        if (rank < links.size()) {\n            links[rank] = SequencedLink({link_window_frames, link_max_frame_bytes,\n                                         link_retention_limit_bytes});\n        }",""),
+ ("dedup_disabled","src/comm/SequencedLink.cpp",
+  "FMI::Comm::SequencedLink::accept_inline(const FrameHeader& header) {\n    if (header.transport_seq < next_recv) {\n        return Accept::Duplicate;\n    }",
+  "FMI::Comm::SequencedLink::accept_inline(const FrameHeader& header) {\n    if (false) {\n        return Accept::Duplicate;\n    }"),
+ ("inline_never_advances","src/comm/SequencedLink.cpp",
+  "    ++next_recv;\n    // The application reads the payload directly","    // The application reads the payload directly"),
  # --- durability: retention, replay and reconciliation across a break ---
  ("replay_returns_nothing","include/comm/SequencedLink.h",
   "[[nodiscard]] const std::deque<Retained>& replay_suffix() const { return retention; }",
@@ -80,6 +86,17 @@ MUTS = [
   "    while (!retention.empty()) {"),
  ("handshake_reports_zero_expected","src/comm/SequencedLink.cpp",
   "    h.next_expected_seq = next_recv;","    h.next_expected_seq = 0;"),
+ # --- durability wired into the transport ---
+ ("repair_does_not_replay","src/comm/TcpChannelBase.cpp",
+  "    for (const auto& retained : links[partner_id].replay_suffix()) {","    for (const auto& retained : std::deque<SequencedLink::Retained>()) {"),
+ ("send_does_not_retain","src/comm/TcpChannelBase.cpp",
+  "    if (!links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {","    links[rcpt_id].note_sent(); stamped = header; stamped.transport_seq = links[rcpt_id].next_send_seq() - 1; stamped.payload_length = static_cast<std::uint32_t>(buf.len); if (false) {"),
+ ("piggyback_ack_ignored","src/comm/TcpChannelBase.cpp",
+  "        links[sender_id].on_ack(arrived.cumulative_ack);",""),
+ ("send_never_repairs","src/comm/TcpChannelBase.cpp",
+  "        repair_link(rcpt_id);","        throw;"),
+ ("recv_never_repairs","src/comm/TcpChannelBase.cpp",
+  "                repair_link(sender_id);\n                continue;","                throw;"),
 ]
 
 def run(cmd, **kw):

@@ -76,6 +76,21 @@ FMI::Comm::SequencedLink::accept(const FrameHeader& header, const char* payload)
 }
 
 FMI::Comm::SequencedLink::Accept
+FMI::Comm::SequencedLink::accept_inline(const FrameHeader& header) {
+    if (header.transport_seq < next_recv) {
+        return Accept::Duplicate;
+    }
+    if (header.transport_seq > next_recv) {
+        return Accept::FatalGap;
+    }
+    ++next_recv;
+    // The application reads the payload directly, so once this returns the frame is as
+    // durably held as it will ever be and may be acked.
+    ack_safe_seq = next_recv;
+    return Accept::Delivered;
+}
+
+FMI::Comm::SequencedLink::Accept
 FMI::Comm::SequencedLink::deliver_into(const FrameHeader& expected, char* dst, std::size_t len) {
     auto& queue = lanes[lane_index(expected.lane)];
     if (queue.empty()) {

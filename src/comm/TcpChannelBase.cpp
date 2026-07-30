@@ -14,12 +14,20 @@
 void FMI::Comm::TcpChannelBase::parse_tcp_params(std::map<std::string, std::string>& params) {
     max_timeout = std::stoi(params["max_timeout"]);
     framed = params.count("framed") > 0 && params["framed"] == "true";
+    recover_links = params.count("recover_links") > 0 && params["recover_links"] == "true";
+    if (params.count("link_window_frames") > 0) {
+        link_window_frames = static_cast<std::uint32_t>(std::stoul(params["link_window_frames"]));
+    }
+    if (params.count("link_retention_limit_bytes") > 0) {
+        link_retention_limit_bytes = static_cast<std::size_t>(
+                std::stoull(params["link_retention_limit_bytes"]));
+    }
 }
 
 void FMI::Comm::TcpChannelBase::ensure_link_state() {
-    if (next_send_seq.size() != num_peers) {
-        next_send_seq.assign(num_peers, 0);
-        next_recv_seq.assign(num_peers, 0);
+    if (links.size() != num_peers) {
+        links.assign(num_peers, SequencedLink({link_window_frames, link_max_frame_bytes,
+                                               link_retention_limit_bytes}));
     }
 }
 
@@ -131,6 +139,59 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
     }
 }
 
+void FMI::Comm::TcpChannelBase::write_frame(Utils::peer_num rcpt_id, const FrameHeader& header,
+                                            const char* payload) {
+    char encoded[frame_header_bytes];
+    encode_header(header, encoded);
+    // Header immediately precedes its payload with nothing interleaved, which holds because a
+    // channel is only ever driven by one application thread at a time.
+    write_all(rcpt_id, encoded, frame_header_bytes);
+    if (header.payload_length > 0) {
+        write_all(rcpt_id, payload, header.payload_length);
+    }
+}
+
+void FMI::Comm::TcpChannelBase::exchange_handshake(Utils::peer_num partner_id) {
+    // Both ends write before either reads. The payload is far smaller than a socket buffer, so
+    // neither side can block waiting for the other to drain.
+    const HandshakePayload mine = links[partner_id].local_handshake();
+    char out[handshake_bytes];
+    encode_handshake(mine, out);
+    write_all(partner_id, out, handshake_bytes);
+
+    char in[handshake_bytes];
+    read_all(partner_id, in, handshake_bytes);
+    HandshakePayload theirs;
+    const DecodeStatus status = decode_handshake(in, handshake_bytes, theirs);
+    if (status != DecodeStatus::Ok) {
+        throw std::runtime_error(transport_tag + ": malformed handshake from peer " +
+                                 std::to_string(partner_id) + " (decode status " +
+                                 std::to_string(static_cast<int>(status)) + ")");
+    }
+    std::string error;
+    if (!links[partner_id].reconcile(theirs, error)) {
+        throw std::runtime_error(transport_tag + ": irreconcilable link to peer " +
+                                 std::to_string(partner_id) + ": " + error);
+    }
+}
+
+void FMI::Comm::TcpChannelBase::repair_link(Utils::peer_num partner_id) {
+    if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
+        close(sockets[partner_id]);
+        sockets[partner_id] = -1;
+    }
+    check_socket(partner_id, link_name(partner_id, true));
+    exchange_handshake(partner_id);
+
+    // Replay exactly the suffix the peer has not acknowledged, in sequence order. Anything it
+    // already holds was pruned by the handshake, so this retransmits no more than necessary.
+    for (const auto& retained : links[partner_id].replay_suffix()) {
+        FrameHeader header = retained.header;
+        header.cumulative_ack = links[partner_id].next_received();
+        write_frame(partner_id, header, retained.payload.data());
+    }
+}
+
 void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     check_socket(rcpt_id, link_name(rcpt_id, true));
     if (!framed) {
@@ -143,15 +204,34 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
         throw std::runtime_error(transport_tag + ": message of " + std::to_string(buf.len) +
                                  " bytes exceeds the framed maximum");
     }
+
     FrameHeader header = expected_identity(buf.len);
-    header.message_id = next_send_seq[rcpt_id];
-    header.transport_seq = next_send_seq[rcpt_id]++;
-    char encoded[frame_header_bytes];
-    encode_header(header, encoded);
-    // Header immediately precedes its payload with nothing interleaved, which holds because a
-    // channel is only ever driven by one application thread at a time.
-    write_all(rcpt_id, encoded, frame_header_bytes);
-    write_all(rcpt_id, buf.buf, buf.len);
+    if (!recover_links) {
+        header.message_id = links[rcpt_id].next_send_seq();
+        header.transport_seq = links[rcpt_id].next_send_seq();
+        header.cumulative_ack = links[rcpt_id].next_received();
+        links[rcpt_id].note_sent();
+        write_frame(rcpt_id, header, buf.buf);
+        return;
+    }
+
+    // The retained copy exists before a single byte reaches the socket: once this returns the
+    // message is a delivery obligation even if the peer has not started its receive.
+    header.message_id = links[rcpt_id].next_send_seq();
+    FrameHeader stamped;
+    if (!links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {
+        throw std::runtime_error(transport_tag + ": link to peer " + std::to_string(rcpt_id) +
+                                 " is at its retention limit with " +
+                                 std::to_string(links[rcpt_id].retained_bytes()) +
+                                 " bytes outstanding");
+    }
+    stamped.cumulative_ack = links[rcpt_id].next_received();
+    try {
+        write_frame(rcpt_id, stamped, buf.buf);
+    } catch (const std::exception&) {
+        // The frame is retained, so the repair replays it; the send obligation is intact.
+        repair_link(rcpt_id);
+    }
 }
 
 void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num sender_id) {
@@ -162,38 +242,68 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
     }
 
     ensure_link_state();
-    char encoded[frame_header_bytes];
-    read_all(sender_id, encoded, frame_header_bytes);
+    while (true) {
+        char encoded[frame_header_bytes];
+        if (recover_links) {
+            try {
+                read_all(sender_id, encoded, frame_header_bytes);
+            } catch (const Utils::Timeout&) {
+                throw;   // a quiet peer is not a broken link
+            } catch (const std::exception&) {
+                // The connection died. Both ends see this — one as a failed write, the other
+                // as EOF or a reset — so both re-establish, reconcile and replay.
+                repair_link(sender_id);
+                continue;
+            }
+        } else {
+            read_all(sender_id, encoded, frame_header_bytes);
+        }
 
-    FrameHeader arrived;
-    const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);
-    if (status != DecodeStatus::Ok) {
-        throw std::runtime_error(transport_tag + ": malformed frame from peer " +
-                                 std::to_string(sender_id) + " (decode status " +
-                                 std::to_string(static_cast<int>(status)) +
-                                 ", declared payload " + std::to_string(arrived.payload_length) +
-                                 ", declared total " + std::to_string(arrived.total_length) +
-                                 ", expecting " + std::to_string(buf.len) + " bytes for [" +
-                                 describe(expected_identity(buf.len)) + "])");
-    }
+        FrameHeader arrived;
+        const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);
+        if (status != DecodeStatus::Ok) {
+            throw std::runtime_error(transport_tag + ": malformed frame from peer " +
+                                     std::to_string(sender_id) + " (decode status " +
+                                     std::to_string(static_cast<int>(status)) +
+                                     ", declared payload " + std::to_string(arrived.payload_length) +
+                                     ", declared total " + std::to_string(arrived.total_length) +
+                                     ", expecting " + std::to_string(buf.len) + " bytes for [" +
+                                     describe(expected_identity(buf.len)) + "])");
+        }
 
-    const FrameHeader expected = expected_identity(buf.len);
-    if (!same_identity(arrived, expected)) {
-        // The peer is in a different logical operation. Under the unframed protocol this is
-        // exactly where a divergent schedule silently consumed the wrong payload.
-        throw std::runtime_error(transport_tag + ": message identity mismatch from peer " +
-                                 std::to_string(sender_id) + " - expected [" +
-                                 describe(expected) + "] but received [" +
-                                 describe(arrived) + "]");
+        // Any traffic from the peer carries its cumulative ack, which is what prunes retention
+        // on a blocking transport with no thread free to send standalone acks.
+        links[sender_id].on_ack(arrived.cumulative_ack);
+
+        const SequencedLink::Accept accepted = links[sender_id].accept_inline(arrived);
+        if (accepted == SequencedLink::Accept::Duplicate) {
+            // A replayed frame the peer had not seen acknowledged. Consume and discard its
+            // payload, or the following frames would be parsed from the wrong offset.
+            std::vector<char> discard(arrived.payload_length);
+            if (arrived.payload_length > 0) {
+                read_all(sender_id, discard.data(), discard.size());
+            }
+            continue;
+        }
+        if (accepted == SequencedLink::Accept::FatalGap) {
+            throw std::runtime_error(transport_tag + ": sequence gap from peer " +
+                                     std::to_string(sender_id) + " - expected " +
+                                     std::to_string(links[sender_id].next_received()) +
+                                     " but received " + std::to_string(arrived.transport_seq));
+        }
+
+        const FrameHeader expected = expected_identity(buf.len);
+        if (!same_identity(arrived, expected)) {
+            // The peer is in a different logical operation. Under the unframed protocol this is
+            // exactly where a divergent schedule silently consumed the wrong payload.
+            throw std::runtime_error(transport_tag + ": message identity mismatch from peer " +
+                                     std::to_string(sender_id) + " - expected [" +
+                                     describe(expected) + "] but received [" +
+                                     describe(arrived) + "]");
+        }
+        read_all(sender_id, buf.buf, buf.len);
+        return;
     }
-    if (arrived.transport_seq != next_recv_seq[sender_id]) {
-        throw std::runtime_error(transport_tag + ": sequence gap from peer " +
-                                 std::to_string(sender_id) + " - expected " +
-                                 std::to_string(next_recv_seq[sender_id]) + " but received " +
-                                 std::to_string(arrived.transport_seq));
-    }
-    ++next_recv_seq[sender_id];
-    read_all(sender_id, buf.buf, buf.len);
 }
 
 void FMI::Comm::TcpChannelBase::check_socket(FMI::Utils::peer_num partner_id, const std::string& name) {
@@ -257,9 +367,9 @@ bool FMI::Comm::TcpChannelBase::reconfigure_for_epoch(const std::string& new_com
         // creates a new one: the replacement is a fresh process whose counters necessarily
         // start at zero. Carrying the old link's counters over would make the survivor's
         // first framed exchange with the replacement report a gap that never happened.
-        if (rank < next_send_seq.size()) {
-            next_send_seq[rank] = 0;
-            next_recv_seq[rank] = 0;
+        if (rank < links.size()) {
+            links[rank] = SequencedLink({link_window_frames, link_max_frame_bytes,
+                                         link_retention_limit_bytes});
         }
     }
     set_comm_name(new_comm_name);
