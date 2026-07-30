@@ -232,9 +232,20 @@ handshake with B until it finishes with X.
 **Closing that means making the handshake one-way** — carried as a frame so any reader can
 consume it, with neither end waiting for the other. That is attempt three, and it is not done:
 the first version of it desynchronised the stream (fixed since, by the partial-read change) and
-the second regressed `TransportRecovery` and was reverted rather than shipped half-verified. The
-change is well understood and bounded; it needs a careful pass over the two suites that
-impersonate the far end of a link, both of which encode the current wire format.
+the second regressed `TransportRecovery` and was reverted rather than shipped half-verified.
+
+**Start attempt three by diagnosing that regression, not by rewriting.** Under the one-way
+handshake, `TransportRecovery/a_severed_link_replays_and_loses_nothing` delivered 7 of 12
+messages, and *why* was never established. That case is the cheapest possible place to find
+out: two threads, a socketpair switchboard that severs on command, no rendezvous, no criu, and
+it runs in seconds. Whatever loses five messages there is almost certainly the same thing that
+would lose them in a real job. Guessing at it — which is what shipping a third rewrite without
+that answer would amount to — is how the first two attempts went wrong.
+
+Note also that both suites which impersonate the far end of a link (`CheckpointFreezePoints`
+and `TransportRecovery`'s malformed-handshake case) encode the current wire format and need
+updating in step; a handshake that has become a frame is read as `frame_header_bytes` then
+`handshake_bytes`, not as a bare preamble.
 
 ### What was fixed along the way, and what was not
 
