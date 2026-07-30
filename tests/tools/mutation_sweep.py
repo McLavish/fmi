@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Mutation sweep for the sequenced link layer.
+
+Injects a known fault into the implementation, rebuilds, and runs the protocol suites. A
+mutation that SURVIVES means no test detects that defect, so the suite is not actually
+pinning the behaviour it appears to.
+
+This exists because the original suite passed with 9 of 21 faults injected: every
+"identity ignores field X" mutation survived, because each test varied two or more fields
+at once and some other comparison always caught the break.
+
+Usage:  python3 tests/tools/mutation_sweep.py
+Expects a configured build/ directory and Redis on 127.0.0.1:6379.
+Restores every file it touches, including on failure.
+"""
+import subprocess, sys, os
+WT="/home/luca/fmi-sequenced-links"
+SUITES=["LinkLayer","OperationIdentity","ProtocolValidation","FramedTransport"]
+
+MUTS = [
+ ("identity_ignores_op_kind","include/comm/LinkFrame.h",
+  "&& a.op_kind == b.op_kind\n","&& true\n"),
+ ("identity_ignores_lane","include/comm/LinkFrame.h",
+  "return a.lane == b.lane\n","return true\n"),
+ ("identity_ignores_collective_index","include/comm/LinkFrame.h",
+  "&& a.collective_index == b.collective_index\n","&& true\n"),
+ ("identity_ignores_root","include/comm/LinkFrame.h",
+  "&& a.root == b.root\n","&& true\n"),
+ ("identity_ignores_comm_flag","include/comm/LinkFrame.h",
+  "&& a.commutative == b.commutative\n","&& true\n"),
+ ("identity_ignores_assoc_flag","include/comm/LinkFrame.h",
+  "&& a.associative == b.associative\n","&& true\n"),
+ ("identity_ignores_total_length","include/comm/LinkFrame.h",
+  "&& a.total_length == b.total_length;","&& true;"),
+ ("decode_skips_magic","include/comm/LinkFrame.h",
+  "if (detail::get_u32(in, off) != frame_magic) {\n            return DecodeStatus::BadMagic;\n        }",
+  "detail::get_u32(in, off);"),
+ ("decode_skips_version","include/comm/LinkFrame.h",
+  "if (out.wire_version != frame_wire_version) {\n            return DecodeStatus::BadVersion;\n        }",""),
+ ("decode_skips_payload_cap","include/comm/LinkFrame.h",
+  "if (out.payload_length > max_payload) {\n            return DecodeStatus::PayloadTooLarge;\n        }",""),
+ ("decode_skips_truncation","include/comm/LinkFrame.h",
+  "if (available < frame_header_bytes) {\n            return DecodeStatus::Truncated;\n        }",""),
+ ("ack_off_by_one","src/comm/SequencedLink.cpp",
+  "retention.front().header.transport_seq < cumulative","retention.front().header.transport_seq <= cumulative"),
+ ("accept_no_dedup","src/comm/SequencedLink.cpp",
+  "if (header.transport_seq < next_recv) {","if (false) {"),
+ ("accept_no_gap_check","src/comm/SequencedLink.cpp",
+  "if (header.transport_seq > next_recv) {","if (false) {"),
+ ("deliver_skips_identity","src/comm/SequencedLink.cpp",
+  "if (!same_identity(queue.front().header, expected)) {","if (false) {"),
+ ("deliver_skips_length","src/comm/SequencedLink.cpp",
+  "if (queue.front().payload.size() != len) {","if (false) {"),
+ ("window_never_blocks","src/comm/SequencedLink.cpp",
+  "return retention.size() >= config.window_frames","return false && retention.size() >= config.window_frames"),
+ ("reconcile_skips_ahead_check","src/comm/SequencedLink.cpp",
+  "if (peer.next_expected_seq > next_send) {","if (false) {"),
+ ("wire_skips_identity_check","src/comm/TcpChannelBase.cpp",
+  "if (!same_identity(arrived, expected)) {","if (false) {"),
+ ("wire_skips_seq_check","src/comm/TcpChannelBase.cpp",
+  "if (arrived.transport_seq != next_recv_seq[sender_id]) {","if (false) {"),
+ ("wire_skips_decode_check","src/comm/TcpChannelBase.cpp",
+  "if (status != DecodeStatus::Ok) {","if (false) {"),
+ ("repair_forgets_to_reset_seq","src/comm/TcpChannelBase.cpp",
+  "        if (rank < next_send_seq.size()) {\n            next_send_seq[rank] = 0;\n            next_recv_seq[rank] = 0;\n        }",""),
+ ("send_reuses_seq","src/comm/TcpChannelBase.cpp",
+  "header.transport_seq = next_send_seq[rcpt_id]++;","header.transport_seq = next_send_seq[rcpt_id];"),
+ ("recv_never_advances_seq","src/comm/TcpChannelBase.cpp",
+  "    ++next_recv_seq[sender_id];",""),
+]
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
+
+survived, killed, broken = [], [], []
+for name, rel, old, new in MUTS:
+    path=os.path.join(WT,rel)
+    src=open(path).read()
+    if old not in src:
+        broken.append((name,"PATTERN NOT FOUND")); continue
+    open(path,'w').write(src.replace(old,new,1))
+    b=run(f"cd {WT} && cmake --build build -j16")
+    if b.returncode!=0:
+        broken.append((name,"build failed"))
+    else:
+        failed=False
+        for s in SUITES:
+            r=run(f"cd {WT}/build/tests && timeout 300 ./Boost_Tests_run --run_test={s}")
+            if r.returncode!=0: failed=True; break
+        (killed if failed else survived).append(name)
+    open(path,'w').write(src)
+    print(f"{'KILLED ' if name in killed else 'SURVIVED' if name in survived else 'BROKEN '} {name}", flush=True)
+
+run(f"cd {WT} && cmake --build build -j16")
+print("\n===== MUTATION SUMMARY =====")
+print(f"killed   : {len(killed)}")
+print(f"SURVIVED : {len(survived)}  <-- test holes")
+for s in survived: print("   -",s)
+for n,why in broken: print("  BROKEN",n,why)
