@@ -162,6 +162,52 @@ BOOST_AUTO_TEST_CASE(transparent_migration_replacement_joins_next_epoch) {
     control_plane.clear_job_state();
 }
 
+BOOST_AUTO_TEST_CASE(transparent_migration_replacement_takes_a_new_incarnation) {
+    // The control-plane half of contract 3. The link layer's lineage rules are only as good as
+    // the number they compare, and that number has exactly one source: one claim per process,
+    // in the Communicator constructor.
+    std::string comm_name = unique_comm_name();
+    if (!redis_available(comm_name)) {
+        BOOST_TEST_MESSAGE("Skipping: Redis unavailable");
+        return;
+    }
+
+    FMI::FT::ControlPlane control_plane(ft_config_path, comm_name, 2);
+    control_plane.clear_job_state();
+
+    // Nothing claimed yet, so nothing is serving either rank.
+    BOOST_CHECK_EQUAL(control_plane.current_incarnation(0), 0u);
+    BOOST_CHECK_EQUAL(control_plane.current_incarnation(1), 0u);
+
+    {
+        FMI::Communicator rank0(0, 2, ft_config_path, comm_name, 128, "worker-a");
+        FMI::Communicator rank1(1, 2, ft_config_path, comm_name, 128, "worker-b");
+        // The first process to serve a rank is lineage 0, so a job that never migrates carries
+        // zeroes and the lineage rules hold trivially.
+        BOOST_CHECK_EQUAL(control_plane.current_incarnation(0), 0u);
+        BOOST_CHECK_EQUAL(control_plane.current_incarnation(1), 0u);
+    }
+
+    // A replacement process for rank 1 takes the next one, and rank 0's is untouched:
+    // incarnations are per rank, not job-wide, or one migration would reset every link.
+    BOOST_CHECK_EQUAL(control_plane.claim_incarnation(1), 1u);
+    BOOST_CHECK_EQUAL(control_plane.current_incarnation(1), 1u);
+    BOOST_CHECK_EQUAL(control_plane.current_incarnation(0), 0u);
+
+    // Monotone, and never reused: a rank replaced twice must not be handed the number that
+    // fenced its first replacement.
+    BOOST_CHECK_EQUAL(control_plane.claim_incarnation(1), 2u);
+    BOOST_CHECK_EQUAL(control_plane.claim_incarnation(0), 1u);
+
+    // Job-scoped rather than epoch-scoped: promoting the epoch must not rewind the lineage,
+    // because a superseded process from epoch 0 may still be running in epoch 1.
+    control_plane.mark_rank_quiesced(0, 1);
+    control_plane.promote_epoch(1);
+    BOOST_CHECK_EQUAL(control_plane.current_incarnation(1), 2u);
+
+    control_plane.clear_job_state();
+}
+
 // The wait for epoch promotion is unbounded: there is no library-side timeout. A replacement that
 // is promoted long after it began waiting (here, 600 ms) would have thrown FMI::Utils::Timeout
 // under the old bounded wait; now it must keep waiting and join.

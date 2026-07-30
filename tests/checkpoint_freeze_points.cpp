@@ -364,6 +364,57 @@ BOOST_AUTO_TEST_CASE(a_freeze_before_a_frame_ever_reached_the_wire_still_owes_it
                         "an unacknowledged message must stay in retention across the break");
 }
 
+BOOST_AUTO_TEST_CASE(identity_is_still_enforced_on_a_frame_that_arrives_by_replay) {
+    // The composition the design calls unchecked, at the smallest scale that can exhibit it:
+    // contract 2 puts a frame on the wire a second time, and contract 1 still has to judge it.
+    // A replay is the one path where a frame reaches the receiver without the sender having
+    // just produced it, so it is exactly where a divergent peer's payload could slip past the
+    // identity check and be delivered as if it belonged to the operation being waited on.
+    Wire wire;
+    std::atomic<int> delivered{-1};
+    std::atomic<bool> refused{false};
+
+    std::thread receiver([&] {
+        WiredChannel rx(wire, 1, 2);
+        OperationScope scope(p2p_identity(1));
+        try {
+            int got = 0;
+            rx.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+            delivered = got;
+        } catch (const std::exception& e) {
+            refused = std::string(e.what()).find("identity mismatch") != std::string::npos;
+        }
+    });
+
+    char header[frame_header_bytes];
+    encode_header(p2p_frame(0, 1), header);
+    BOOST_REQUIRE(write_exact(wire.test_end(), header, frame_header_bytes));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    wire.sever();
+
+    HandshakePayload theirs;
+    const bool handshaken = exchange(wire.test_end(), 1, theirs);
+    if (handshaken) {
+        // Replay sequence 0 as the protocol requires — but belonging to a DIFFERENT logical
+        // operation than the one the receiver is waiting on.
+        FrameHeader wrong = p2p_frame(0, 1);
+        wrong.lane = Lane::Collective;
+        wrong.op_kind = OpKind::Bcast;
+        wrong.collective_index = 4;
+        wrong.root = 0;
+        char full[frame_header_bytes + 4];
+        encode_header(wrong, full);
+        const int payload = 999;
+        std::memcpy(full + frame_header_bytes, &payload, 4);
+        write_exact(wire.test_end(), full, sizeof(full));
+    }
+    receiver.join();
+
+    BOOST_REQUIRE_MESSAGE(handshaken, "the receiver did not repair the link after the freeze");
+    BOOST_CHECK_MESSAGE(delivered == -1, "a replayed frame from another operation was delivered");
+    BOOST_CHECK_MESSAGE(refused, "the replayed frame was not refused as an identity mismatch");
+}
+
 BOOST_AUTO_TEST_CASE(a_restored_rank_survives_writing_to_a_connection_the_restore_dropped) {
     // Every socket a checkpointed process owned comes back dropped (criu --tcp-close), and the
     // first thing a restored rank does is talk to the peer registry over one of them. hiredis

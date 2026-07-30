@@ -366,9 +366,11 @@ BOOST_AUTO_TEST_CASE(the_unframed_path_still_accepts_raw_bytes) {
     BOOST_CHECK_EQUAL(got, 4242);
 }
 
-// The three cases below isolate the decode-status check on the wire. They are deliberately
-// constructed so that the IDENTITY fields all match: if the receiver ignored the decode status
-// and looked only at identity, it would accept every one of them.
+// The cases below probe the decode-status check on the wire. Note what mutation testing showed
+// about them: deleting the check entirely leaves all three of the next cases PASSING, because a
+// header that fails to decode is left mostly default-constructed and the identity comparison
+// rejects it anyway. Only the malformed-ack case further down actually needs the status, since
+// an ack is skipped before identity is ever consulted.
 
 BOOST_AUTO_TEST_CASE(a_bad_magic_is_rejected_even_when_the_identity_matches) {
     Wire w(true);
@@ -449,6 +451,77 @@ BOOST_AUTO_TEST_CASE(a_fragment_shorter_than_its_message_is_rejected_before_it_d
     OperationScope scope(p2p_identity(1));
     BOOST_CHECK_THROW(w.channel.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0),
                       std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(an_ack_arriving_before_any_data_is_skipped_not_mistaken_for_a_message) {
+    // A standalone ack is the first thing that reaches a rank on a link it has not yet received
+    // anything over -- which is the normal case, not a corner one: acks travel the direction
+    // that carries no data, so the receiving side's sequence is still zero when the first one
+    // lands. It has to be skipped on its own merits. Falling through to the dedup path happens
+    // to swallow later acks (their sequence is behind), which is why this case has to use the
+    // FIRST one: at sequence zero the ack looks new, and a receiver that does not recognise it
+    // as an ack compares it against the operation it is waiting for and reports a spurious
+    // identity mismatch on a perfectly correct exchange.
+    Wire w(true);
+    char ack[frame_header_bytes];
+    encode_header(make_ack(0), ack);
+    w.poke(ack, sizeof ack);
+
+    FrameHeader data = wire_p2p(0, 4);
+    char hdr[frame_header_bytes];
+    encode_header(data, hdr);
+    w.poke(hdr, sizeof hdr);
+    const int payload = 31415;
+    w.poke(&payload, sizeof payload);
+
+    int got = 0;
+    OperationScope scope(p2p_identity(1));
+    BOOST_CHECK_NO_THROW(w.channel.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0));
+    BOOST_CHECK_EQUAL(got, 31415);
+}
+
+BOOST_AUTO_TEST_CASE(an_ack_frame_carrying_a_payload_is_reported_as_malformed_not_as_divergence) {
+    // The one malformed frame the identity check cannot catch on its own -- and the reason this
+    // case asserts on WHICH error, not merely that one occurred. An ack is skipped before
+    // identity is ever consulted, so a receiver that ignored the decode status would step over
+    // this frame and parse its smuggled payload as the next frame's header. That desynchronised
+    // read then fails the identity check, so the receive still throws; it simply blames the
+    // wrong thing, reporting a peer executing a different operation when the truth is a
+    // malformed frame and a stream that is now off by four bytes. Checking only for an
+    // exception here leaves the decode check untested, which is exactly what mutation testing
+    // showed before this assertion was tightened.
+    Wire w(true);
+    FrameHeader forged = make_ack(0);
+    forged.payload_length = 4;
+    forged.total_length = 4;
+    char hdr[frame_header_bytes];
+    encode_header(forged, hdr);
+    w.poke(hdr, sizeof hdr);
+    const int smuggled = 0x41414141;
+    w.poke(&smuggled, sizeof smuggled);
+    // A legitimate frame behind it, so a receiver that desynchronised would find plausible
+    // bytes rather than simply blocking.
+    FrameHeader good = wire_p2p(0, 4);
+    char good_hdr[frame_header_bytes];
+    encode_header(good, good_hdr);
+    w.poke(good_hdr, sizeof good_hdr);
+    const int payload = 7;
+    w.poke(&payload, sizeof payload);
+
+    int got = 0;
+    OperationScope scope(p2p_identity(1));
+    std::string reported;
+    try {
+        w.channel.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+    } catch (const std::exception& e) {
+        reported = e.what();
+    }
+    BOOST_REQUIRE_MESSAGE(!reported.empty(), "a malformed ack was accepted");
+    BOOST_CHECK_MESSAGE(reported.find("malformed frame") != std::string::npos,
+                        "the frame was not reported as malformed: " << reported);
+    BOOST_CHECK_MESSAGE(reported.find("identity mismatch") == std::string::npos,
+                        "a malformed frame was blamed on the peer diverging: " << reported);
+    BOOST_CHECK_MESSAGE(got != smuggled, "the ack's smuggled payload was delivered");
 }
 
 BOOST_AUTO_TEST_CASE(a_replayed_frame_is_discarded_rather_than_delivered_as_the_next_message) {

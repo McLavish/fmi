@@ -14,6 +14,14 @@ Subject: a ~60-line non-FMI program that increments a counter to a file, optiona
 mutex on a second thread and an established loopback TCP connection with both ends inside the
 process. Deliberately not linked against FMI, so nothing here depends on the library.
 
+**Superseded in part.** These are mechanism results on a toy. A real FMI rank has since been
+checkpointed and restored mid-collective — see `runbooks/criu-transparent-checkpoint`, which
+verifies an unmodified FMI program end to end and is the stronger evidence. The findings below
+still stand as the mechanism they rest on, and #2 in particular is still what rules out
+same-host frozen-original abort recovery. What the toy could NOT show, and the FMI runbook did:
+a restored rank dies of `SIGPIPE` inside hiredis on its first post-restore registry command,
+because the toy owned no library-managed sockets.
+
 ## Results
 
 | # | Question | Result |

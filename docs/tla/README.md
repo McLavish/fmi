@@ -413,6 +413,22 @@ A fourth module composing a 2-rank divergent schedule over two sequenced links w
 incarnation change would be the highest-value next piece of work. Nothing in the current three
 substitutes for it.
 
+**Partially closed by implementation tests, which are evidence but not proof.** The third
+bullet — identity validation applied to a *replayed* frame — is now exercised directly against
+the real transport by
+`CheckpointFreezePoints/identity_is_still_enforced_on_a_frame_that_arrives_by_replay`: a frame
+is put on the wire a second time after a repair, belonging to a different logical operation
+than the one the receiver awaits, and is refused rather than delivered. That is one path
+through the composition, chosen because it is the one where a frame reaches the receiver
+without the sender having just produced it. It says nothing about the first two bullets, and a
+test over one path is not a check over all of them.
+
+The freeze positions this file lists as abstracted away (partial egress, partial parse) are
+likewise covered only by implementation tests — and that abstraction hid a real defect: the
+transport advanced its receive watermark at header-parse time, so a freeze between a header and
+its payload let the peer prune a message it had never delivered. See
+`docs/superpowers/specs/2026-07-30-sequenced-links-implementation.md`, rule R1.
+
 ### `MessageIdentity`
 
 * **No migration, no epoch, no incarnation, no counter reset.** Consequence: `message_id`

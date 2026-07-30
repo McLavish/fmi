@@ -209,4 +209,29 @@ BOOST_AUTO_TEST_CASE(a_snapshot_carries_the_lineage_it_was_taken_in) {
     BOOST_CHECK_EQUAL(restored.next_received(), link.next_received());
 }
 
+BOOST_AUTO_TEST_CASE(the_handshake_a_survivor_offers_tells_a_zombie_it_has_been_replaced) {
+    // Round trip of the field a superseded process learns its fate from. Every case above
+    // hand-builds the peer's handshake, which checks how one is READ and nothing about how one
+    // is WRITTEN -- and this field is only ever read by the other end, so omitting it is
+    // invisible from either side alone.
+    SequencedLink survivor(small_config());
+    survivor.set_incarnation(7);
+    HandshakePayload replacement;
+    replacement.incarnation = 1;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(survivor.reconcile(replacement, error), error);
+
+    const HandshakePayload offered = survivor.local_handshake();
+    BOOST_CHECK_MESSAGE(offered.peer_incarnation == 1u,
+                        "the survivor's handshake does not say which lineage it reconciled with");
+
+    // The zombie -- incarnation 0 of the same rank, still running -- reads exactly that
+    // handshake. Nothing else in it marks the zombie as stale: the survivor's own incarnation
+    // is ahead of what the zombie recorded, which on its own reads as "my peer restarted".
+    SequencedLink zombie(small_config());
+    zombie.set_incarnation(0);
+    BOOST_CHECK_MESSAGE(!zombie.reconcile(offered, error),
+                        "a superseded process accepted a handshake that named its replacement");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

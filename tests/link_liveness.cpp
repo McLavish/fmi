@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <map>
 #include <string>
+#include <thread>
 
 using namespace FMI::Comm;
 
@@ -205,6 +206,73 @@ BOOST_AUTO_TEST_CASE(a_one_way_collective_pattern_survives_three_ranks) {
     for (int i = 0; i < num_peers; i++) {
         BOOST_CHECK_MESSAGE(ok[i] == 1, "rank " << i << " did not complete the one-way chain");
     }
+}
+
+BOOST_AUTO_TEST_CASE(the_window_is_the_bound_on_unreceived_sends_and_it_fails_loudly) {
+    // The one behavioural limit framing imposes that the unframed transport did not have.
+    // Unframed, "how many messages may a rank send before its peer receives any" was bounded
+    // by the kernel socket buffer, which for small messages is effectively unbounded. Framed
+    // with recovery, it is bounded by link_window_frames, because every unacknowledged send is
+    // retained. Exceeding it must be a loud, immediate error naming the link -- never a hang,
+    // and never a silently dropped message.
+    constexpr int num_peers = 2;
+    const std::string name = unique_comm("window");
+    int* ok = shared_flags(num_peers);
+    int* loud = shared_flags(1);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    ok[peer_id] = 0;
+    if (peer_id == 0) { loud[0] = 0; }
+
+    try {
+        // A short deadline: the sender waits it out collecting acks that will never come, and
+        // that wait is the duration of this case.
+        auto params = one_way_params();
+        params["max_timeout"] = "2000";
+        auto ch = Channel::get_channel("DirectTCP", params, model_params());
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(name);
+
+        if (peer_id == 0) {
+            // One exchange first, because DirectTCP builds links lazily: a peer that never does
+            // any I/O never connects, and the sender would fail establishing rather than
+            // filling its window. Then the window (4, from one_way_params) fills.
+            int sent = 0;
+            try {
+                for (int i = 0; i < 64; i++) {
+                    OperationScope scope(p2p_identity(1));
+                    ch->send({reinterpret_cast<char*>(&i), sizeof(i)}, 1);
+                    sent++;
+                }
+            } catch (const std::exception& e) {
+                const std::string what = e.what();
+                loud[0] = what.find("retention limit") != std::string::npos
+                          && what.find("peer 1") != std::string::npos;
+            }
+            // The first message is acknowledged, so a full window fits behind it.
+            ok[0] = (sent >= 5);
+        } else {
+            // Takes delivery of exactly one message, so the link exists, and then stops
+            // receiving. Nothing after that can prune the sender's retention.
+            int got = -1;
+            OperationScope scope(p2p_identity(1));
+            ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+            ok[1] = (got == 0);
+        }
+        ch->finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "a whole window of unreceived sends must be admitted");
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "the idle peer did not take its one message");
+    BOOST_CHECK_MESSAGE(loud[0] == 1,
+                        "exceeding the window must fail loudly, naming the link -- not hang");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
