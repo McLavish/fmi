@@ -59,6 +59,10 @@ namespace {
         //! Descriptors handed to the channels, which own and will close them.
         std::vector<int> issued;
 
+        //! When set, every checkout yields a socket whose far end is already gone, so each
+        //! repair attempt immediately fails again. Models a peer that has left for good.
+        bool peer_is_gone = false;
+
         //! Destroy the connection and put a fresh one in its place.
         /*!
          * shutdown() rather than close(): it tears the connection down so the channels' next
@@ -82,6 +86,13 @@ namespace {
         int checkout(int side) {
             std::lock_guard<std::mutex> g(mu);
             BOOST_REQUIRE(ends[side] >= 0);
+            if (peer_is_gone) {
+                int dead[2];
+                BOOST_REQUIRE_EQUAL(socketpair(AF_UNIX, SOCK_STREAM, 0, dead), 0);
+                ::close(dead[1]);          // nothing will ever answer on this link
+                issued.push_back(dead[0]);
+                return dead[0];
+            }
             const int fd = ::dup(ends[side]);
             issued.push_back(fd);
             return fd;
@@ -280,6 +291,26 @@ BOOST_AUTO_TEST_CASE(a_malformed_handshake_is_rejected_rather_than_reconciled) {
     }
     victim.join();
     BOOST_CHECK_MESSAGE(rejected.load() == 1, "a malformed handshake was accepted");
+}
+
+BOOST_AUTO_TEST_CASE(a_peer_that_never_returns_fails_loudly_instead_of_repairing_forever) {
+    // Failure detection belongs to the orchestrator, but that is not the same as spinning on
+    // repair. A link that cannot be re-established must give up and say so, bounded.
+    Switchboard board;
+    PairedChannel rx(board, 1, 1, 2);
+    board.peer_is_gone = true;
+    board.sever();
+
+    OperationScope scope(p2p_identity(1));
+    int got = 0;
+    const auto started = std::chrono::steady_clock::now();
+    BOOST_CHECK_THROW(rx.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0),
+                      std::runtime_error);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    // Bounded by the repair budget rather than by the socket timeout alone.
+    BOOST_CHECK_MESSAGE(elapsed < std::chrono::seconds(20),
+                        "giving up took " <<
+                        std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() << "s");
 }
 
 #if FMI_ENABLE_REDIS
