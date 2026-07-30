@@ -19,10 +19,13 @@ transport used to.
 This is a deliberate staging choice, not an oversight. It buys message identity (contract 1)
 and transport durability (contract 2) without the one-way door the design flags — the engine
 "is the irreversible commitment point" — and it carries an arbitrary FMI program across a real
-checkpoint at two ranks.
+checkpoint.
 
-It does **not** carry one reliably above two ranks: see [the open deadlock](#open-a-job-deadlocks-when-a-rank-is-checkpointed-at-three-ranks-or-more),
-which is the price of not having the engine and is diagnosed there.
+Above two ranks that took five rounds and one idea: **a rank that is waiting must keep meeting
+every obligation it has.** See [what it took](#checkpointing-above-two-ranks-what-it-took).
+What is *not* here is the rest of what the engine would buy — replay proceeding while the
+application computes, CREDIT, non-blocking egress — listed under [what the blocking shape cannot
+do](#what-the-blocking-shape-cannot-do).
 
 It also costs things, listed under [What the blocking shape cannot
 do](#what-the-blocking-shape-cannot-do).
@@ -155,143 +158,42 @@ injected faults still in place — every test varied two fields at once, so some
 always caught the break and no test pinned what it appeared to. Any new claim in the table
 above should arrive with a mutation that the new test kills.
 
-## Open: a job deadlocks when a rank is checkpointed at three ranks or more
+## Checkpointing above two ranks: what it took
 
-**Not fixed. Diagnosed.** This is the largest gap between what the runbook claims and what it
-delivers, and it is a design-level defect in lazy establishment, not a coding slip.
+Five rounds. Each removed something real that a rank inside establishment failed to do, and the
+first four left the failure rate untouched at 7 of 10 — which is exactly why the fifth is
+stated as one idea rather than five patches.
 
-### What was measured
-
-`runbooks/criu-transparent-checkpoint/sweep.py` on this host:
-
-| shape | trials | passed | fixes in this section |
+| # | what a waiting rank was not doing | fix | 4-peer rate |
 | --- | --- | --- | --- |
-| 2 peers, one checkpoint | 10 | **10** | after |
-| 4 peers, one checkpoint | 10 | 7 | after |
-| 8 peers, one checkpoint | 8 | 6 | after |
-| 8 peers, one checkpoint | 6 | 4 | before |
-| 3 and 4 peers, up to 3 checkpoints | 8 valid | 6 | before |
-| 4 peers, 256 KiB messages | 8 | 6 | before |
-| 4 peers, checkpoint during mesh establishment | 8 | 4 | before |
+| 1 | reading its other links | `service_established_links` drains whole frames | 7/10 |
+| 2 | reconciling a link the peer replaced | `note_link_replaced` + `TCP_INFO` liveness in `accept_one` | 7/10 |
+| 3 | tolerating a half-read message | a partial read that stalls is a broken link, not silence | 7/10 |
+| 4 | letting the peer's handshake through | handshake carried as a frame, one way | 7/10 |
+| 5 | **accepting, and finishing the accept** | `pump` + `adopt_link` | **10/10** |
 
-**The rate did not move**, and that is the point of the last column: the two fixes below
-address real defects, and neither is this one. Only two ranks is clean.
+**The idea:** a rank that is waiting must keep meeting every obligation it has.
 
-A failing trial ends with every rank throwing `Timeout` after its full deadline, the restored
-rank having logged nothing since its restore.
+Every blocking read and write now goes through `pump()`, which polls the descriptor the caller
+needs in short slices and, between them, services the listener and drains the rank's other
+links. And `DirectTCP::service_transport` no longer merely *accepts* — accepting into
+`pending_links` and leaving it until the application next talks to that peer is a deadlock, not
+a delay, because the peer at the far end has already sent its handshake down that connection and
+is waiting for the reply. `adopt_link` completes it: the descriptor becomes the rank's socket for
+that peer and, if the link was marked for reconciliation, gets its handshake and replay there
+and then.
 
-### The mechanism
+**This is the progress engine's property without its thread.** The design specifies an
+autonomous component owning every socket; what the deadlock actually needed was not concurrency
+but the guarantee that waiting is never exclusive. Keeping it single-threaded and cooperative
+preserves the lock-free link state and the `thread_local` operation scope exactly as they were,
+and it is reversible in a way the engine is not. The engine's *other* benefits — replay
+proceeding while the application computes, CREDIT, non-blocking egress — are still absent; see
+below.
 
-A wedged 4-rank job, caught live (`ss` plus `/proc/<pid>/wchan`), shows:
-
-* rank 0 and the restored rank blocked in `poll` — both inside `build_mesh`, each establishing
-  one link;
-* the other two blocked in a socket read;
-* **and data sitting unread on connections nobody is looking at**: 76 bytes (one whole frame)
-  queued for rank 0, 56 bytes (one whole handshake) queued for another rank, 504 for a third.
-
-Every rank is waiting, and every rank is holding something another rank needs.
-
-`build_mesh` blocks the entire rank while it establishes ONE link, servicing only its listener
-meanwhile — it does not read any of its other, already-established links. Before a checkpoint
-that is safe, and `build_mesh` says why: a rank only ever waits for a *higher* rank to connect
-to it, so the wait-for relation runs strictly upward and cannot close a cycle.
-
-**A restore breaks that argument.** Several links must be rebuilt at once, and the order in
-which each rank gets round to rebuilding each one is driven by its own collective schedule, not
-by rank order. The wait-for relation is no longer upward-only, and it closes.
-
-### Narrowed, by draining the other links
-
-A rank inside `build_mesh` now takes whole frames off its *other* established links
-(`TcpChannelBase::service_established_links`) into the per-lane drain queues, and `recv_object`
-prefers a queued frame to the socket — a frame buffered that way is older than anything still
-on the wire, so delivering the socket first would reorder the stream. Only complete frames are
-taken, so a link is never left half-read.
-
-The drain's *mechanism* is pinned by
-`CheckpointFreezePoints/a_frame_taken_while_establishing_another_link_is_still_delivered`, which
-severs the socket after the drain so a delivery can only have come from the queue. Its *call
-site* is **not**: deleting `service_established_links(target)` from `build_mesh` survives the
-whole suite, because the drain only has an observable effect while a rank is genuinely blocked
-in establishment with a peer sending to it — the same race that deadlocks, and so the same thing
-that resists a deterministic test. The mutation is kept in the sweep as a known survivor rather
-than dropped.
-
-**Measured effect on the pass rate: none** — 4 peers stayed at 6–7 of 10, which is the point.
-**Measured effect on a wedged job: every data link drains to zero.** Before, a wedged 4-rank
-job held whole frames on three separate links. After, `ss` shows `rq=0` everywhere except one
-link holding exactly 56 bytes — a **handshake**, which is the one thing `service_established_links`
-cannot consume, because a link awaiting reconciliation opens with a bare handshake preamble
-rather than a frame and only the blocking `exchange_handshake` inside `check_socket` can read it.
-
-So the remaining cycle is: rank A is establishing link X; rank B has offered A a handshake on a
-replaced link and is blocked in `exchange_handshake` waiting for A's in return; A will not
-handshake with B until it finishes with X.
-
-### Three fixes in, and what they proved
-
-Each one removed a real thing that piled up during establishment, and each time the job still
-deadlocked — on the next thing down.
-
-1. **Frames piled up.** A rank inside `build_mesh` read none of its other links.
-   Fixed: `service_established_links` takes whole frames into the drain queues.
-   *Result: every data link now drains to zero on a wedged job. Still deadlocks.*
-2. **Handshakes blocked.** A rank re-establishing wrote its handshake and blocked reading the
-   peer's, which needs both ends at the new connection at once. Fixed: the handshake is a
-   frame, one way, consumed by any reader.
-   *Result: no unread bytes anywhere on a wedged job. Still deadlocks — 4 peers, 7 of 10,
-   unchanged to the trial.*
-3. **Nobody accepts.** With a wedged 4-rank job photographed under the fixed transport: the
-   restored rank sits in `poll` inside `build_mesh`, its three peers sit in socket reads, and
-   **not one byte is queued anywhere**. `DirectTCP::accept_one` only ever runs inside
-   `build_mesh`. A rank blocked in a *read* accepts nothing — so the restored rank's connect
-   reaches the listen backlog and is never acknowledged, while the peer that would acknowledge
-   it is blocked reading a link that depends on the restored rank.
-
-**That third one is the engine, and this is the evidence that it is not optional.** Fixing it
-means servicing the listener from inside a blocking read — which is to say, a component that
-owns every socket and never blocks the rank on one of them. Each fix above is a partial
-re-implementation of that component, and the returns say so: three rounds, three real defects,
-the same failure rate.
-
-The design calls the progress engine "the irreversible commitment point" and stages it
-deliberately. This section is the empirical case for taking that step: the blocking,
-application-threaded transport can carry message identity and durability, and it can survive a
-checkpoint at two ranks, but it cannot service a mesh while any rank is waiting on part of it.
-
-### What was fixed along the way, and what was not
-
-Two real defects found while chasing this, both fixed and both worth having regardless:
-
-* `DirectTCP::accept_one` rejected a reconnect from any rank it still held a descriptor for,
-  alive or not. It now probes `TCP_INFO` and replaces a socket that is no longer ESTABLISHED,
-  marking the link so the next establishment reconciles rather than starting clean.
-* `read_all` reported a *partial* read that then stalled as `Timeout` — a soft condition — even
-  though the bytes already taken are gone from the stream and every subsequent frame boundary
-  is off by that many. It now reports a broken link, which is true and recoverable.
-
-Neither closes the deadlock, because neither changes the fact that a rank inside `build_mesh`
-reads nothing else.
-
-An attempt to fix it by making the handshake one-way and asynchronous was **reverted**: it made
-the failure rate worse (2 of 8 passing) and introduced stream desynchronisation through exactly
-the partial-read path described above.
-
-### What would close it
-
-The design's own answer, and it needs both halves:
-
-* **a progress engine** — one component owning every socket, never blocking the rank on a
-  single link, so a rank rebuilding one link keeps draining the others;
-* **directory-driven repair** — a rank closes and re-establishes on *observing* a peer's
-  incarnation change, rather than waiting to trip over a dead descriptor.
-
-The design document states both as normative and explains that the machine-checked delivery
-result depends on the second. Neither is implemented, and the deadlock is the price.
-
-**Until then: the checkpoint story is verified at two ranks and deadlocks intermittently above
-that.**
+Found by photographing a wedged 4-rank job (`ss` plus `/proc/*/wchan`) at each stage. The last
+one was unambiguous: all four ranks in `poll`, and exactly 128 bytes — one handshake frame —
+unread on a connection that had been accepted but never adopted.
 
 ## What the blocking shape cannot do
 
