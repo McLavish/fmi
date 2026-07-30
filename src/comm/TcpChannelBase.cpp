@@ -189,18 +189,62 @@ std::string FMI::Comm::TcpChannelBase::link_name(Utils::peer_num partner_id, boo
     return comm_name + "|" + std::to_string(low) + "-" + std::to_string(high);
 }
 
+bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long deadline_ms) {
+    // Re-entrancy guard: servicing reads frames, which reads bytes, which pumps. One level of
+    // that is the point; two would recurse without bound.
+    if (pumping) {
+        struct pollfd solo{sockets[peer], events, 0};
+        const long solo_wait = std::max<long>(deadline_ms - steady_now_ms(), 0);
+        return ::poll(&solo, 1, static_cast<int>(solo_wait)) > 0;
+    }
+    pumping = true;
+    struct Guard {
+        bool& flag;
+        ~Guard() { flag = false; }
+    } guard{pumping};
+
+    while (true) {
+        struct pollfd want{sockets[peer], events, 0};
+        // A short slice, not the whole deadline: the listener and the other links have to be
+        // looked at even while this descriptor stays quiet, and they are not pollable from
+        // here (the listener belongs to the subclass).
+        const long remaining = deadline_ms - steady_now_ms();
+        if (remaining <= 0) {
+            return false;
+        }
+        const int slice = static_cast<int>(std::min<long>(remaining, 20));
+        const int ready = ::poll(&want, 1, slice);
+        if (ready > 0) {
+            return true;
+        }
+        if (ready < 0 && errno != EINTR) {
+            return false;
+        }
+        // Nothing yet on the descriptor we need. Pay what we owe everyone else.
+        service_transport();
+        service_established_links(peer);
+    }
+}
+
 void FMI::Comm::TcpChannelBase::write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len) {
     // MSG_NOSIGNAL: a peer that closed mid-migration must surface as EPIPE, not kill the
     // process with SIGPIPE. Loop: a blocking send under SO_SNDTIMEO may accept only part of
     // a large buffer, and a silent short send would desynchronize the byte stream.
     std::size_t sent = 0;
+    const long deadline = steady_now_ms() + static_cast<long>(max_timeout);
     while (sent < len) {
-        long n = ::send(sockets[rcpt_id], data + sent, len - sent, MSG_NOSIGNAL);
+        long n = ::send(sockets[rcpt_id], data + sent, len - sent,
+                        MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n == -1) {
             if (errno == EINTR) {
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // The socket is full. Wait for room while still serving everyone else; a rank
+                // that stopped accepting here would deadlock a peer trying to re-establish.
+                if (pump(rcpt_id, POLLOUT, deadline)) {
+                    continue;
+                }
                 throw Utils::Timeout();
             }
             throw std::runtime_error(transport_tag + ": send to peer " + std::to_string(rcpt_id) +
@@ -217,8 +261,9 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
     // MSG_WAITALL under SO_RCVTIMEO can legitimately return a partial chunk on timeout, so
     // loop while progress is made and only throw Timeout when a call yields nothing.
     std::size_t received = 0;
+    const long deadline = steady_now_ms() + static_cast<long>(max_timeout);
     while (received < len) {
-        long n = ::recv(sockets[sender_id], data + received, len - received, MSG_WAITALL);
+        long n = ::recv(sockets[sender_id], data + received, len - received, MSG_DONTWAIT);
         if (n == 0) {
             if (received == 0 && eof_before_data_is_timeout && !recover_links) {
                 throw Utils::Timeout();
@@ -232,6 +277,11 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Nothing here yet. Wait for it while serving every other obligation, which is
+                // what stops a rank waiting on one link from starving the rest of the mesh.
+                if (pump(sender_id, POLLIN, deadline)) {
+                    continue;
+                }
                 if (received > 0) {
                     // Half a message came and the rest did not. "Nothing arrived in time" is
                     // both the wrong thing to say and the wrong thing to do: the bytes already
@@ -565,6 +615,25 @@ void FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) 
                 break;   // the receive path owns repair; leave this link to it
             }
         }
+    }
+}
+
+void FMI::Comm::TcpChannelBase::adopt_link(Utils::peer_num partner_id, int fd) {
+    if (sockets.empty()) {
+        sockets = std::vector<int>(num_peers, -1);
+    }
+    if (partner_id >= sockets.size() || sockets[partner_id] >= 0) {
+        return;   // already hold one; the caller keeps its descriptor
+    }
+    sockets[partner_id] = fd;
+    apply_socket_options(fd);
+    if (!recover_links) {
+        return;
+    }
+    ensure_link_state();
+    if (partner_id < link_needs_reconcile.size() && link_needs_reconcile[partner_id]) {
+        link_needs_reconcile[partner_id] = 0;
+        exchange_handshake(partner_id);
     }
 }
 

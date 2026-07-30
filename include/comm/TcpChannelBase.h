@@ -79,6 +79,32 @@ namespace FMI::Comm {
         //! Called by finalize() and prepare_for_checkpoint(), after the peer sockets are closed.
         virtual void close_transport_state() {}
 
+        //! Do whatever the transport owes its peers right now, without blocking.
+        /*!
+         * A rank waiting for one link must keep serving every other obligation it has, or the
+         * job deadlocks the moment more than one link needs attention at once. For a
+         * listener-based transport that means accepting connections: a rank blocked in a read
+         * accepts nothing otherwise, so a peer trying to re-establish sits in the backlog
+         * unanswered while the rank that would answer it waits on a link that peer is part of.
+         *
+         * Called from inside every blocking read and write. Must return promptly and must not
+         * throw: it runs while another operation is in flight, and that operation owns the
+         * error reporting.
+         */
+        virtual void service_transport() {}
+
+        //! Wait for @p fd to become ready, serving every other obligation meanwhile.
+        /*!
+         * The single place the transport ever waits. Polls the descriptor the caller needs
+         * alongside everything else this rank owes — incoming connections, and frames on its
+         * other links — so waiting is cooperative rather than exclusive. Returns false when the
+         * deadline passes with @p fd still not ready.
+         */
+        bool pump(Utils::peer_num peer, short events, long deadline_ms);
+
+        //! True while pump() is servicing, so servicing cannot recurse into itself.
+        bool pumping = false;
+
         //! Ensure a connection to @p partner_id exists, establishing it on first use.
         void check_socket(Utils::peer_num partner_id, const std::string& name);
 
@@ -168,6 +194,17 @@ namespace FMI::Comm {
          * to the socket. A link that fails here is left alone: the receive path owns repair.
          */
         void service_established_links(Utils::peer_num skip);
+
+        //! Take ownership of a connection the transport accepted on its own initiative.
+        /*!
+         * Accepting is not enough. A connection that is merely parked until the application
+         * next happens to talk to that peer is a connection nobody reads — and the peer at the
+         * other end has already sent its handshake down it and is waiting for ours. Adopting
+         * completes the link there and then: the descriptor becomes this rank's socket for that
+         * peer, and if the link was marked for reconciliation it gets its handshake and replay,
+         * exactly as if this rank had re-established it itself.
+         */
+        void adopt_link(Utils::peer_num partner_id, int fd);
 
         //! Record that the connection to @p partner_id was replaced, not merely established.
         /*!

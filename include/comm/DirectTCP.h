@@ -64,6 +64,15 @@ namespace FMI::Comm {
          */
         int establish(Utils::peer_num partner_id, const std::string& link_name) override;
 
+    //! Accept whatever is waiting on the listener, right now, without blocking.
+    /*!
+     * Called from inside every blocking read and write, because accepting only from
+     * build_mesh is what leaves a re-establishing peer stuck in the backlog while the rank
+     * that would answer it is busy waiting on a link that peer is part of. That is the last
+     * of the deadlocks a checkpoint at three ranks or more used to produce.
+     */
+    void service_transport() override;
+
         void close_transport_state() override;
 
         //! Also drops the cached listener registration, so the rank re-publishes under the new

@@ -694,6 +694,44 @@ bool FMI::Comm::DirectTCP::accept_one() {
     return true;
 }
 
+void FMI::Comm::DirectTCP::service_transport() {
+    if (listen_fd < 0) {
+        return;
+    }
+    // Bounded, and never blocking: accept_one() returns false the moment the backlog is empty,
+    // and this runs inside somebody else's operation.
+    for (int accepted = 0; accepted < 16; accepted++) {
+        try {
+            if (!accept_one()) {
+                break;
+            }
+        } catch (const std::exception&) {
+            break;   // the operation in flight owns error reporting, not this
+        }
+    }
+
+    // Adopt anything accepted for a link this rank does not currently hold. Leaving it parked
+    // until the application next talks to that peer means its handshake sits unread while the
+    // peer waits for ours — which is a deadlock, not a delay, when that peer is what this rank
+    // is ultimately waiting on.
+    for (auto it = pending_links.begin(); it != pending_links.end();) {
+        const Utils::peer_num rank = it->first;
+        const int fd = it->second;
+        const bool unheld = sockets.empty() || (rank < sockets.size() && sockets[rank] < 0);
+        if (unheld && fd >= 0) {
+            it = pending_links.erase(it);
+            try {
+                adopt_link(rank, fd);
+            } catch (const std::exception&) {
+                // Its handshake could not go out; the receive path will find the link broken
+                // and repair it, which is that path's job and not this one's.
+            }
+        } else {
+            ++it;
+        }
+    }
+}
+
 void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) {
     ensure_listener();
 
