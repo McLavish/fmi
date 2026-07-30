@@ -5,7 +5,8 @@
 
 namespace {
     //! Snapshot format tag. Bumped whenever the serialization below changes shape.
-    constexpr char snapshot_version = '1';
+    //! '2' added the incarnation pair.
+    constexpr char snapshot_version = '2';
 }
 
 bool FMI::Comm::SequencedLink::send_blocked() const {
@@ -167,6 +168,8 @@ FMI::Comm::SequencedLink::local_handshake(std::uint64_t policy_fingerprint) cons
     h.next_expected_seq = next_recv;
     h.lowest_retained = lowest_retained();
     h.policy_fingerprint = policy_fingerprint;
+    h.incarnation = local_incarnation;
+    h.peer_incarnation = peer_incarnation;
     return h;
 }
 
@@ -174,6 +177,30 @@ bool FMI::Comm::SequencedLink::reconcile(const HandshakePayload& peer, std::stri
     if (peer.wire_version != frame_wire_version) {
         error = "handshake wire version mismatch";
         return false;
+    }
+    // Lineage before sequences: a fresh incarnation's counters are legitimately zero, and the
+    // sequence checks below would read that as a peer which had forgotten what we still owe.
+    if (peer.incarnation < peer_incarnation) {
+        error = "peer claims incarnation " + std::to_string(peer.incarnation)
+                + " which incarnation " + std::to_string(peer_incarnation)
+                + " has already superseded";
+        return false;
+    }
+    if (peer.peer_incarnation > local_incarnation) {
+        // The peer has already reconciled with a later incarnation of *this* rank, so this
+        // process is the zombie. It must not be allowed to serve the rank alongside its
+        // replacement.
+        error = "peer is talking to incarnation " + std::to_string(peer.peer_incarnation)
+                + " of this rank, but this process is incarnation "
+                + std::to_string(local_incarnation);
+        return false;
+    }
+    if (peer.incarnation > peer_incarnation) {
+        // The peer restarted from nothing. A delivery obligation is owed to a lineage, not to
+        // a rank number, so what we retained for its predecessor is discharged, not replayed.
+        reset_stream();
+        peer_incarnation = peer.incarnation;
+        return true;
     }
     if (peer.next_expected_seq > next_send) {
         error = "peer expects sequence " + std::to_string(peer.next_expected_seq)
@@ -196,7 +223,8 @@ bool FMI::Comm::SequencedLink::reconcile(const HandshakePayload& peer, std::stri
 
 std::string FMI::Comm::SequencedLink::snapshot() const {
     std::ostringstream out;
-    out << snapshot_version << ' ' << next_send << ' ' << next_recv << ' ' << ack_safe_seq;
+    out << snapshot_version << ' ' << next_send << ' ' << next_recv << ' ' << ack_safe_seq
+        << ' ' << local_incarnation << ' ' << peer_incarnation;
     return out.str();
 }
 
@@ -207,14 +235,16 @@ bool FMI::Comm::SequencedLink::seed(const std::string& blob) {
     if (!in || version != snapshot_version) {
         return false;
     }
-    std::uint64_t send = 0, recv = 0, safe = 0;
-    in >> send >> recv >> safe;
+    std::uint64_t send = 0, recv = 0, safe = 0, mine = 0, theirs = 0;
+    in >> send >> recv >> safe >> mine >> theirs;
     if (!in) {
         return false;
     }
     next_send = send;
     next_recv = recv;
     ack_safe_seq = safe;
+    local_incarnation = mine;
+    peer_incarnation = theirs;
     // Nothing has been told to the peer over the link this state is being seeded onto.
     acked_to_peer = 0;
     return true;

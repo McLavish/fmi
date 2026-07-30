@@ -213,6 +213,13 @@ struct FMI::FT::ControlPlane::Impl {
         return prefix() + "boundaries";
     }
 
+    //! Job-scoped, deliberately NOT epoch-scoped: an incarnation fences a lineage across every
+    //! epoch it lives through, and a per-epoch counter would hand a rank's second replacement
+    //! the number its first one already used.
+    [[nodiscard]] std::string incarnations_key() const {
+        return prefix() + "incarnations";
+    }
+
     [[nodiscard]] std::string members_key(std::uint64_t epoch) const {
         return prefix() + "epoch:" + std::to_string(epoch) + ":members";
     }
@@ -393,6 +400,33 @@ void FMI::FT::ControlPlane::join_epoch(std::uint64_t epoch, FMI::Utils::peer_num
     if (!placement.empty()) {
         set_placement(epoch, rank, placement);
     }
+}
+
+std::uint64_t FMI::FT::ControlPlane::claim_incarnation(FMI::Utils::peer_num rank) const {
+#if FMI_ENABLE_REDIS
+    // HINCRBY, so two processes racing to serve one rank cannot come away with the same
+    // number — which is the whole point: the loser must be recognisable as superseded.
+    auto reply = impl->command({"HINCRBY", impl->incarnations_key(), std::to_string(rank), "1"});
+    if (reply->type != REDIS_REPLY_INTEGER || reply->integer < 1) {
+        throw std::runtime_error("Could not claim an incarnation for rank " + std::to_string(rank));
+    }
+    // The first claimant is incarnation 0, so a job that never migrates carries zeroes and the
+    // lineage rules hold trivially.
+    return static_cast<std::uint64_t>(reply->integer) - 1;
+#else
+    (void) rank;
+    return 0;
+#endif
+}
+
+std::uint64_t FMI::FT::ControlPlane::current_incarnation(FMI::Utils::peer_num rank) const {
+#if FMI_ENABLE_REDIS
+    const std::uint64_t claimed = impl->hget_u64(impl->incarnations_key(), std::to_string(rank), 0);
+    return claimed == 0 ? 0 : claimed - 1;
+#else
+    (void) rank;
+    return 0;
+#endif
 }
 
 std::string FMI::FT::ControlPlane::placement_for_rank(std::uint64_t epoch, FMI::Utils::peer_num rank) const {

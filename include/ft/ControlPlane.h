@@ -83,6 +83,28 @@ namespace FMI::FT {
         //! Return the currently active communicator epoch.
         [[nodiscard]] std::uint64_t epoch() const;
 
+        //! Take the next incarnation for @p rank: which *lineage* of it this process is.
+        /*!
+         * Contract 3. A logical rank outlives the processes that serve it, and its peers need
+         * to distinguish three situations that look identical on the wire: the same process
+         * reconnecting, a checkpoint-restored process resuming with its link state intact, and
+         * a fresh replacement whose counters start at zero.
+         *
+         * Called exactly once per *process*, at Communicator construction, which is what makes
+         * it answer that question. A restored process never runs a constructor, so it keeps the
+         * incarnation its image was taken with and its peers reconcile with it. A replacement
+         * process does, so it gets a strictly higher one and its peers start the stream again.
+         * A survivor rejoining a later epoch also does not, because rejoining is not
+         * construction. The first process to serve a rank gets 0.
+         *
+         * Monotone per rank and independent across ranks; the counter outlives epochs, because
+         * a rank replaced twice must never reuse the number its first replacement fenced.
+         */
+        [[nodiscard]] std::uint64_t claim_incarnation(FMI::Utils::peer_num rank) const;
+
+        //! The incarnation currently serving @p rank, without taking one. 0 when never claimed.
+        [[nodiscard]] std::uint64_t current_incarnation(FMI::Utils::peer_num rank) const;
+
         //! Drop the Redis connection; the next command transparently reconnects. Used by the
         //! CRIU quiesce path to hold the control-plane socket closed between promotion polls,
         //! so the process image captured by `criu dump` contains no established TCP socket —

@@ -61,7 +61,8 @@ namespace FMI::Comm {
     inline constexpr std::uint32_t frame_magic = 0x32494D46u;
 
     //! Protocol generation. A framed rank must never interoperate with a raw one.
-    inline constexpr std::uint16_t frame_wire_version = 2;
+    //! 3 added the incarnation pair to the handshake (contract 3).
+    inline constexpr std::uint16_t frame_wire_version = 3;
 
     //! Serialized header size. Fixed: every frame starts with exactly this many bytes.
     /*!
@@ -308,9 +309,27 @@ namespace FMI::Comm {
         //! Hash over the job-wide policy inputs; a mismatch means the peers would choose
         //! different backends or algorithms, which shows up as a hang rather than an error.
         std::uint64_t policy_fingerprint = 0;
+        //! Which *lineage* of this logical rank is speaking (contract 3).
+        /*!
+         * A logical rank outlives the processes that serve it. The incarnation names the run
+         * of link state, not the rank: a process restored from a checkpoint carries the same
+         * incarnation, because it also carries the sequences and the retention buffer that
+         * make reconciliation meaningful. A replacement process that starts from nothing takes
+         * the next incarnation, because its counters start at zero and its peers must be told
+         * to start again too rather than diagnose a sequence gap.
+         */
+        std::uint64_t incarnation = 0;
+        //! The peer incarnation this side's link state was built against.
+        /*!
+         * Sent back so each end can tell "my peer restarted" (their incarnation is ahead of
+         * what I recorded) from "I am talking to a process that has already been superseded"
+         * (behind). Without it, a zombie that survived its own replacement reconciles
+         * perfectly well against sequences that no longer mean anything.
+         */
+        std::uint64_t peer_incarnation = 0;
     };
 
-    inline constexpr std::size_t handshake_bytes = 40;
+    inline constexpr std::size_t handshake_bytes = 56;
 
     inline void encode_handshake(const HandshakePayload& h, char* out) {
         std::size_t off = 0;
@@ -321,6 +340,8 @@ namespace FMI::Comm {
         detail::put_u64(out, off, h.next_expected_seq);
         detail::put_u64(out, off, h.lowest_retained);
         detail::put_u64(out, off, h.policy_fingerprint);
+        detail::put_u64(out, off, h.incarnation);
+        detail::put_u64(out, off, h.peer_incarnation);
     }
 
     inline DecodeStatus decode_handshake(const char* in, std::size_t available,
@@ -341,11 +362,17 @@ namespace FMI::Comm {
         out.next_expected_seq = detail::get_u64(in, off);
         out.lowest_retained = detail::get_u64(in, off);
         out.policy_fingerprint = detail::get_u64(in, off);
+        out.incarnation = detail::get_u64(in, off);
+        out.peer_incarnation = detail::get_u64(in, off);
         // The peer cannot expect a sequence we have not produced, and cannot have pruned past
         // what it still asks for. Both are impossible states rather than recoverable ones.
         if (out.lowest_retained > out.next_send_seq) {
             return DecodeStatus::Inconsistent;
         }
+        // Deliberately no cross-check between the two incarnations: a rank on its first
+        // lineage (incarnation 0) may perfectly well be talking to a peer already on its
+        // third, and the reverse. Only SequencedLink::reconcile, which knows what this side
+        // recorded, can judge the pair.
         return DecodeStatus::Ok;
     }
 }

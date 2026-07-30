@@ -219,6 +219,13 @@ namespace FMI {
         //! order (the usual MPI rule), so the same collective bears the same index everywhere,
         //! which is exactly what lets a receiver detect a peer executing a different one.
         std::uint64_t collective_counter = 0;
+        //! Which lineage of this rank this process is; see ControlPlane::claim_incarnation.
+        /*!
+         * Claimed once, in the constructor, and pushed into every channel as it is registered.
+         * Zero without fault tolerance, where a rank is served by exactly one process for the
+         * life of the job and the lineage rules are trivially satisfied.
+         */
+        std::uint64_t incarnation = 0;
 
         std::uint64_t next_collective_index() { return collective_counter++; }
 

@@ -108,6 +108,15 @@ namespace FMI::Comm {
          */
         void set_data_comm_name(std::string name) { data_comm_name = std::move(name); }
 
+        //! Which lineage of this rank the channel belongs to; see ControlPlane::claim_incarnation.
+        /*!
+         * A no-op for backends that keep no per-link state across a process replacement.
+         * Transports that do (the sequenced TCP link layer) use it to tell a restored peer,
+         * which they must reconcile with, from a replacement peer, which they must start
+         * again with, from a superseded one, which they must refuse.
+         */
+        virtual void set_incarnation(std::uint64_t) {}
+
         //! Called before communicator is destructed, can be used by channels to clean up (e.g., delete resources)
         /*!
          * Note that we provide an explicit finalize function on purpose (and do not use a virtual destructor),

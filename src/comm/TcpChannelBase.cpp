@@ -34,10 +34,22 @@ void FMI::Comm::TcpChannelBase::parse_tcp_params(std::map<std::string, std::stri
     }
 }
 
+void FMI::Comm::TcpChannelBase::set_incarnation(std::uint64_t value) {
+    local_incarnation = value;
+    // Links built before the incarnation arrived (none in normal use, since the Communicator
+    // sets it at registration) must not keep claiming to be lineage zero.
+    for (auto& link : links) {
+        link.set_incarnation(value);
+    }
+}
+
 void FMI::Comm::TcpChannelBase::ensure_link_state() {
     if (links.size() != num_peers) {
         links.assign(num_peers, SequencedLink({link_window_frames, link_max_frame_bytes,
                                                link_retention_limit_bytes}));
+        for (auto& link : links) {
+            link.set_incarnation(local_incarnation);
+        }
     }
 }
 

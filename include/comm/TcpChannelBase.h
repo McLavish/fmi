@@ -46,6 +46,8 @@ namespace FMI::Comm {
         bool reconfigure_for_epoch(const std::string& new_comm_name,
                                    const std::vector<FMI::Utils::peer_num>& moved_ranks) override;
 
+        void set_incarnation(std::uint64_t value) override;
+
     protected:
         //! Establish a connection to exactly @p partner_id.
         /*!
@@ -136,6 +138,9 @@ namespace FMI::Comm {
 
         //! Commits between standalone acks. Zero means "ack whenever anything is outstanding".
         std::uint32_t link_ack_interval = 32;
+
+        //! The lineage of this rank that owns the link state; see SequencedLink::set_incarnation.
+        std::uint64_t local_incarnation = 0;
 
         //! Exchange handshakes on a freshly established link and reconcile the sequences.
         void exchange_handshake(Utils::peer_num partner_id);

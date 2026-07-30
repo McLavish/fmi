@@ -17,7 +17,7 @@ import signal, subprocess, sys, os
 WT="/home/luca/fmi-sequenced-links"
 # Cheapest and most discriminating first: a killed mutation stops at the first failing suite,
 # so ordering decides whether the sweep takes forty minutes or four hours.
-SUITES=["LinkLayer","ProtocolValidation","OperationIdentity",
+SUITES=["LinkLayer","LinkIncarnations","ProtocolValidation","OperationIdentity",
         "CheckpointFreezePoints","LinkLiveness","LinkRecovery","TransportRecovery",
         "FramedTransport"]
 SUITE_TIMEOUT=180
@@ -129,6 +129,19 @@ MUTS = [
  ("ack_never_marked_sent","src/comm/SequencedLink.cpp",
   "    if (value > acked_to_peer) {\n        acked_to_peer = value;\n    }",""),
 
+ # --- contract 3: lineage ----------------------------------------------------------------
+ ("lineage_ignores_a_superseded_peer","src/comm/SequencedLink.cpp",
+  "    if (peer.incarnation < peer_incarnation) {","    if (false) {"),
+ ("lineage_ignores_our_own_replacement","src/comm/SequencedLink.cpp",
+  "    if (peer.peer_incarnation > local_incarnation) {","    if (false) {"),
+ ("lineage_does_not_reset_the_stream","src/comm/SequencedLink.cpp",
+  "        reset_stream();\n        peer_incarnation = peer.incarnation;","        peer_incarnation = peer.incarnation;"),
+ ("handshake_omits_our_lineage","src/comm/SequencedLink.cpp",
+  "    h.incarnation = local_incarnation;","    h.incarnation = 0;"),
+ ("handshake_omits_the_peer_lineage","src/comm/SequencedLink.cpp",
+  "    h.peer_incarnation = peer_incarnation;","    h.peer_incarnation = 0;"),
+ ("snapshot_drops_the_lineage","src/comm/SequencedLink.cpp",
+  "        << \' \' << local_incarnation << \' \' << peer_incarnation;","        << \" 0 0\";"),
 ]
 
 def run(cmd, **kw):

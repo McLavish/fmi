@@ -58,6 +58,14 @@ namespace FMI {
                 current_epoch = control_plane->epoch();
             }
 
+            // Contract 3, and deliberately here rather than in join_epoch: this is the one
+            // place that runs exactly once per *process*. A survivor rejoining a later epoch
+            // does not run it and keeps its lineage, which is what makes its link state still
+            // reconcilable; a criu-restored process does not run it either, for the same
+            // reason. Only a genuinely new process serving this rank takes a new incarnation,
+            // and that is precisely when its peers must start the stream again.
+            incarnation = control_plane->claim_incarnation(peer_id);
+
             std::uint64_t active_epoch = current_epoch;
             // PLANS.md step 4 seam: a future CRIU-backed state restore for replacement ranks
             // belongs here, after the rank joins epoch N+1 and before it resumes user work.
@@ -131,6 +139,7 @@ namespace FMI {
         c->set_num_peers(num_peers);
         c->set_comm_name(comm_name);
         c->set_data_comm_name(data_comm_name);
+        c->set_incarnation(incarnation);
         channels[name] = c;
     }
 
