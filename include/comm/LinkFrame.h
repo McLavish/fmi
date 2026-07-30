@@ -44,6 +44,19 @@ namespace FMI::Comm {
         Scan = 7
     };
 
+    //! What a frame is for. Acks carry no payload and take no transport sequence.
+    /*!
+     * Retention is pruned by the peer's cumulative ack, which normally rides along on traffic
+     * in the opposite direction. A link that is busy in one direction only has no such traffic
+     * — and those exist as soon as a job has three ranks, where a binomial tree gives some
+     * directed links no return path at all. Without a standalone ack the sender's window fills
+     * and never drains, and the job stops for good.
+     */
+    enum class FrameType : std::uint8_t {
+        Data = 0,
+        Ack = 1
+    };
+
     //! "FMI2" — guards against a raw (unframed) peer and against stream desynchronisation.
     inline constexpr std::uint32_t frame_magic = 0x32494D46u;
 
@@ -62,6 +75,7 @@ namespace FMI::Comm {
 
     struct FrameHeader {
         std::uint16_t wire_version = frame_wire_version;
+        FrameType frame_type = FrameType::Data;
         Lane lane = Lane::P2P;
         OpKind op_kind = OpKind::Send;
         //! Per-Communicator monotonic collective ordinal. Unused (0) on the P2P lane.
@@ -101,6 +115,7 @@ namespace FMI::Comm {
         BadVersion,
         BadLane,
         BadOpKind,
+        BadFrameType,
         PayloadTooLarge,
         Inconsistent
     };
@@ -183,7 +198,7 @@ namespace FMI::Comm {
         if (h.commutative) flags |= flag_commutative;
         if (h.associative) flags |= flag_associative;
         detail::put_u8(out, off, flags);
-        detail::put_u8(out, off, 0);   // reserved, keeps the following u64s 8-byte aligned
+        detail::put_u8(out, off, static_cast<std::uint8_t>(h.frame_type));
         detail::put_u16(out, off, 0);  // reserved
         detail::put_u64(out, off, h.collective_index);
         detail::put_u32(out, off, h.root);
@@ -237,7 +252,11 @@ namespace FMI::Comm {
         const std::uint8_t flags = detail::get_u8(in, off);
         out.commutative = (flags & flag_commutative) != 0;
         out.associative = (flags & flag_associative) != 0;
-        detail::get_u8(in, off);   // reserved
+        const std::uint8_t type = detail::get_u8(in, off);
+        if (type > static_cast<std::uint8_t>(FrameType::Ack)) {
+            return DecodeStatus::BadFrameType;
+        }
+        out.frame_type = static_cast<FrameType>(type);
         detail::get_u16(in, off);  // reserved
         out.collective_index = detail::get_u64(in, off);
         out.root = detail::get_u32(in, off);
@@ -261,7 +280,23 @@ namespace FMI::Comm {
         if (out.lane == Lane::P2P && out.collective_index != 0) {
             return DecodeStatus::Inconsistent;
         }
+        // An ack is a pure watermark: it carries nothing and occupies no sequence, so a
+        // payload or a claimed sequence on one means the stream is not what it says it is.
+        if (out.frame_type == FrameType::Ack &&
+            (out.payload_length != 0 || out.total_length != 0 || out.transport_seq != 0)) {
+            return DecodeStatus::Inconsistent;
+        }
         return DecodeStatus::Ok;
+    }
+
+    //! The standalone ack frame: "everything below @p cumulative is durably mine".
+    inline FrameHeader make_ack(std::uint64_t cumulative) {
+        FrameHeader h;
+        h.frame_type = FrameType::Ack;
+        h.lane = Lane::P2P;
+        h.op_kind = OpKind::Send;
+        h.cumulative_ack = cumulative;
+        return h;
     }
 
     //! Per-direction reconciliation state exchanged when a link is (re-)established.

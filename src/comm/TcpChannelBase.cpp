@@ -2,11 +2,13 @@
 
 #include "../../include/comm/OperationScope.h"
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netinet/tcp.h>
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -22,12 +24,94 @@ void FMI::Comm::TcpChannelBase::parse_tcp_params(std::map<std::string, std::stri
         link_retention_limit_bytes = static_cast<std::size_t>(
                 std::stoull(params["link_retention_limit_bytes"]));
     }
+    if (params.count("link_ack_interval") > 0) {
+        link_ack_interval = static_cast<std::uint32_t>(std::stoul(params["link_ack_interval"]));
+    }
+    // An ack interval at or above the window would let the window fill before the peer is ever
+    // told anything, which is the deadlock this exists to prevent.
+    if (link_ack_interval >= link_window_frames) {
+        link_ack_interval = std::max<std::uint32_t>(1, link_window_frames / 4);
+    }
 }
 
 void FMI::Comm::TcpChannelBase::ensure_link_state() {
     if (links.size() != num_peers) {
         links.assign(num_peers, SequencedLink({link_window_frames, link_max_frame_bytes,
                                                link_retention_limit_bytes}));
+    }
+}
+
+namespace {
+    long steady_now_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+}
+
+void FMI::Comm::TcpChannelBase::maybe_send_ack(Utils::peer_num partner_id) {
+    if (!recover_links || partner_id >= links.size() || sockets[partner_id] < 0) {
+        return;
+    }
+    if (!links[partner_id].ack_due(link_ack_interval)) {
+        return;
+    }
+    const std::uint64_t watermark = links[partner_id].next_received();
+    char encoded[frame_header_bytes];
+    encode_header(make_ack(watermark), encoded);
+    long n = ::send(sockets[partner_id], encoded, frame_header_bytes, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (n < 0) {
+        // No room, or the link is broken. Either way this ack is not owed: the receive path
+        // discovers a broken link on its own, and a dropped ack is re-offered next commit.
+        return;
+    }
+    if (static_cast<std::size_t>(n) < frame_header_bytes) {
+        // A partial ack would desynchronise the peer's frame boundaries, so the remainder has
+        // to go out even though that means blocking. Bounded by SO_SNDTIMEO, and reachable
+        // only when the socket had 1..frame_header_bytes-1 bytes of room, which needs the peer
+        // to have stopped reading entirely.
+        write_all(partner_id, encoded + n, frame_header_bytes - static_cast<std::size_t>(n));
+    }
+    links[partner_id].note_ack_sent(watermark);
+}
+
+void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budget_ms) {
+    if (!recover_links || partner_id >= links.size() || sockets[partner_id] < 0) {
+        return;
+    }
+    const long deadline = steady_now_ms() + std::max<long>(budget_ms, 0);
+    char encoded[frame_header_bytes];
+    while (true) {
+        long n = ::recv(sockets[partner_id], encoded, frame_header_bytes,
+                        MSG_PEEK | MSG_DONTWAIT);
+        if (n < 0 || static_cast<std::size_t>(n) < frame_header_bytes) {
+            if (n == 0) {
+                return;   // peer closed; the receive path turns that into a repair
+            }
+            const long remaining = deadline - steady_now_ms();
+            if (remaining <= 0) {
+                return;
+            }
+            struct pollfd pfd{sockets[partner_id], POLLIN, 0};
+            if (::poll(&pfd, 1, static_cast<int>(remaining)) <= 0) {
+                return;
+            }
+            continue;
+        }
+        FrameHeader peeked;
+        if (decode_header(encoded, frame_header_bytes, link_max_frame_bytes, peeked)
+            != DecodeStatus::Ok) {
+            return;   // let the receive path report it properly, with its own diagnostics
+        }
+        links[partner_id].on_ack(peeked.cumulative_ack);
+        if (peeked.frame_type != FrameType::Ack) {
+            // A data frame belongs to recv_object, so it stays in the stream untouched. Its
+            // ack has already been applied, which is the only thing needed here.
+            return;
+        }
+        read_all(partner_id, encoded, frame_header_bytes);   // consume the ack we just peeked
+        if (!links[partner_id].send_blocked()) {
+            return;
+        }
     }
 }
 
@@ -150,6 +234,10 @@ void FMI::Comm::TcpChannelBase::write_frame(Utils::peer_num rcpt_id, const Frame
     if (header.payload_length > 0) {
         write_all(rcpt_id, payload, header.payload_length);
     }
+    if (rcpt_id < links.size()) {
+        // The piggybacked ack has reached the wire, so the standalone path need not repeat it.
+        links[rcpt_id].note_ack_sent(header.cumulative_ack);
+    }
 }
 
 void FMI::Comm::TcpChannelBase::exchange_handshake(Utils::peer_num partner_id) {
@@ -221,10 +309,19 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
     header.message_id = links[rcpt_id].next_send_seq();
     FrameHeader stamped;
     if (!links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {
-        throw std::runtime_error(transport_tag + ": link to peer " + std::to_string(rcpt_id) +
-                                 " is at its retention limit with " +
-                                 std::to_string(links[rcpt_id].retained_bytes()) +
-                                 " bytes outstanding");
+        // The window is full. On a link that carries traffic both ways this never happens,
+        // because every frame the peer sends prunes retention; on a one-way link — which a
+        // binomial tree produces as soon as there are three ranks — nothing prunes it but the
+        // peer's standalone acks, and those have to be collected explicitly.
+        drain_acks(rcpt_id, static_cast<long>(max_timeout));
+        if (!links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {
+            throw std::runtime_error(transport_tag + ": link to peer " + std::to_string(rcpt_id) +
+                                     " is at its retention limit with " +
+                                     std::to_string(links[rcpt_id].retained_bytes()) +
+                                     " bytes outstanding and " +
+                                     std::to_string(links[rcpt_id].replay_suffix().size()) +
+                                     " frames unacknowledged");
+        }
     }
     stamped.cumulative_ack = links[rcpt_id].next_received();
     try {
@@ -244,27 +341,38 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
 
     ensure_link_state();
     int repairs = 0;
+    // Read that survives the link dying under it. Returns false once the link has been
+    // repaired, meaning the caller must start again from the frame header: the replacement
+    // connection carries the peer's replay from the last sequence it saw acknowledged, and
+    // whatever was half-read on the old connection is gone with it.
+    auto guarded_read = [&](char* dst, std::size_t len) -> bool {
+        if (!recover_links) {
+            read_all(sender_id, dst, len);
+            return true;
+        }
+        try {
+            read_all(sender_id, dst, len);
+            return true;
+        } catch (const Utils::Timeout&) {
+            throw;   // nothing arrived in time; that is not the same as a dead link
+        } catch (const std::exception&) {
+            // The connection died — one end sees a failed write, the other EOF or a reset —
+            // so both re-establish, reconcile and replay. Bounded, because a peer that has
+            // genuinely gone away would otherwise be repaired forever.
+            if (++repairs > max_link_repairs) {
+                throw std::runtime_error(transport_tag + ": link to peer " +
+                                         std::to_string(sender_id) + " could not be repaired after " +
+                                         std::to_string(max_link_repairs) + " attempts");
+            }
+            repair_link(sender_id);
+            return false;
+        }
+    };
+
     while (true) {
         char encoded[frame_header_bytes];
-        if (recover_links) {
-            try {
-                read_all(sender_id, encoded, frame_header_bytes);
-            } catch (const Utils::Timeout&) {
-                throw;   // nothing arrived in time; that is not the same as a dead link
-            } catch (const std::exception&) {
-                // The connection died — one end sees a failed write, the other EOF or a reset
-                // — so both re-establish, reconcile and replay. Bounded, because a peer that
-                // has genuinely gone away would otherwise be repaired forever.
-                if (++repairs > max_link_repairs) {
-                    throw std::runtime_error(transport_tag + ": link to peer " +
-                                             std::to_string(sender_id) + " could not be repaired after " +
-                                             std::to_string(max_link_repairs) + " attempts");
-                }
-                repair_link(sender_id);
-                continue;
-            }
-        } else {
-            read_all(sender_id, encoded, frame_header_bytes);
+        if (!guarded_read(encoded, frame_header_bytes)) {
+            continue;
         }
 
         FrameHeader arrived;
@@ -280,16 +388,24 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         }
 
         // Any traffic from the peer carries its cumulative ack, which is what prunes retention
-        // on a blocking transport with no thread free to send standalone acks.
+        // whenever the link is busy in both directions.
         links[sender_id].on_ack(arrived.cumulative_ack);
 
-        const SequencedLink::Accept accepted = links[sender_id].accept_inline(arrived);
+        if (arrived.frame_type == FrameType::Ack) {
+            // A pure watermark: no payload, no sequence, nothing to deliver. Its only effect
+            // is the on_ack above.
+            continue;
+        }
+
+        // Classify without committing. The watermark may not move until the payload is in the
+        // application's buffer — see SequencedLink::commit_inline.
+        const SequencedLink::Accept accepted = links[sender_id].classify(arrived);
         if (accepted == SequencedLink::Accept::Duplicate) {
             // A replayed frame the peer had not seen acknowledged. Consume and discard its
             // payload, or the following frames would be parsed from the wrong offset.
             std::vector<char> discard(arrived.payload_length);
-            if (arrived.payload_length > 0) {
-                read_all(sender_id, discard.data(), discard.size());
+            if (arrived.payload_length > 0 && !guarded_read(discard.data(), discard.size())) {
+                continue;
             }
             continue;
         }
@@ -309,7 +425,24 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
                                      describe(expected) + "] but received [" +
                                      describe(arrived) + "]");
         }
-        read_all(sender_id, buf.buf, buf.len);
+        // Identity matched on total_length, so an unfragmented frame must carry exactly the
+        // bytes the application is waiting for. A frame that claims fewer would leave the rest
+        // of the buffer holding whatever the next frame's header happens to be.
+        if (arrived.payload_length != buf.len) {
+            throw std::runtime_error(transport_tag + ": frame from peer " + std::to_string(sender_id) +
+                                     " declares " + std::to_string(arrived.payload_length) +
+                                     " payload bytes for a " + std::to_string(buf.len) +
+                                     "-byte message");
+        }
+        if (!guarded_read(buf.buf, buf.len)) {
+            continue;
+        }
+        // Committed only now: a link that died anywhere above left this frame unacknowledged,
+        // so the peer still holds it and replays it after the repair.
+        links[sender_id].commit_inline(arrived);
+        // On a link the peer never receives on, this is the only thing that will ever let it
+        // release what it is holding for us.
+        maybe_send_ack(sender_id);
         return;
     }
 }

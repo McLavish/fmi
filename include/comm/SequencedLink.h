@@ -81,6 +81,22 @@ namespace FMI::Comm {
         //! Release retention up to and including @p cumulative.
         void on_ack(std::uint64_t cumulative);
 
+        //! Record that a cumulative ack of @p value has actually reached the wire.
+        /*!
+         * Piggybacked and standalone acks both land here, so the standalone path can tell
+         * whether the peer already knows what we have received.
+         */
+        void note_ack_sent(std::uint64_t value);
+
+        //! True when the peer is far enough behind our watermark to be worth telling.
+        /*!
+         * The peer prunes on what it hears, so silence on a one-way link is what fills its
+         * window. @p interval trades ack traffic against how much slack the sender keeps.
+         */
+        [[nodiscard]] bool ack_due(std::uint64_t interval) const;
+
+        [[nodiscard]] std::uint64_t last_ack_sent() const { return acked_to_peer; }
+
         //! Exactly the unacked suffix, in sequence order: what a re-established link replays.
         [[nodiscard]] const std::deque<Retained>& replay_suffix() const { return retention; }
 
@@ -98,11 +114,28 @@ namespace FMI::Comm {
          */
         Accept accept(const FrameHeader& header, const char* payload);
 
+        //! Decide what an arriving frame is, changing nothing.
+        /*!
+         * Split out from accept_inline so a blocking transport can find out whether a frame is
+         * new, a replay or a gap *before* it reads the payload, and only commit once those
+         * bytes are safely in the application's buffer.
+         */
+        [[nodiscard]] Accept classify(const FrameHeader& header) const;
+
+        //! Advance the watermarks for a frame whose payload the caller has already delivered.
+        /*!
+         * The ordering is a correctness requirement, not a style choice: this is the point at
+         * which the peer becomes free to forget the frame, so it must not happen while the
+         * payload is still somewhere the checkpoint does not capture (a kernel socket buffer).
+         * A no-op unless classify() says Delivered, so a double commit cannot skip a sequence.
+         */
+        void commit_inline(const FrameHeader& header);
+
         //! Account for an arriving frame WITHOUT buffering its payload.
         /*!
-         * For a blocking transport that reads the payload straight into the application's
-         * buffer there is nothing to drain, so the lane queues stay empty and only the
-         * watermarks move. Dedup and gap detection are identical to accept(); on Duplicate the
+         * classify() followed by commit_inline(). Correct only where the payload is already in
+         * hand; a transport that still has to read it off a socket must use the two halves
+         * separately. Dedup and gap detection are identical to accept(); on Duplicate the
          * caller must still consume the payload bytes off the wire and discard them, or the
          * stream desynchronises.
          */
@@ -132,6 +165,9 @@ namespace FMI::Comm {
          */
         bool reconcile(const HandshakePayload& peer, std::string& error);
 
+        //! Forget everything about the stream, keeping the configuration.
+        void reset_stream();
+
         // ---- checkpoint / replacement seeding ----------------------------------------
 
         //! Opaque, versioned serialization of the whole link state.
@@ -151,6 +187,8 @@ namespace FMI::Comm {
         // receiver
         std::uint64_t next_recv = 0;
         std::uint64_t ack_safe_seq = 0;
+        //! Highest cumulative ack this side has actually put on the wire.
+        std::uint64_t acked_to_peer = 0;
         struct Committed {
             FrameHeader header;
             std::vector<char> payload;

@@ -41,6 +41,30 @@ bool FMI::Comm::SequencedLink::admit(const FrameHeader& identity, const char* pa
     return true;
 }
 
+void FMI::Comm::SequencedLink::note_ack_sent(std::uint64_t value) {
+    if (value > acked_to_peer) {
+        acked_to_peer = value;
+    }
+}
+
+bool FMI::Comm::SequencedLink::ack_due(std::uint64_t interval) const {
+    if (interval == 0) {
+        return next_recv > acked_to_peer;
+    }
+    return next_recv >= acked_to_peer + interval;
+}
+
+void FMI::Comm::SequencedLink::reset_stream() {
+    next_send = 0;
+    retention.clear();
+    retention_bytes = 0;
+    next_recv = 0;
+    ack_safe_seq = 0;
+    acked_to_peer = 0;
+    lanes[0].clear();
+    lanes[1].clear();
+}
+
 void FMI::Comm::SequencedLink::on_ack(std::uint64_t cumulative) {
     // Acks are cumulative: everything strictly below `cumulative` is durably held by the peer.
     // A stale or duplicated ack is simply a no-op rather than an error.
@@ -76,18 +100,40 @@ FMI::Comm::SequencedLink::accept(const FrameHeader& header, const char* payload)
 }
 
 FMI::Comm::SequencedLink::Accept
-FMI::Comm::SequencedLink::accept_inline(const FrameHeader& header) {
+FMI::Comm::SequencedLink::classify(const FrameHeader& header) const {
     if (header.transport_seq < next_recv) {
+        // Already accepted once. This is the normal outcome of a post-restore replay and must
+        // never reach the application a second time.
         return Accept::Duplicate;
     }
     if (header.transport_seq > next_recv) {
+        // A hole. The sender only ever transmits contiguously from its retention, so a gap
+        // means bytes were lost in a way retention cannot repair.
         return Accept::FatalGap;
     }
-    ++next_recv;
-    // The application reads the payload directly, so once this returns the frame is as
-    // durably held as it will ever be and may be acked.
-    ack_safe_seq = next_recv;
     return Accept::Delivered;
+}
+
+void FMI::Comm::SequencedLink::commit_inline(const FrameHeader& header) {
+    if (classify(header) != Accept::Delivered) {
+        return;
+    }
+    ++next_recv;
+    // Only reached once the payload is in the application's buffer, so the frame really is
+    // durably held and the ack may be issued. Committing any earlier would let a freeze
+    // between the header and the payload advance the watermark past a message whose bytes
+    // were still in a kernel buffer the checkpoint does not capture — the peer would then
+    // prune it on the next handshake and never replay it.
+    ack_safe_seq = next_recv;
+}
+
+FMI::Comm::SequencedLink::Accept
+FMI::Comm::SequencedLink::accept_inline(const FrameHeader& header) {
+    const Accept verdict = classify(header);
+    if (verdict == Accept::Delivered) {
+        commit_inline(header);
+    }
+    return verdict;
 }
 
 FMI::Comm::SequencedLink::Accept
@@ -142,6 +188,9 @@ bool FMI::Comm::SequencedLink::reconcile(const HandshakePayload& peer, std::stri
     // The peer's next_expected doubles as a cumulative ack, which is what reconciles two ranks
     // whose final acks crossed while the link was down.
     on_ack(peer.next_expected_seq);
+    // The peer starts again from what it told us it expects, so anything we believed it had
+    // been told about our own watermark no longer holds on the new connection.
+    acked_to_peer = 0;
     return true;
 }
 
@@ -166,5 +215,7 @@ bool FMI::Comm::SequencedLink::seed(const std::string& blob) {
     next_send = send;
     next_recv = recv;
     ack_safe_seq = safe;
+    // Nothing has been told to the peer over the link this state is being seeded onto.
+    acked_to_peer = 0;
     return true;
 }

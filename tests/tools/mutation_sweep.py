@@ -13,9 +13,14 @@ Usage:  python3 tests/tools/mutation_sweep.py
 Expects a configured build/ directory and Redis on 127.0.0.1:6379.
 Restores every file it touches, including on failure.
 """
-import subprocess, sys, os
+import signal, subprocess, sys, os
 WT="/home/luca/fmi-sequenced-links"
-SUITES=["LinkLayer","OperationIdentity","ProtocolValidation","LinkRecovery","TransportRecovery","FramedTransport"]
+# Cheapest and most discriminating first: a killed mutation stops at the first failing suite,
+# so ordering decides whether the sweep takes forty minutes or four hours.
+SUITES=["LinkLayer","ProtocolValidation","OperationIdentity",
+        "CheckpointFreezePoints","LinkLiveness","LinkRecovery","TransportRecovery",
+        "FramedTransport"]
+SUITE_TIMEOUT=180
 
 MUTS = [
  ("identity_ignores_op_kind","include/comm/LinkFrame.h",
@@ -69,16 +74,16 @@ MUTS = [
  ("repair_forgets_to_reset_seq","src/comm/TcpChannelBase.cpp",
   "        if (rank < links.size()) {\n            links[rank] = SequencedLink({link_window_frames, link_max_frame_bytes,\n                                         link_retention_limit_bytes});\n        }",""),
  ("dedup_disabled","src/comm/SequencedLink.cpp",
-  "FMI::Comm::SequencedLink::accept_inline(const FrameHeader& header) {\n    if (header.transport_seq < next_recv) {\n        return Accept::Duplicate;\n    }",
-  "FMI::Comm::SequencedLink::accept_inline(const FrameHeader& header) {\n    if (false) {\n        return Accept::Duplicate;\n    }"),
+  "FMI::Comm::SequencedLink::classify(const FrameHeader& header) const {\n    if (header.transport_seq < next_recv) {",
+  "FMI::Comm::SequencedLink::classify(const FrameHeader& header) const {\n    if (false) {"),
  ("inline_never_advances","src/comm/SequencedLink.cpp",
-  "    ++next_recv;\n    // The application reads the payload directly","    // The application reads the payload directly"),
+  "    ++next_recv;\n    // Only reached once the payload is in","    // Only reached once the payload is in"),
  # --- durability: retention, replay and reconciliation across a break ---
  ("replay_returns_nothing","include/comm/SequencedLink.h",
   "[[nodiscard]] const std::deque<Retained>& replay_suffix() const { return retention; }",
   "[[nodiscard]] const std::deque<Retained>& replay_suffix() const { static std::deque<Retained> none; return none; }"),
  ("reconcile_does_not_prune","src/comm/SequencedLink.cpp",
-  "    on_ack(peer.next_expected_seq);\n    return true;","    return true;"),
+  "    on_ack(peer.next_expected_seq);","    (void) 0;"),
  ("ack_safe_never_advances","src/comm/SequencedLink.cpp",
   "    ack_safe_seq = next_recv;",""),
  ("retention_pruned_eagerly","src/comm/SequencedLink.cpp",
@@ -96,35 +101,82 @@ MUTS = [
  ("send_never_repairs","src/comm/TcpChannelBase.cpp",
   "        repair_link(rcpt_id);","        throw;"),
  ("recv_never_repairs","src/comm/TcpChannelBase.cpp",
-  "                repair_link(sender_id);\n                continue;","                throw;"),
+  "            repair_link(sender_id);\n            return false;","            throw;"),
  ("eof_folded_into_timeout","src/comm/TcpChannelBase.cpp",
   "            if (received == 0 && eof_before_data_is_timeout && !recover_links) {",
   "            if (received == 0 && eof_before_data_is_timeout) {"),
  ("repairs_unbounded","src/comm/TcpChannelBase.cpp",
-  "                if (++repairs > max_link_repairs) {","                if (false) {"),
+  "            if (++repairs > max_link_repairs) {","            if (false) {"),
+
+ # --- checkpoint mechanics: the receive watermark and what it lets the peer forget --------
+ ("commit_before_the_payload_is_read","src/comm/TcpChannelBase.cpp",
+  "        if (!guarded_read(buf.buf, buf.len)) {\n            continue;\n        }\n        // Committed only now: a link that died anywhere above left this frame unacknowledged,\n        // so the peer still holds it and replays it after the repair.\n        links[sender_id].commit_inline(arrived);",
+  "        links[sender_id].commit_inline(arrived);\n        if (!guarded_read(buf.buf, buf.len)) {\n            continue;\n        }"),
+ ("payload_length_unchecked","src/comm/TcpChannelBase.cpp",
+  "        if (arrived.payload_length != buf.len) {","        if (false) {"),
+ ("sigpipe_left_fatal","src/utils/Signals.cpp",
+  "        if (current.sa_handler != SIG_DFL) {\n            return;\n        }","        return;"),
+
+ # --- liveness: releasing retention on a link the peer never writes to --------------------
+ ("no_standalone_acks","src/comm/TcpChannelBase.cpp",
+  "        maybe_send_ack(sender_id);",""),
+ ("no_ack_drain_when_blocked","src/comm/TcpChannelBase.cpp",
+  "        drain_acks(rcpt_id, static_cast<long>(max_timeout));",""),
+ ("ack_interval_may_reach_the_window","src/comm/TcpChannelBase.cpp",
+  "    if (link_ack_interval >= link_window_frames) {","    if (false) {"),
+ ("ack_frames_are_not_skipped","src/comm/TcpChannelBase.cpp",
+  "        if (arrived.frame_type == FrameType::Ack) {","        if (false) {"),
+ ("ack_never_marked_sent","src/comm/SequencedLink.cpp",
+  "    if (value > acked_to_peer) {\n        acked_to_peer = value;\n    }",""),
+
 ]
 
 def run(cmd, **kw):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
 
 survived, killed, broken = [], [], []
-for name, rel, old, new in MUTS:
-    path=os.path.join(WT,rel)
-    src=open(path).read()
-    if old not in src:
-        broken.append((name,"PATTERN NOT FOUND")); continue
-    open(path,'w').write(src.replace(old,new,1))
-    b=run(f"cd {WT} && cmake --build build -j16")
-    if b.returncode!=0:
-        broken.append((name,"build failed"))
-    else:
-        failed=False
-        for s in SUITES:
-            r=run(f"cd {WT}/build/tests && timeout 300 ./Boost_Tests_run --run_test={s}")
-            if r.returncode!=0: failed=True; break
-        (killed if failed else survived).append(name)
-    open(path,'w').write(src)
-    print(f"{'KILLED ' if name in killed else 'SURVIVED' if name in survived else 'BROKEN '} {name}", flush=True)
+# Every file this sweep will touch, saved up front. A mutation left behind in a source tree is
+# far worse than a sweep that did not finish: it is a deliberately broken protocol that looks
+# like ordinary uncommitted work. Restored in a finally block, and on SIGINT/SIGTERM, because
+# killing this script mid-mutation is the normal way to stop it.
+PRISTINE = {rel: open(os.path.join(WT, rel)).read() for _, rel, _, _ in MUTS}
+
+def restore_all():
+    for rel, text in PRISTINE.items():
+        path = os.path.join(WT, rel)
+        if open(path).read() != text:
+            open(path, 'w').write(text)
+            print(f"restored {rel}", flush=True)
+
+def on_signal(signum, _frame):
+    restore_all()
+    sys.exit(128 + signum)
+
+signal.signal(signal.SIGINT, on_signal)
+signal.signal(signal.SIGTERM, on_signal)
+
+try:
+    for name, rel, old, new in MUTS:
+        path=os.path.join(WT,rel)
+        src=PRISTINE[rel]
+        if old not in src:
+            broken.append((name,"PATTERN NOT FOUND")); print(f"BROKEN   {name} (pattern not found)", flush=True); continue
+        open(path,'w').write(src.replace(old,new,1))
+        b=run(f"cd {WT} && cmake --build build -j16")
+        if b.returncode!=0:
+            broken.append((name,"build failed"))
+        else:
+            failed=False
+            for s in SUITES:
+                r=run(f"cd {WT}/build/tests && timeout {SUITE_TIMEOUT} ./Boost_Tests_run --run_test={s}")
+                if r.returncode!=0: failed=True; break
+            (killed if failed else survived).append(name)
+        open(path,'w').write(src)
+        verdict = 'KILLED  ' if name in killed else 'SURVIVED' if name in survived else 'BROKEN  '
+        detail = f" (by {s})" if name in killed else ""
+        print(f"{verdict} {name}{detail}", flush=True)
+finally:
+    restore_all()
 
 run(f"cd {WT} && cmake --build build -j16")
 print("\n===== MUTATION SUMMARY =====")

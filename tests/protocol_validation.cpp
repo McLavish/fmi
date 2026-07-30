@@ -426,6 +426,31 @@ BOOST_AUTO_TEST_CASE(a_fragment_longer_than_its_message_is_rejected_before_it_de
                       std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(a_fragment_shorter_than_its_message_is_rejected_before_it_desynchronises) {
+    // The mirror of the case above, and the more dangerous direction: payload_length is BELOW
+    // total_length, so the identity check still passes and the receiver would go on to read
+    // total_length bytes — swallowing the head of the following frame as if it were the tail
+    // of this one, and shifting every message on the link from then on.
+    Wire w(true);
+    FrameHeader h = wire_p2p(0, 4);
+    h.payload_length = 2;   // claims less payload than the message needs
+    char hdr[frame_header_bytes];
+    encode_header(h, hdr);
+    w.poke(hdr, sizeof hdr);
+    const char partial[2] = {9, 9};
+    w.poke(partial, sizeof partial);
+    // The next frame on the wire, which a short read would eat into.
+    FrameHeader next = wire_p2p(1, 4);
+    char next_hdr[frame_header_bytes];
+    encode_header(next, next_hdr);
+    w.poke(next_hdr, sizeof next_hdr);
+
+    int got = 0;
+    OperationScope scope(p2p_identity(1));
+    BOOST_CHECK_THROW(w.channel.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0),
+                      std::runtime_error);
+}
+
 BOOST_AUTO_TEST_CASE(a_replayed_frame_is_discarded_rather_than_delivered_as_the_next_message) {
     // Dedup on the wire. After a repair a peer may retransmit a frame the receiver already
     // took; its payload must be consumed and dropped, not handed to the next receive, which

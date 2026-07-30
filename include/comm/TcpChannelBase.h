@@ -116,6 +116,27 @@ namespace FMI::Comm {
         //! Re-establish a dead link and retransmit whatever the peer has not acknowledged.
         void repair_link(Utils::peer_num partner_id);
 
+        //! Tell the peer what we have received, when nothing else is going that way.
+        /*!
+         * Best effort: an ack that will not fit in the socket right now is simply re-offered
+         * after the next commit. What is not optional is that the peer eventually hears
+         * something, which is what drain_acks guarantees from the other side.
+         */
+        void maybe_send_ack(Utils::peer_num partner_id);
+
+        //! Collect the peer's acks without disturbing the message stream.
+        /*!
+         * Called when the send window is full, which on a one-way link is the only thing that
+         * can ever unblock it. Frames are examined with MSG_PEEK, so a data frame is left
+         * exactly where it was for recv_object to read normally and only payload-free ack
+         * frames are consumed. The peeked cumulative ack is applied either way, so even a data
+         * frame left in the stream prunes retention.
+         */
+        void drain_acks(Utils::peer_num partner_id, long budget_ms);
+
+        //! Commits between standalone acks. Zero means "ack whenever anything is outstanding".
+        std::uint32_t link_ack_interval = 32;
+
         //! Exchange handshakes on a freshly established link and reconcile the sequences.
         void exchange_handshake(Utils::peer_num partner_id);
 
