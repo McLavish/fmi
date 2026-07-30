@@ -66,11 +66,40 @@ MUTS = [
   "        if (accepted == SequencedLink::Accept::FatalGap) {","        if (false) {"),
  # Two decode-status checks now exist; target each precisely rather than by first match.
  ("handshake_skips_decode_check","src/comm/TcpChannelBase.cpp",
-  "    HandshakePayload theirs;\n    const DecodeStatus status = decode_handshake(in, handshake_bytes, theirs);\n    if (status != DecodeStatus::Ok) {",
-  "    HandshakePayload theirs;\n    const DecodeStatus status = decode_handshake(in, handshake_bytes, theirs);\n    if (false) {"),
+  "    const DecodeStatus status = decode_handshake(payload, handshake_bytes, theirs);\n    if (status != DecodeStatus::Ok) {",
+  "    const DecodeStatus status = decode_handshake(payload, handshake_bytes, theirs);\n    if (false) {"),
  ("wire_skips_decode_check","src/comm/TcpChannelBase.cpp",
-  "        const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);\n        if (status != DecodeStatus::Ok) {",
-  "        const DecodeStatus status = decode_header(encoded, frame_header_bytes, buf.len, arrived);\n        if (false) {"),
+  "                decode_header(encoded, frame_header_bytes, link_max_frame_bytes, arrived);\n        if (status != DecodeStatus::Ok) {",
+  "                decode_header(encoded, frame_header_bytes, link_max_frame_bytes, arrived);\n        if (false) {"),
+
+ # --- a waiting rank must keep meeting every obligation it has -----------------------------
+ # Each of these removes one of the obligations. Rounds 1-6 showed that dropping any single one
+ # is enough to deadlock a checkpointed job of three ranks or more.
+ #
+ # Four of the five are killed by the CRIU sweep rather than by this suite, and that is the
+ # honest place for them: the property is about what a rank owes its OTHER peers while it is
+ # blocked, which only bites once a restore forces several links to be rebuilt at once. Measured
+ # at 4 peers x 8 trials, seed 7 (runbooks/criu-transparent-checkpoint/sweep.py) - each of
+ # waiting_rank_serves_nobody, waiting_rank_never_accepts, waiting_rank_never_reconciles and
+ # adoption_skips_the_handshake_debt takes the job from 8/8 to 0/8. Not a marginal shift: with
+ # any one of them applied, no run survives a checkpoint.
+ #
+ # accepted_links_are_never_adopted is the one this suite pins on its own, via LinkLiveness's
+ # a_rank_blocked_on_one_peer_still_accepts_another. Note that test only earns the kill because
+ # rank 0 establishes to rank 2 BEFORE it blocks - an earlier ordering let build_mesh do the
+ # accepting, and the mutation sailed through.
+ ("waiting_rank_serves_nobody","src/comm/TcpChannelBase.cpp",
+  "        service_transport();\n        service_established_links(peer);",
+  "        (void) 0;"),
+ ("waiting_rank_never_accepts","src/comm/TcpChannelBase.cpp",
+  "        service_transport();\n","        \n"),
+ ("waiting_rank_never_reconciles","src/comm/TcpChannelBase.cpp",
+  "        try {\n            reconcile_if_needed(peer);\n        } catch (const std::exception&) {\n            continue;   // the receive path owns repair\n        }",""),
+ ("accepted_links_are_never_adopted","src/comm/DirectTCP.cpp",
+  "                adopt_link(rank, fd);","                (void) fd;"),
+ ("adoption_skips_the_handshake_debt","src/comm/TcpChannelBase.cpp",
+  "    link_needs_reconcile[partner_id] = 0;\n    exchange_handshake(partner_id);\n}",
+  "    link_needs_reconcile[partner_id] = 0;\n}"),
  ("repair_forgets_to_reset_seq","src/comm/TcpChannelBase.cpp",
   "        if (rank < links.size()) {\n            links[rank] = SequencedLink({link_window_frames, link_max_frame_bytes,\n                                         link_retention_limit_bytes});\n        }",""),
  ("dedup_disabled","src/comm/SequencedLink.cpp",
@@ -130,12 +159,12 @@ MUTS = [
   "    if (value > acked_to_peer) {\n        acked_to_peer = value;\n    }",""),
 
  # --- establishment must not stall the rank's other links ---
- # KNOWN SURVIVOR. Deleting the call site changes nothing any test can see: the drain only has
- # an observable effect while a rank is genuinely blocked inside build_mesh with a peer sending
- # to it, which is a >=3-rank establishment race — the same race that deadlocks, and therefore
- # the same thing that is hard to make deterministic. The MECHANISM is pinned
- # (drained_frames_are_never_delivered, killed); the WIRING is not. Left in the list on purpose,
- # so the hole stays visible rather than being quietly dropped.
+ # This was carried as a KNOWN SURVIVOR for a while, on the reasoning that the drain only has an
+ # observable effect during a >=3-rank establishment race and so could not be pinned
+ # deterministically. That was true of THIS suite and false of the system: the CRIU sweep kills
+ # it outright, 0/8 at 4 peers and 0/8 at 8 peers (seed 7). The wiring is load-bearing after
+ # all. Worth remembering as a caution about the label — "no test can see this" meant "no test
+ # I had written could see this".
  ("establishment_reads_no_other_link","src/comm/DirectTCP.cpp",
   "        service_established_links(target);","        (void) 0;"),
  ("drained_frames_are_never_delivered","src/comm/TcpChannelBase.cpp",

@@ -275,4 +275,78 @@ BOOST_AUTO_TEST_CASE(the_window_is_the_bound_on_unreceived_sends_and_it_fails_lo
                         "exceeding the window must fail loudly, naming the link -- not hang");
 }
 
+BOOST_AUTO_TEST_CASE(a_rank_blocked_on_one_peer_still_accepts_another) {
+    // The obligation the whole checkpoint story rests on. A rank waiting for one peer must keep
+    // accepting connections from the others: accept_one used to run only inside build_mesh, so
+    // a rank blocked in a *receive* accepted nothing, and after a restore - when several links
+    // must be rebuilt at once - the peer trying to reconnect sat in the backlog while the rank
+    // that would answer it waited on a link that peer was part of.
+    //
+    // The ordering below is what makes this test mean anything, and an earlier version of it
+    // did not: rank 0 must ALREADY hold its link to rank 2 before it blocks, or its first
+    // receive establishes that link through build_mesh, which polls the listener itself and
+    // accepts rank 1 there. The obligation under test is the one inside the blocking read.
+    constexpr int num_peers = 3;
+    const std::string name = unique_comm("accept-while-waiting");
+    int* ok = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    ok[peer_id] = 0;
+
+    try {
+        auto params = one_way_params();
+        params["max_timeout"] = "8000";
+        auto ch = Channel::get_channel("DirectTCP", params, model_params());
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(name);
+
+        if (peer_id == 0) {
+            int first = 0, second = 0, from_one = 0;
+            {   // establishes the link to rank 2, so the wait below is a pure read
+                OperationScope scope(p2p_identity(0));
+                ch->recv({reinterpret_cast<char*>(&first), sizeof(first)}, 2);
+            }
+            {   // blocks INSIDE read_all on an established link; rank 1 arrives during this
+                OperationScope scope(p2p_identity(0));
+                ch->recv({reinterpret_cast<char*>(&second), sizeof(second)}, 2);
+            }
+            {
+                OperationScope scope(p2p_identity(0));
+                ch->recv({reinterpret_cast<char*>(&from_one), sizeof(from_one)}, 1);
+            }
+            ok[0] = (first == 220 && second == 222 && from_one == 111);
+        } else if (peer_id == 1) {
+            // Arrives while rank 0 is inside its second receive from rank 2.
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            int v = 111;
+            OperationScope scope(p2p_identity(0));
+            ch->send({reinterpret_cast<char*>(&v), sizeof(v)}, 0);
+            ok[1] = 1;
+        } else {
+            int v = 220;
+            {
+                OperationScope scope(p2p_identity(0));
+                ch->send({reinterpret_cast<char*>(&v), sizeof(v)}, 0);
+            }
+            // Long enough that rank 1's connection must be accepted from inside the wait.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+            v = 222;
+            OperationScope scope(p2p_identity(0));
+            ch->send({reinterpret_cast<char*>(&v), sizeof(v)}, 0);
+            ok[2] = 1;
+        }
+        ch->finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "rank 0 did not receive all three messages");
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "rank 1 could not reach a rank that was busy waiting");
+    BOOST_CHECK_MESSAGE(ok[2] == 1, "rank 2 could not complete its sends");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
