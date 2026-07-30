@@ -98,7 +98,7 @@ def find_rank_pid(comm, rank):
     return int(out[0]) if out else None
 
 
-def checkpoint_restore(pid, imgdir, log):
+def checkpoint_restore(pid, imgdir, log, reap=None):
     os.makedirs(imgdir, exist_ok=True)
     d = subprocess.run(["criu", "dump", "--unprivileged", "-t", str(pid), "-D", imgdir,
                         "--tcp-close", "--shell-job", "-v4", "-o", "dump.log"],
@@ -106,6 +106,11 @@ def checkpoint_restore(pid, imgdir, log):
     if d.returncode != 0:
         log.append(f"dump rc={d.returncode}: {d.stderr.strip()[:300]}")
         return False
+    if reap is not None:
+        try:
+            reap.wait(timeout=30)
+        except Exception:
+            pass
     r = subprocess.run(["criu", "restore", "--unprivileged", "-D", imgdir, "-d",
                         "--tcp-close", "--shell-job", "-v4", "-o", "restore.log"],
                        capture_output=True, text=True)
@@ -175,7 +180,7 @@ def main():
         os.makedirs(outdir, exist_ok=True)
         subprocess.run(["redis-cli", "DEL", f"fmi:direct:{comm}"], capture_output=True)
         log = []
-        start_job(comm, npeers, args.rounds, args.ms, outdir)
+        procs = start_job(comm, npeers, args.rounds, args.ms, outdir)
 
         n_ckpt = random.randint(1, args.max_checkpoints)
         ok = True
@@ -193,7 +198,11 @@ def main():
                 continue
             before = last_round(outdir, target)
             log.append(f"ckpt {k}: rank {target} pid {pid} at round {before}")
-            if not checkpoint_restore(pid, os.path.join(outdir, f"img{k}"), log):
+            # criu kills the dumped process; reap it before restoring, or its pid is still
+            # taken and the restore fails with "Can't fork for <pid>: File exists".
+            reap_dumped = next((p for p, _ in procs if p.pid == pid), None)
+            if not checkpoint_restore(pid, os.path.join(outdir, f"img{k}"), log,
+                                      reap=reap_dumped):
                 ok = False
                 break
             checkpoints.append((target, before))

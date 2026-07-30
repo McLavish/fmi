@@ -219,6 +219,18 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (received > 0) {
+                    // Half a message came and the rest did not. "Nothing arrived in time" is
+                    // both the wrong thing to say and the wrong thing to do: the bytes already
+                    // taken are gone from the stream, so every frame boundary after this one
+                    // is off by however many were read. Report a broken link instead, which is
+                    // true and recoverable — a re-established connection starts clean and the
+                    // peer replays whatever this end never took delivery of.
+                    throw std::runtime_error(transport_tag + ": message from peer " +
+                                             std::to_string(sender_id) + " stalled after " +
+                                             std::to_string(received) + "/" +
+                                             std::to_string(len) + " bytes");
+                }
                 throw Utils::Timeout();
             }
             // A peer that tears the connection down before sending any of this message has
@@ -281,16 +293,10 @@ void FMI::Comm::TcpChannelBase::repair_link(Utils::peer_num partner_id) {
         close(sockets[partner_id]);
         sockets[partner_id] = -1;
     }
+    // One path reconciles a re-established link, whether this end initiated the repair or the
+    // transport replaced the connection under it. check_socket handshakes and replays.
+    note_link_replaced(partner_id);
     check_socket(partner_id, link_name(partner_id, true));
-    exchange_handshake(partner_id);
-
-    // Replay exactly the suffix the peer has not acknowledged, in sequence order. Anything it
-    // already holds was pruned by the handshake, so this retransmits no more than necessary.
-    for (const auto& retained : links[partner_id].replay_suffix()) {
-        FrameHeader header = retained.header;
-        header.cumulative_ack = links[partner_id].next_received();
-        write_frame(partner_id, header, retained.payload.data());
-    }
 }
 
 void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rcpt_id) {
@@ -459,13 +465,37 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
     }
 }
 
+void FMI::Comm::TcpChannelBase::note_link_replaced(FMI::Utils::peer_num partner_id) {
+    if (!recover_links) {
+        return;
+    }
+    if (link_needs_reconcile.size() != num_peers) {
+        link_needs_reconcile.assign(num_peers, 0);
+    }
+    link_needs_reconcile[partner_id] = 1;
+}
+
 void FMI::Comm::TcpChannelBase::check_socket(FMI::Utils::peer_num partner_id, const std::string& name) {
     if (sockets.empty()) {
         sockets = std::vector<int>(num_peers, -1);
     }
-    if (sockets[partner_id] == -1) {
-        sockets[partner_id] = establish(partner_id, name);
-        apply_socket_options(sockets[partner_id]);
+    if (sockets[partner_id] != -1) {
+        return;
+    }
+    sockets[partner_id] = establish(partner_id, name);
+    apply_socket_options(sockets[partner_id]);
+    // A link the transport replaced under us belongs to a peer that is repairing, so this end
+    // owes it the same handshake and replay a local repair would have produced. Establishing
+    // for the first time still costs nothing.
+    if (partner_id < link_needs_reconcile.size() && link_needs_reconcile[partner_id]) {
+        link_needs_reconcile[partner_id] = 0;
+        ensure_link_state();
+        exchange_handshake(partner_id);
+        for (const auto& retained : links[partner_id].replay_suffix()) {
+            FrameHeader header = retained.header;
+            header.cumulative_ack = links[partner_id].next_received();
+            write_frame(partner_id, header, retained.payload.data());
+        }
     }
 }
 

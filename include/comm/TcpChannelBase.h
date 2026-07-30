@@ -145,6 +145,18 @@ namespace FMI::Comm {
         //! Exchange handshakes on a freshly established link and reconcile the sequences.
         void exchange_handshake(Utils::peer_num partner_id);
 
+        //! Record that the connection to @p partner_id was replaced, not merely established.
+        /*!
+         * Called by a subclass that drops a dead socket in favour of an incoming connection.
+         * The rank at the other end reached this link through repair and is waiting to
+         * reconcile; without the mark this end would take the new connection as a first
+         * establishment, skip the handshake, and read its peer's handshake as a frame.
+         */
+        void note_link_replaced(Utils::peer_num partner_id);
+
+        //! Links whose next establishment must reconcile rather than start clean.
+        std::vector<char> link_needs_reconcile;
+
         //! Serialize and write one frame.
         void write_frame(Utils::peer_num rcpt_id, const FrameHeader& header, const char* payload);
 

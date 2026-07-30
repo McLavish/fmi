@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -106,6 +107,30 @@ namespace {
         out = reinterpret_cast<struct sockaddr_in*>(res->ai_addr)->sin_addr;
         ::freeaddrinfo(res);
         return true;
+    }
+
+    //! Is this descriptor still a live connection, or one the far end has torn down?
+    /*!
+     * Asked of a socket this rank still holds a descriptor for but has not touched recently.
+     * TCP_INFO rather than a peek: a peek cannot separate "idle" from "gone" without consuming
+     * data, and there may legitimately be unread bytes on a connection whose peer has since
+     * died. Anything other than ESTABLISHED means the connection is over.
+     *
+     * Conservative when the state cannot be read at all (a non-TCP socket in a test harness,
+     * or a platform without TCP_INFO): reports live, which preserves the previous behaviour.
+     */
+    bool socket_is_established(int fd) {
+#if defined(TCP_INFO)
+        struct tcp_info info {};
+        socklen_t len = sizeof(info);
+        if (::getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &len) != 0) {
+            return true;
+        }
+        return info.tcpi_state == TCP_ESTABLISHED;
+#else
+        (void) fd;
+        return true;
+#endif
     }
 
     std::string param_or(std::map<std::string, std::string>& params, const std::string& key,
@@ -629,11 +654,34 @@ bool FMI::Comm::DirectTCP::accept_one() {
         ::close(fd);
         return false;
     }
-    // Already hold a link to that rank: a duplicate would silently replace a stream that may be
-    // mid-message.
-    if (pending_links.count(claimed) > 0 || (claimed < sockets.size() && sockets[claimed] >= 0)) {
+    // Already hold a LIVE link to that rank: a duplicate would silently replace a stream that
+    // may be mid-message.
+    //
+    // A link this rank believes it holds may nevertheless be dead, and after a checkpoint that
+    // is the normal case rather than a corner one: a restored rank comes back owning a
+    // descriptor for every peer, all of them closed by the restore, and every peer likewise
+    // holds a torn-down connection to it. Rejecting on the strength of that descriptor is what
+    // wedges the job. The rejected peer retries until its deadline while this rank waits to
+    // accept somebody else, and because a rank only discovers a dead link by doing I/O on it,
+    // the discovery can sit behind a collective that is itself waiting on the rejected peer.
+    // That closes a wait-for cycle the lazy-establishment argument in build_mesh explicitly
+    // relies on being impossible — it is, for a first establishment, and is not after a
+    // restore. Measured: checkpointing rank 0 of an 8-rank job wedged every rank in the job.
+    if (pending_links.count(claimed) > 0) {
         ::close(fd);
         return false;
+    }
+    if (claimed < sockets.size() && sockets[claimed] >= 0) {
+        if (socket_is_established(sockets[claimed])) {
+            ::close(fd);
+            return false;
+        }
+        // Dead, and this connection is the proof. Drop it so the link can be rebuilt, and mark
+        // it as replaced: the peer reached this connection through repair and is waiting to
+        // reconcile, so this end owes it a handshake it would otherwise skip.
+        ::close(sockets[claimed]);
+        sockets[claimed] = -1;
+        note_link_replaced(claimed);
     }
     // Acknowledge with a zero nonce: the connector has no nonce of its own to prove, it only
     // needs to learn that it reached the rank it asked for.

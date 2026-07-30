@@ -18,8 +18,11 @@ transport used to.
 
 This is a deliberate staging choice, not an oversight. It buys message identity (contract 1)
 and transport durability (contract 2) without the one-way door the design flags — the engine
-"is the irreversible commitment point" — and it is enough to carry an arbitrary FMI program
-across a real checkpoint, which is the property the whole protocol exists to provide.
+"is the irreversible commitment point" — and it carries an arbitrary FMI program across a real
+checkpoint at two ranks.
+
+It does **not** carry one reliably above two ranks: see [the open deadlock](#open-a-job-deadlocks-when-a-rank-is-checkpointed-at-three-ranks-or-more),
+which is the price of not having the engine and is diagnosed there.
 
 It also costs things, listed under [What the blocking shape cannot
 do](#what-the-blocking-shape-cannot-do).
@@ -152,6 +155,80 @@ injected faults still in place — every test varied two fields at once, so some
 always caught the break and no test pinned what it appeared to. Any new claim in the table
 above should arrive with a mutation that the new test kills.
 
+## Open: a job deadlocks when a rank is checkpointed at three ranks or more
+
+**Not fixed. Diagnosed.** This is the largest gap between what the runbook claims and what it
+delivers, and it is a design-level defect in lazy establishment, not a coding slip.
+
+### What was measured
+
+`runbooks/criu-transparent-checkpoint/sweep.py` on this host:
+
+| shape | trials | passed |
+| --- | --- | --- |
+| 2 peers, one checkpoint | 10 | **10** |
+| 3 and 4 peers, up to 3 checkpoints | 8 valid | 6 |
+| 8 peers, one checkpoint | 6 | 4 |
+| 4 peers, 256 KiB messages | 8 | 6 |
+| 4 peers, checkpoint during mesh establishment | 8 | 4 |
+
+A failing trial ends with every rank throwing `Timeout` after its full deadline, the restored
+rank having logged nothing since its restore.
+
+### The mechanism
+
+A wedged 4-rank job, caught live (`ss` plus `/proc/<pid>/wchan`), shows:
+
+* rank 0 and the restored rank blocked in `poll` — both inside `build_mesh`, each establishing
+  one link;
+* the other two blocked in a socket read;
+* **and data sitting unread on connections nobody is looking at**: 76 bytes (one whole frame)
+  queued for rank 0, 56 bytes (one whole handshake) queued for another rank, 504 for a third.
+
+Every rank is waiting, and every rank is holding something another rank needs.
+
+`build_mesh` blocks the entire rank while it establishes ONE link, servicing only its listener
+meanwhile — it does not read any of its other, already-established links. Before a checkpoint
+that is safe, and `build_mesh` says why: a rank only ever waits for a *higher* rank to connect
+to it, so the wait-for relation runs strictly upward and cannot close a cycle.
+
+**A restore breaks that argument.** Several links must be rebuilt at once, and the order in
+which each rank gets round to rebuilding each one is driven by its own collective schedule, not
+by rank order. The wait-for relation is no longer upward-only, and it closes.
+
+### What was fixed along the way, and what was not
+
+Two real defects found while chasing this, both fixed and both worth having regardless:
+
+* `DirectTCP::accept_one` rejected a reconnect from any rank it still held a descriptor for,
+  alive or not. It now probes `TCP_INFO` and replaces a socket that is no longer ESTABLISHED,
+  marking the link so the next establishment reconciles rather than starting clean.
+* `read_all` reported a *partial* read that then stalled as `Timeout` — a soft condition — even
+  though the bytes already taken are gone from the stream and every subsequent frame boundary
+  is off by that many. It now reports a broken link, which is true and recoverable.
+
+Neither closes the deadlock, because neither changes the fact that a rank inside `build_mesh`
+reads nothing else.
+
+An attempt to fix it by making the handshake one-way and asynchronous was **reverted**: it made
+the failure rate worse (2 of 8 passing) and introduced stream desynchronisation through exactly
+the partial-read path described above.
+
+### What would close it
+
+The design's own answer, and it needs both halves:
+
+* **a progress engine** — one component owning every socket, never blocking the rank on a
+  single link, so a rank rebuilding one link keeps draining the others;
+* **directory-driven repair** — a rank closes and re-establishes on *observing* a peer's
+  incarnation change, rather than waiting to trip over a dead descriptor.
+
+The design document states both as normative and explains that the machine-checked delivery
+result depends on the second. Neither is implemented, and the deadlock is the price.
+
+**Until then: the checkpoint story is verified at two ranks and deadlocks intermittently above
+that.**
+
 ## What the blocking shape cannot do
 
 Honest limits of what is built, all of which the design's engine would address:
@@ -174,6 +251,14 @@ Honest limits of what is built, all of which the design's engine would address:
 - **Standalone acks are best effort.** An ack that will not fit in the socket is dropped and
   re-offered after the next commit; a *partial* ack is completed with a blocking write, bounded
   by `SO_SNDTIMEO`, because a half-written frame would desynchronise the peer.
+- **The window is a new bound on unreceived sends**, and this is the behavioural regression the
+  design warns about. Unframed, "how many messages may a rank send before its peer receives
+  any" was bounded by the kernel socket buffer — effectively unbounded for small messages.
+  Framed with recovery it is `link_window_frames` (default 256), because every unacknowledged
+  send is retained. Exceeding it is a loud error naming the link, never a hang and never a
+  dropped message; `LinkLiveness/the_window_is_the_bound_on_unreceived_sends_and_it_fails_loudly`
+  pins both halves. A program that legitimately needs more must raise the window rather than
+  discover the limit in production.
 - **Single host only.** A restored rank re-uses the listening socket and advertised address its
   image captured. Correct on the same machine, wrong on any other.
 - **`ClientServer` keys are not identity-qualified.** Contract 1 specifies that the same tuple
