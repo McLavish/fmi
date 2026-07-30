@@ -63,6 +63,11 @@ namespace {
         //! repair attempt immediately fails again. Models a peer that has left for good.
         bool peer_is_gone = false;
 
+        //! When set, every checkout yields a link whose far end completes the handshake and
+        //! then closes. Repair keeps SUCCEEDING and the link keeps dying, which is the only
+        //! shape in which the repair budget — rather than a failing repair — ends the loop.
+        bool peer_is_flapping = false;
+
         //! Destroy the connection and put a fresh one in its place.
         /*!
          * shutdown() rather than close(): it tears the connection down so the channels' next
@@ -86,6 +91,29 @@ namespace {
         int checkout(int side) {
             std::lock_guard<std::mutex> g(mu);
             BOOST_REQUIRE(ends[side] >= 0);
+            if (peer_is_flapping) {
+                int pair[2];
+                BOOST_REQUIRE_EQUAL(socketpair(AF_UNIX, SOCK_STREAM, 0, pair), 0);
+                std::thread([far = pair[1]] {
+                    // Answer a handshake if one arrives, then die either way. The FIRST
+                    // connection carries a frame header rather than a handshake — handshakes
+                    // only happen on repair — so this must not block waiting for one.
+                    struct timeval tv {0, 200000};
+                    setsockopt(far, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+                    char in[handshake_bytes];
+                    ssize_t got = ::recv(far, in, sizeof in, MSG_WAITALL);
+                    if (got == static_cast<ssize_t>(sizeof in)) {
+                        HandshakePayload reply;   // fresh link: nothing sent, nothing expected
+                        char out[handshake_bytes];
+                        encode_handshake(reply, out);
+                        ssize_t n = ::write(far, out, sizeof out);
+                        (void) n;
+                    }
+                    ::close(far);
+                }).detach();
+                issued.push_back(pair[0]);
+                return pair[0];
+            }
             if (peer_is_gone) {
                 int dead[2];
                 BOOST_REQUIRE_EQUAL(socketpair(AF_UNIX, SOCK_STREAM, 0, dead), 0);
@@ -120,6 +148,9 @@ namespace {
             set_num_peers(peers);
             set_comm_name("recovery");
         }
+
+        //! Shrink the repair budget so the bound is reached quickly in tests.
+        void set_repair_budget(int n) { max_link_repairs = n; }
 
         //! Frames this channel still owes @p peer. Test-only view of protected link state.
         std::size_t retained(FMI::Utils::peer_num peer) {
@@ -311,6 +342,28 @@ BOOST_AUTO_TEST_CASE(a_peer_that_never_returns_fails_loudly_instead_of_repairing
     BOOST_CHECK_MESSAGE(elapsed < std::chrono::seconds(20),
                         "giving up took " <<
                         std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() << "s");
+}
+
+BOOST_AUTO_TEST_CASE(a_flapping_link_exhausts_the_repair_budget_rather_than_looping) {
+    // Repair succeeds every time and the link dies every time. Without a budget this spins
+    // forever; the operation must instead fail and name the peer.
+    Switchboard board;
+    PairedChannel rx(board, 1, 1, 2);
+    rx.set_repair_budget(3);
+    board.peer_is_flapping = true;
+    board.sever();
+
+    OperationScope scope(p2p_identity(1));
+    int got = 0;
+    bool budget_message = false;
+    try {
+        rx.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+    } catch (const std::exception& e) {
+        BOOST_TEST_MESSAGE("threw: " << e.what());
+        budget_message = std::string(e.what()).find("could not be repaired") != std::string::npos;
+    }
+    BOOST_CHECK_MESSAGE(budget_message,
+                        "a permanently flapping link did not exhaust the repair budget");
 }
 
 #if FMI_ENABLE_REDIS
