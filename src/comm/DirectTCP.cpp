@@ -734,10 +734,15 @@ void FMI::Comm::DirectTCP::service_transport() {
 void FMI::Comm::DirectTCP::adopt_pending(Utils::peer_num exclude) {
     // `exclude` protects establish()'s contract: build_mesh completes on a PENDING entry for
     // its target, which establish() then pops and returns. Adopting the target here instead
-    // leaves establish() finding nothing and reporting a timeout for a link that is fine —
-    // measured as 13 suite failures the one time it was tried. Everyone else is fair game,
-    // and must be adopted even mid-establishment: their senders were acknowledged at accept
-    // and have moved on to sending frames nobody would otherwise read.
+    // used to leave establish() finding nothing and reporting a timeout for a link that is
+    // fine — measured as 13 suite failures the one time it was tried; establish() now
+    // returns an already-adopted socket, so the exclude is an optimization that keeps the
+    // common path on the pop contract, not a correctness requirement. That matters because
+    // service_transport — reachable from INSIDE an in-flight establishment through servicing
+    // → reconcile → write_all → pump — excludes nothing, and skipping the target there would
+    // strand its sender: acknowledged at accept, its handshake and replay pushed into a
+    // connection nobody reads for as long as the establishment lasts. Everyone is fair game,
+    // and must be adopted even mid-establishment.
     for (auto it = pending_links.begin(); it != pending_links.end();) {
         const Utils::peer_num rank = it->first;
         const int fd = it->second;
@@ -899,10 +904,10 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
                                                                         : connect_retry_interval_ms);
         }
 
-        // Take whatever whole frames are already waiting on this rank's other links. Without
+        // Take whatever frames are already waiting on this rank's other links. Without
         // this, a rank stuck here reads nothing else, and after a restore — when several links
         // rebuild at once — every rank ends up holding a frame another rank is waiting for.
-        service_established_links(target);
+        const bool serviced_progress = service_established_links(target);
 
         // Always poll the listener, even when the peer we want is one we connect to: a lower
         // rank blocked here still owes accepts and acknowledgements to the ranks above it.
@@ -915,6 +920,29 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             pfds.push_back({fd, POLLIN, 0});
             pfd_rank.push_back(rank);
         }
+        // The established links are polled too, so this loop wakes when their bytes arrive
+        // and the servicing pass above gets to run. A listener-side wait used to sleep here
+        // until its deadline: harmless when servicing could only ever take whole frames —
+        // whatever it left behind stayed left behind — but fatal now that servicing stages
+        // oversized frames a socket buffer at a time, where sleeping means the peer's
+        // half-delivered frame jams both ends for the rest of the deadline. Only after a
+        // pass that made progress, though: a readable socket servicing REFUSED to drain (a
+        // frame still growing, an app-owned stream, a decode failure) would wake this poll
+        // instantly and spin the loop at full speed; after a refusal the poll sleeps a
+        // bounded slice on the listener and timers alone, and the next pass re-judges.
+        const std::size_t unconfirmed_end = pfds.size();
+        if (serviced_progress) {
+            for (Utils::peer_num q = 0; q < num_peers; q++) {
+                if (q == peer_id || q >= sockets.size() || sockets[q] < 0) {
+                    continue;
+                }
+                if (q < app_owns_stream.size() && app_owns_stream[q]) {
+                    continue;   // mid-frame on the application's side; servicing skips it
+                }
+                pfds.push_back({sockets[q], POLLIN, 0});
+                pfd_rank.push_back(q);
+            }
+        }
 
         // Sleep no longer than the nearest pending retry, so a scheduled registry poll or
         // publish is not delayed until the next socket event.
@@ -924,6 +952,13 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
         }
         if (!published) {
             budget = std::min<long>(budget, std::max<long>(next_publish_attempt - monotonic_ms(), 1));
+        }
+        if (!serviced_progress) {
+            // The established sockets are out of the poll set this iteration, but the
+            // servicing pass must still come back: the staging heuristic judges a frame
+            // jammed by observing NO growth across a slice, and a stalled frame's rescue is
+            // the pass after that judgement. One pump-slice heartbeat.
+            budget = std::min<long>(budget, 20);
         }
         int pr = ::poll(pfds.data(), pfds.size(), static_cast<int>(std::max<long>(budget, 0)));
         if (pr < 0) {
@@ -948,6 +983,12 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
                 // long as this wait lasts, while its sender - acknowledged at accept - has
                 // moved on to frames and possibly a replay nobody drains.
                 adopt_pending(target);
+                continue;
+            }
+            if (i >= unconfirmed_end) {
+                // An established link has bytes; the next iteration's servicing pass takes
+                // them. Nothing to do here — and in particular no unconfirmed lookup, whose
+                // rank numbers these slots can collide with.
                 continue;
             }
             Utils::peer_num rank = pfd_rank[i];
@@ -987,6 +1028,15 @@ int FMI::Comm::DirectTCP::establish(Utils::peer_num partner_id, const std::strin
         build_mesh(partner_id, monotonic_ms() + static_cast<long>(max_timeout));
         it = pending_links.find(partner_id);
         if (it == pending_links.end()) {
+            // No pending entry, but the link may nevertheless be up: a servicing pass nested
+            // inside this very establishment (pump → service_transport → adopt_pending, which
+            // excludes nothing) can have adopted the target already. That is a completed
+            // establishment, not a failure — check_socket stores the same fd back and pays
+            // any reconcile debt the adoption deferred. Throwing here instead reported a
+            // Timeout for a healthy link.
+            if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
+                return sockets[partner_id];
+            }
             throw Utils::Timeout();
         }
     }

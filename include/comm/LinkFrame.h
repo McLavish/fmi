@@ -73,6 +73,9 @@ namespace FMI::Comm {
      */
     inline constexpr std::size_t frame_header_bytes = 72;
 
+    //! Serialized HandshakePayload size — the payload of every Handshake frame, exactly.
+    inline constexpr std::size_t handshake_bytes = 56;
+
     inline constexpr std::uint8_t flag_commutative = 0x1u;
     inline constexpr std::uint8_t flag_associative = 0x2u;
 
@@ -289,6 +292,13 @@ namespace FMI::Comm {
             (out.payload_length != 0 || out.total_length != 0 || out.transport_seq != 0)) {
             return DecodeStatus::Inconsistent;
         }
+        // A handshake's payload is the fixed-size HandshakePayload and nothing else. Every
+        // reader of that payload reads exactly handshake_bytes of it, so a frame claiming a
+        // different length would have them read past what actually arrived — or leave stray
+        // bytes to be parsed as the next frame's header.
+        if (out.frame_type == FrameType::Handshake && out.payload_length != handshake_bytes) {
+            return DecodeStatus::Inconsistent;
+        }
         return DecodeStatus::Ok;
     }
 
@@ -330,8 +340,6 @@ namespace FMI::Comm {
          */
         std::uint64_t peer_incarnation = 0;
     };
-
-    inline constexpr std::size_t handshake_bytes = 56;
 
     //! The handshake frame. Its payload is an encoded HandshakePayload.
     inline FrameHeader make_handshake_frame() {

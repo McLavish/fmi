@@ -41,6 +41,21 @@ std::uint64_t FMI::Comm::SequencedLink::lowest_retained() const {
     return retention.empty() ? next_send : retention.front().header.transport_seq;
 }
 
+bool FMI::Comm::SequencedLink::copy_retained(std::uint64_t seq, Retained& out) const {
+    // Ordered by transport_seq, pruned only from the front, so the scan is short and the
+    // first overshoot ends it.
+    for (const auto& retained : retention) {
+        if (retained.header.transport_seq == seq) {
+            out = retained;
+            return true;
+        }
+        if (retained.header.transport_seq > seq) {
+            break;
+        }
+    }
+    return false;
+}
+
 bool FMI::Comm::SequencedLink::admit(const FrameHeader& identity, const char* payload,
                                      std::size_t len, FrameHeader& stamped) {
     if (len > config.max_frame_bytes || send_blocked()) {

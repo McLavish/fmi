@@ -158,6 +158,15 @@ namespace FMI::Comm {
         //! Per-peer steady-clock ms when servicing first peeked EOF/hard-error on the link;
         //! 0 = healthy. Observation only - the close happens on the dialer's side, aged.
         std::vector<long> link_suspect_since;
+        //! Per-peer count of decode-failure suspicions raised on the CURRENT connection.
+        /*!
+         * A desynchronised stream heals through the redial-and-replay a suspicion triggers.
+         * A content-level rejection — a version or size the peer legitimately produced —
+         * reproduces identically after every replay, and an uncapped mark would turn one
+         * loud error into an endless redial storm. Two attempts, then the silent break, so
+         * the application's own read of the same bytes reports it the loud way.
+         */
+        std::vector<int> decode_fail_marks;
         //! Depth of establishment calls on this stack. Redial is forbidden inside one: the
         //! first attempt at this ran build_mesh from the servicing loop build_mesh itself
         //! drives, and made the wedge worse instead of better.
@@ -218,12 +227,19 @@ namespace FMI::Comm {
          * relation that makes lazy establishment safe stops being acyclic and the job
          * deadlocks: every rank waits, and every rank holds a whole frame another needs.
          *
-         * Only complete frames are taken (the header is peeked and the payload's arrival
-         * confirmed before anything is consumed), so a link is never left half-read. They go
-         * into the per-lane drain queues, and recv_object takes them from there in preference
-         * to the socket. A link that fails here is left alone: the receive path owns repair.
+         * Frames that fit the socket buffer are taken whole (the header is peeked and the
+         * payload's arrival confirmed before anything is consumed); frames that can never
+         * fit are staged incrementally (R9), so a link is never left AMBIGUOUSLY half-read.
+         * They go into the per-lane drain queues, and recv_object takes them from there in
+         * preference to the socket. A link that fails here is left alone: the receive path
+         * owns repair.
+         *
+         * @return true when any bytes were consumed or staged. A caller polling the
+         *         established sockets must know: a readable socket this pass refused to
+         *         drain (a growing frame, a decode failure, an app-owned stream) would
+         *         otherwise turn its poll into a busy loop.
          */
-        void service_established_links(Utils::peer_num skip);
+        bool service_established_links(Utils::peer_num skip);
 
         //! Take ownership of a connection the transport accepted on its own initiative.
         /*!
@@ -256,6 +272,96 @@ namespace FMI::Comm {
 
         //! Links whose next establishment must reconcile rather than start clean.
         std::vector<char> link_needs_reconcile;
+
+        //! A frame servicing began to consume but has not yet fully read off the socket.
+        /*!
+         * Servicing may only take what is already buffered, and a frame larger than the
+         * socket receive buffer is never all buffered at once. Without staging, such a frame
+         * can only ever be drained by the application receiving on that exact link — and
+         * after a restore, the replay that carries it routinely meets a receiver that is
+         * parked on a different peer for as long as the job lasts, which jams the sender's
+         * write_all and closes a wait cycle (the post-restore stall). The stage accumulates
+         * the payload across servicing passes, never blocking, and commits only once every
+         * byte is in local memory, so the watermark ordering (R1) is untouched: an incomplete
+         * stage is unacked by construction, and is discarded when the connection is replaced
+         * — the peer still retains the frame and replays it whole.
+         */
+        struct InboundStage {
+            bool active = false;
+            FrameHeader header;
+            std::vector<char> payload;
+            std::size_t got = 0;
+            //! FIONREAD observed the last time the head frame failed the whole-frame check;
+            //! -1 = not tracking. If the count has not grown a full pump slice later, the
+            //! frame is jammed — the peer's window is closed against a reader that stopped —
+            //! and it must be staged. Growth means it is still arriving and the fast path
+            //! will take it whole. This is deliberately not a buffer-size heuristic:
+            //! SO_RCVBUF's reported value is inflated by receive autotuning while a reader
+            //! drains fast, and trusting it left a 2 MiB frame stranded behind a ~512 KB
+            //! window forever. The time floor matters as much as the count: two servicing
+            //! passes can be microseconds apart (an establishment loop polling a readable
+            //! fd), and judging "stalled" over that gap would stage every frame that ever
+            //! straddles two TCP segments.
+            int stalled_available = -1;
+            long stalled_at_ms = 0;
+        };
+        //! Per-peer stage, sized with the link state.
+        std::vector<InboundStage> inbound_stage;
+        //! Nonzero while the application's receive path is mid-frame on that link — from the
+        //! first header byte until the frame's payload has been fully consumed. Servicing
+        //! must not read the socket then: the bytes that follow belong to the frame the
+        //! application owns, and consuming them from a nested pump would splice the stream.
+        std::vector<char> app_owns_stream;
+
+        //! Per-peer count of write_alls currently mid-frame TOWARD that peer.
+        /*!
+         * write_all's pump services links, and servicing wants to write — a standalone ack
+         * after a drained frame, a handshake-plus-replay for a reconcile debt. Emitting
+         * either onto a socket write_all is partway through a frame on would splice whole
+         * frames into the middle of that frame, which the receiver has no way to detect
+         * beyond a failed decode. While a peer is frozen, the ack stays merely re-offered
+         * (it is best-effort by contract) and the reconcile mark stays set; both are paid
+         * the moment the frame completes. Reading a frozen peer remains allowed — TCP is
+         * full-duplex and draining it is exactly what unjams a mutual write. A COUNT per
+         * peer, not one scalar: writes nest across peers (a replay to B from inside a wait
+         * on A), and a scalar slot un-froze the outer peer for exactly as long as the inner
+         * write ran — the splice happened anyway, one level down.
+         */
+        std::vector<int> outbound_frozen;
+
+        [[nodiscard]] bool frozen(Utils::peer_num p) const {
+            return p < outbound_frozen.size() && outbound_frozen[p] > 0;
+        }
+
+        //! Per-peer count of times the connection was replaced or (re-)established.
+        /*!
+         * The mid-operation replacement checks in write_all/read_all/read_header_yielding
+         * used to compare fd NUMBERS, and the kernel hands the lowest free number out again:
+         * an accept that closes fd 5 and then accepts the peer's immediate retry can get 5
+         * back within one servicing pass, and the "did my link change under me" test then
+         * says no while the bytes continue onto a brand-new stream. A generation only ever
+         * increments, so it cannot ABA.
+         */
+        std::vector<std::uint64_t> link_generation;
+
+        [[nodiscard]] std::uint64_t generation(Utils::peer_num p) const {
+            return p < link_generation.size() ? link_generation[p] : 0;
+        }
+
+        void bump_generation(Utils::peer_num p) {
+            if (link_generation.size() <= p) {
+                link_generation.resize(num_peers > p ? num_peers : p + 1, 0);
+            }
+            ++link_generation[p];
+        }
+
+        //! Pull whatever bytes are already buffered into the active stage. Never blocks.
+        //! @return 1 = the stage is complete, 0 = more bytes are still to come, -1 = the
+        //!         connection is dead (EOF or a hard error); the stage is kept either way —
+        //!         an incomplete frame is unacked, so a replacement replays it.
+        int fill_stage(Utils::peer_num peer);
+        //! Dispatch a completed stage exactly as the whole-frame path would have, and clear it.
+        void finish_stage(Utils::peer_num peer);
 
         //! Serialize and write one frame.
         void write_frame(Utils::peer_num rcpt_id, const FrameHeader& header, const char* payload);

@@ -100,6 +100,17 @@ namespace FMI::Comm {
         //! Exactly the unacked suffix, in sequence order: what a re-established link replays.
         [[nodiscard]] const std::deque<Retained>& replay_suffix() const { return retention; }
 
+        //! Copy the retained frame with @p seq into @p out; false if it is not retained.
+        /*!
+         * For replay loops that must survive the retention being pruned UNDER them: writing a
+         * replay frame pumps, the pump services other links, and an inbound frame's
+         * piggybacked ack legitimately prunes this very deque mid-iteration. A reference into
+         * the deque dangles at that moment — observed as freed-heap bytes on the wire — where
+         * a copy is immune, and a frame pruned before its turn is a frame the peer just
+         * declared it holds, so skipping it is correct rather than merely safe.
+         */
+        [[nodiscard]] bool copy_retained(std::uint64_t seq, Retained& out) const;
+
         [[nodiscard]] std::uint64_t next_send_seq() const { return next_send; }
         [[nodiscard]] std::uint64_t lowest_retained() const;
         [[nodiscard]] std::size_t retained_bytes() const { return retention_bytes; }
