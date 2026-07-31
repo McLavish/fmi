@@ -105,6 +105,105 @@ has pruned well past it. Judged as a same-lineage handshake that is an impossibl
 the legitimate replacement is rejected. Pinned by
 `LinkIncarnations/a_replacements_zero_sequences_would_be_rejected_without_the_lineage_check`.
 
+### R6 — Delivery order is the lane's, not the socket's
+
+> **Normative:** whenever a link's drain queue is non-empty, the application receives from
+> the queue, oldest first. The inline read path may hand a frame to the application only if
+> the queue for that lane is empty at the moment of delivery — checked again after every
+> wait, not once at entry — and a frame read off the socket while older frames sit queued is
+> parked behind them, never delivered.
+
+The skip argument that stops `service_established_links` draining the link its caller waits
+on is not transitive: a nested pump — entered, say, from a handshake replay to a third rank —
+carries a *different* skip, and legitimately drains the very link the application is
+mid-receive on. That is not a defect; it is the waiting-rank obligation doing its job. What
+was a defect is that `recv_object` consulted the drain queue once, at entry. A frame drained
+during the wait advanced `next_received`, so the *next* frame off the socket classified as
+Delivered — and with p2p identity carrying no per-operation counter (see below), nothing else
+could object. The application received round N+1 while round N sat in local memory.
+
+Found by the diverse-shape sweep this spec previously lacked: p2p_ring at 7 ranks with 2 MB
+payloads failed 3 of 30 trials, every one a silent one-or-two-round substitution on a link
+between two ranks that were **not** checkpointed. A payload-carrying trace
+(`FMI_LINK_TRACE=1`) pinned the interleaving — `accept->lane seq=93` directly followed by
+`inline-deliver seq=94` — and a four-angle independent code audit converged on the same
+mechanism from the source alone. After the fix the same seed runs 30/30 with 29 lane commits
+each matched by an in-order lane delivery.
+
+Mutations: `lane_is_checked_once_at_entry`, `inline_path_ignores_the_drain_queue`,
+`header_read_never_yields_to_the_lane`.
+
+### R7 — A replaced connection restarts mid-flight operations at a frame boundary
+
+> **Normative:** `read_all` and `write_all` must fail with `LinkReplaced` — not continue —
+> when the transport swaps the socket beneath them, and their callers resume from a frame
+> boundary on the new connection without charging the repair budget.
+
+`accept_one` may adopt a replacement connection from inside a nested pump while the
+application is mid-frame on the old one. Both loops re-read `sockets[peer]` on every
+iteration, so without the guard they would keep filling one buffer from two different byte
+streams — a splice no later check can catch, because the result is a well-formed buffer of
+garbage. The replaced link needs no repair: the peer that dialed replays from its retention,
+so the reader restarts at the header and the writer's admitted frame travels via the replay.
+
+Mutation: `replaced_link_keeps_the_old_byte_count`.
+
+### R8 — Establishment must survive a freeze landing inside it
+
+Three obligations, each found from a traced wedge specimen of a job checkpointed during
+round 0 — while the mesh was still being built lazily:
+
+> **Normative (a):** an incoming hello for a rank with a *parked pending connection* replaces
+> the parked descriptor, exactly as it replaces a held socket. The reconnect is the evidence;
+> a dialer only dials again after abandoning its previous attempt, and rejecting the retry on
+> the strength of the corpse it left behind wedges both ranks.
+
+> **Normative (b):** `build_mesh` adopts accepted connections for every rank EXCEPT its
+> target while it waits. The target's pending entry is the wait's completion condition,
+> popped by `establish()` — adopting it breaks that contract loudly (13 suite failures the
+> one time it was tried). Everyone else was acknowledged at accept and has moved on to
+> sending frames nobody would otherwise read.
+
+> **Normative (c):** a link that servicing has observed dead for over a second, whose DIALER
+> this rank is, gets one bounded re-dial attempt per pump slice — never from inside an
+> establishment (`establishment_depth` guards), with the dead descriptor closed only at the
+> moment its replacement is dialed. The listener side's whole obligation remains serving its
+> accept queue: DirectTCP dials down, so every dead link has exactly one responsible dialer.
+
+The cycle (c) breaks: a restored rank that may only *accept* a link waits for its dialer; the
+dialer only touches its dead descriptor when its application does; and the dialer's
+application is blocked in a chain rooted at the waiting rank. Servicing had peeked EOF on the
+dead link every 20 ms and treated it as "nothing to drain".
+
+A caution that cost a full round: the FIRST version of (c) closed dead links at observation
+time and re-dialed from inside `service_established_links` — the loop `build_mesh` itself
+drives. It took the failing shape from 4/6 to 1/8. Both mistakes are structural, not tuning:
+observation-time closing forces readers through re-establishment for deaths that need no
+repair at all (a peer that finalized after its last message — which is also why the drain
+queue must be consulted *before* `check_socket`), and establishment reentrancy was never
+proven safe. Measured after the corrected version, honestly: **the wedge is reduced, not closed.** Pooled
+across seeds, the failing shape went from 19/26 (73%) before the re-dial to 20/24 (83%) with
+it — 11/12 on one seed, 9/12 on another — with the ring shape 12/12 unchanged throughout. The
+obligations (a) and (b) are specimen-backed and keep their measured wedges from recurring;
+(c) is principled and harmless but its measured effect is modest, and the remaining ~15%
+post-restore stalls at 7 ranks on `variable_payloads` are an **open defect**: their traced
+specimens were lost to the harness's shared artifact directory (itself now fixed to
+per-invocation subdirectories), so the residual mechanism is uncharacterized. Anyone
+resuming: run the sweep with `FMI_LINK_TRACE=1 --keep` on that shape and read the
+`BUILD-MESH-WAIT`/`SOLO-POLL`/`DRAIN-ACKS-WAIT`/`SERVICING-SAW-DEAD`/`REDIALED` beacons of a
+failing trial - one specimen locates the wait.
+
+### A property R6 leans on: p2p identity does not number operations
+
+`p2p_identity(dest)` is the same for every same-size message between the same pair —
+`same_identity` distinguishes lanes, op kinds, collectives, roots and lengths, but not the
+first send to a peer from the thousandth. For repeated point-to-point traffic, **transport
+sequence order is the entire defence** against wrong-round delivery; that is what makes R6
+normative rather than defensive. Numbering p2p operations in the envelope would add a second,
+independent check — at the cost of forbidding legitimate schedule drift between sender and
+receiver of the kind collectives never produce. Not done on this branch; recorded so nobody
+mistakes the silence of `same_identity` on p2p streams for coverage.
+
 ## Contract 3 as implemented
 
 An **incarnation** names a *lineage of link state*, not a process and not a rank.
@@ -258,6 +357,38 @@ prints what it believes it holds on every link. That produced the decisive line:
 `rec=1` — rank 0 had held peer 2's link marked for reconciliation for thirty-nine seconds while
 peer 2 waited for exactly the replay that mark represents. The diagnostic is kept, unconditional,
 and silent in a healthy run because nothing waits that long.
+
+## What the diverse-shape sweep then found
+
+The 48/48 result above was real but narrow: one program shape, small payloads. Parameterising
+the checkpoint subject by app shape (six new shapes, `runbooks/criu-transparent-checkpoint/shapes/`)
+and pushing payloads to 2 MB found two safety defects and one composition defect that the
+original battery could not see:
+
+1. **Silent round substitution under nested servicing** — R6 above. ~10–20% of large-payload
+   ring trials at 7 ranks; zero at small payloads, which is why 48/48 missed it.
+2. **Stream splice on mid-frame link replacement** — R7 above. Latent; found by audit rather
+   than sweep.
+3. **Framing was incompatible with FT migration**: `reconfigure_for_epoch` reset a survivor's
+   link *to* a moved rank but let the moved rank itself — in-place or CRIU-restored, appearing
+   in its own moved set — keep stale counters toward every survivor (`sequence gap: expected 0
+   but received 31`). Fixed by the self-moved branch: a rank that finds itself in the moved
+   set resets every link. Pinned by
+   `LinkLiveness/a_moved_rank_starts_every_link_afresh_after_reconfigure` and mutation
+   `moved_rank_keeps_links_to_survivors`. Verified: the whole `FaultTolerance` suite is green
+   with framing off (repeatedly), and with framing on the pre-fix failures — deterministic
+   `sequence gap: expected 0 but received 31` every run — are gone. What framing-on shows
+   instead is an INTERMITTENT wedge (~1 in 8 runs of the suite,
+   `transparent_migration_cut_timing_stress`, a rank wedged in a Timeout waiting on a peer
+   mid-cut): the same post-freeze establishment-liveness family as R8's open residual, on the
+   `Direct` backend, which has no R8(c) re-dial (TCPunch pairing establishes differently).
+   Tracked with the R8 residual as one open defect.
+
+The general lesson mirrors the mutation-sweep cautions: the evidence for "arbitrary FMI
+programs" must come from programs the branch did not write its configs around. The sweep now
+defaults to enough rounds for a checkpoint to land and scores a trial where none landed as
+SKIP, not FAIL — three shape authors independently misread the old scoring as protocol
+failures.
 
 ## What the blocking shape cannot do
 
