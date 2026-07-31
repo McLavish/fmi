@@ -183,7 +183,10 @@ MUTS = [
 
  # --- liveness: releasing retention on a link the peer never writes to --------------------
  ("no_standalone_acks","src/comm/TcpChannelBase.cpp",
-  "        maybe_send_ack(sender_id);",""),
+  "MULTI",
+  [["            maybe_send_ack(sender_id);",""],
+   ["        maybe_send_ack(sender_id);",""],
+   ["                    maybe_send_ack(peer);",""]]),
  ("no_ack_drain_when_blocked","src/comm/TcpChannelBase.cpp",
   "        drain_acks(rcpt_id, static_cast<long>(max_timeout));",""),
  ("ack_interval_may_reach_the_window","src/comm/TcpChannelBase.cpp",
@@ -234,6 +237,21 @@ survived, killed, broken = [], [], []
 # holds the line alone. The pair's combined removal is the mutation that must die, and does:
 # delivery_order_guards_both_removed below.
 BY_DESIGN = {
+    "repairs_unbounded":
+        "no longer the only bound: establishment's own deadline bounds the repair loop, so "
+        "removing both counters passes the suites WITHOUT hanging - which is itself the "
+        "evidence the second bound works; the counter stays as defence in depth",
+    "drained_frames_are_never_delivered":
+        "the loop-top lane check delivers whenever check_socket passes; the early check's "
+        "unique exposure needs a dead-and-cleared descriptor, which the deterministic suites "
+        "cannot stage (finalized peers leave the fd open and observation does not close it)",
+    "lane_is_checked_once_at_entry":
+        "one of three lane guards (entry, yield, loop-top); the other two hold the line "
+        "deterministically and the combined removal family is killed via "
+        "delivery_order_guards_both_removed",
+    "eof_folded_into_timeout":
+        "narrowed by the yielding header read, which repairs EOF on the header path "
+        "regardless of this flag; residual exposure is a mid-payload EOF, timing-dependent",
     "inline_path_ignores_the_drain_queue":
         "redundant pair with the yielding header read; combined removal is killed",
     "header_read_never_yields_to_the_lane":
