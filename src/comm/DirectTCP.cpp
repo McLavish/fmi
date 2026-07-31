@@ -17,6 +17,8 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <mutex>
@@ -647,8 +649,21 @@ FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
     // relies on being impossible — it is, for a first establishment, and is not after a
     // restore. Measured: checkpointing rank 0 of an 8-rank job wedged every rank in the job.
     if (pending_links.count(claimed) > 0) {
-        ::close(fd);   // already holding a fresh connection for that rank
-        return AcceptResult::Rejected;
+        if (!recover_links) {
+            ::close(fd);   // already holding a fresh connection for that rank
+            return AcceptResult::Rejected;
+        }
+        // The reconnect is the evidence, exactly as for sockets[] below: a peer only dials
+        // again after abandoning its previous attempt, so the parked descriptor is that
+        // abandoned attempt - observed for real when a dialer missed its hello-ack, closed
+        // its end, and every retry was then rejected on the strength of the dead fd it left
+        // behind, wedging both ranks until the job's deadline.
+        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
+            std::fprintf(stderr, "[lt] pending-REPLACE rank=%u oldfd=%d newfd=%d\n",
+                         static_cast<unsigned>(claimed), pending_links[claimed], fd);
+        }
+        ::close(pending_links[claimed]);
+        pending_links.erase(claimed);
     }
     if (claimed < sockets.size() && sockets[claimed] >= 0) {
         if (!recover_links) {
@@ -664,6 +679,10 @@ FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
         // ESTABLISHED while nothing is on the other end, so probing it answers "live", the
         // reconnect is refused, and the peer's handshake sits unread on a connection this rank
         // accepted but never adopted.
+        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
+            std::fprintf(stderr, "[lt] accept-REPLACE rank=%u oldfd=%d newfd=%d\n",
+                         static_cast<unsigned>(claimed), sockets[claimed], fd);
+        }
         ::close(sockets[claimed]);
         sockets[claimed] = -1;
         note_link_replaced(claimed);
@@ -709,9 +728,23 @@ void FMI::Comm::DirectTCP::service_transport() {
     // until the application next talks to that peer means its handshake sits unread while the
     // peer waits for ours — which is a deadlock, not a delay, when that peer is what this rank
     // is ultimately waiting on.
+    adopt_pending(num_peers);
+}
+
+void FMI::Comm::DirectTCP::adopt_pending(Utils::peer_num exclude) {
+    // `exclude` protects establish()'s contract: build_mesh completes on a PENDING entry for
+    // its target, which establish() then pops and returns. Adopting the target here instead
+    // leaves establish() finding nothing and reporting a timeout for a link that is fine —
+    // measured as 13 suite failures the one time it was tried. Everyone else is fair game,
+    // and must be adopted even mid-establishment: their senders were acknowledged at accept
+    // and have moved on to sending frames nobody would otherwise read.
     for (auto it = pending_links.begin(); it != pending_links.end();) {
         const Utils::peer_num rank = it->first;
         const int fd = it->second;
+        if (rank == exclude) {
+            ++it;
+            continue;
+        }
         const bool unheld = sockets.empty() || (rank < sockets.size() && sockets[rank] < 0);
         if (unheld && fd >= 0) {
             it = pending_links.erase(it);
@@ -727,7 +760,47 @@ void FMI::Comm::DirectTCP::service_transport() {
     }
 }
 
+
+bool FMI::Comm::DirectTCP::redial_dead_link(Utils::peer_num partner_id, long budget_ms) {
+    // Only the dialing side of the pair may act; the listener's whole obligation is already
+    // met by servicing its accept queue. DirectTCP dials DOWN: build_mesh connects to lower
+    // ranks and waits for higher ones.
+    if (partner_id >= peer_id) {
+        return false;
+    }
+    // Close the dead descriptor only here, at the moment its replacement is actually being
+    // dialed - closing it at observation time forced every reader through re-establishment
+    // for links whose death needed no repair at all (a peer that finalized after its last
+    // message). The mark makes check_socket pay the handshake and replay on the new link.
+    if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
+        close(sockets[partner_id]);
+        sockets[partner_id] = -1;
+    }
+    note_link_replaced(partner_id);
+    try {
+        build_mesh(partner_id, monotonic_ms() + std::max<long>(budget_ms, 50));
+    } catch (const Utils::Timeout&) {
+        return false;   // not now; pump retries next slice
+    } catch (const std::exception&) {
+        return false;
+    }
+    // establish() pops the pending entry and check_socket stores it plus pays the debt.
+    if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
+        return true;
+    }
+    if (pending_links.count(partner_id) > 0) {
+        check_socket(partner_id, link_name(partner_id, true));
+        return partner_id < sockets.size() && sockets[partner_id] >= 0;
+    }
+    return false;
+}
+
 void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) {
+    ++establishment_depth;
+    struct DepthGuard {
+        int& depth;
+        ~DepthGuard() { --depth; }
+    } depth_guard{establishment_depth};
     ensure_listener();
 
     auto have_link = [&](Utils::peer_num rank) {
@@ -756,6 +829,16 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
     // still handing out every accept and acknowledgement it owes.
     while (!have_link(target)) {
         long now = monotonic_ms();
+        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
+            static thread_local long last_bm_note = 0;
+            if (now - last_bm_note > 3000) {
+                last_bm_note = now;
+                std::fprintf(stderr,
+                             "[lt] BUILD-MESH-WAIT target=%u dialer=%d pending=%zu unconfirmed=%zu published=%d\n",
+                             static_cast<unsigned>(target), target < peer_id ? 1 : 0,
+                             pending_links.size(), unconfirmed.size(), published ? 1 : 0);
+            }
+        }
         if (now >= deadline_ms) {
             for (auto& [rank, fd] : unconfirmed) {
                 (void) rank;
@@ -859,6 +942,12 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             }
             if (i < listener_slots) {
                 accept_one();
+                // Adopt for every rank EXCEPT the target (whose pending entry is this very
+                // wait's completion condition, popped by establish()). Without this, a
+                // connection accepted here for a third rank sits parked and unread for as
+                // long as this wait lasts, while its sender - acknowledged at accept - has
+                // moved on to frames and possibly a replay nobody drains.
+                adopt_pending(target);
                 continue;
             }
             Utils::peer_num rank = pfd_rank[i];

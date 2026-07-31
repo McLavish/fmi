@@ -63,6 +63,7 @@ namespace FMI::Comm {
          * collectives only by accident.
          */
         int establish(Utils::peer_num partner_id, const std::string& link_name) override;
+        bool redial_dead_link(Utils::peer_num partner_id, long budget_ms) override;
 
     //! Accept whatever is waiting on the listener, right now, without blocking.
     /*!
@@ -116,6 +117,8 @@ namespace FMI::Comm {
         std::string resolve_advertise_ip() const;
 
         void build_mesh(Utils::peer_num target, long deadline_ms);
+        //! Adopt accepted-but-unheld pending connections, except @p exclude.
+        void adopt_pending(Utils::peer_num exclude);
 
         //! Non-blocking connect to every named peer at once. Successful connects land in
         //! @p unconfirmed — they are not usable links until the listener acknowledges, since a

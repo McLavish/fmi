@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -56,6 +57,15 @@ void FMI::Comm::TcpChannelBase::ensure_link_state() {
 }
 
 namespace {
+    //! Env-gated tracing (FMI_LINK_TRACE=1), cached: one getenv for the process lifetime.
+    bool link_trace() {
+        static const bool on = [] {
+            const char* v = std::getenv("FMI_LINK_TRACE");
+            return v != nullptr && v[0] == '1';
+        }();
+        return on;
+    }
+
     long steady_now_ms() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -105,9 +115,21 @@ void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budg
             if (remaining <= 0) {
                 return;
             }
+            if (link_trace()) {
+                static thread_local long last_da_note = 0;
+                const long now = steady_now_ms();
+                if (now - last_da_note > 3000) {
+                    last_da_note = now;
+                    std::fprintf(stderr, "[lt] DRAIN-ACKS-WAIT peer=%u fd=%d remaining=%ld\n",
+                                 static_cast<unsigned>(partner_id), sockets[partner_id], remaining);
+                }
+            }
             struct pollfd pfd{sockets[partner_id], POLLIN, 0};
-            if (::poll(&pfd, 1, static_cast<int>(remaining)) <= 0) {
-                return;
+            if (::poll(&pfd, 1, static_cast<int>(std::min<long>(remaining, 1000))) <= 0) {
+                if (steady_now_ms() >= deadline) {
+                    return;
+                }
+                continue;
             }
             continue;
         }
@@ -134,7 +156,11 @@ void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budg
             // ack has already been applied, which is the only thing needed here.
             return;
         }
-        read_all(partner_id, encoded, frame_header_bytes);   // consume the ack we just peeked
+        try {
+            read_all(partner_id, encoded, frame_header_bytes);   // consume the ack just peeked
+        } catch (const LinkReplaced&) {
+            return;   // the fresh link's acks arrive on their own schedule
+        }
         if (!links[partner_id].send_blocked()) {
             return;
         }
@@ -198,6 +224,16 @@ bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long de
     // deadline would leave the rank serving nobody for as long as it lasted.
     if (pump_depth >= 3) {
         const long remaining = std::max<long>(deadline_ms - steady_now_ms(), 0);
+        if (link_trace()) {
+            static thread_local long last_solo_note = 0;
+            const long now = steady_now_ms();
+            if (now - last_solo_note > 3000) {
+                last_solo_note = now;
+                std::fprintf(stderr, "[lt] SOLO-POLL depth=%d peer=%u fd=%d events=%d remaining=%ld\n",
+                             pump_depth, static_cast<unsigned>(peer),
+                             peer < sockets.size() ? sockets[peer] : -2, events, remaining);
+            }
+        }
         struct pollfd solo{sockets[peer], events, 0};
         return ::poll(&solo, 1, static_cast<int>(std::min<long>(remaining, 20))) > 0;
     }
@@ -227,6 +263,30 @@ bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long de
         // Nothing yet on the descriptor we need. Pay what we owe everyone else.
         service_transport();
         service_established_links(peer);
+        // One more obligation, the aged kind: a link servicing has seen dead for over a
+        // second, whose DIALER this rank is, gets one bounded re-dial attempt per slice. The
+        // dead end cannot fix itself - its owner only touches the link when the application
+        // does, and the application may be blocked right here in a wait that transitively
+        // needs that very peer. Guarded against establishment reentrancy, aged so ordinary
+        // teardown never triggers it, and skipped for the peer this pump is already about.
+        if (recover_links && establishment_depth == 0 &&
+            link_suspect_since.size() == num_peers) {
+            const long now_ms = steady_now_ms();
+            for (Utils::peer_num q = 0; q < num_peers; q++) {
+                if (q == peer || q == peer_id || link_suspect_since[q] == 0 ||
+                    now_ms - link_suspect_since[q] < 1000) {
+                    continue;
+                }
+                if (redial_dead_link(q, 250)) {
+                    link_suspect_since[q] = 0;
+                    if (link_trace()) {
+                        std::fprintf(stderr, "[lt] REDIALED peer=%u fd=%d\n",
+                                     static_cast<unsigned>(q),
+                                     q < sockets.size() ? sockets[q] : -2);
+                    }
+                }
+            }
+        }
         {
             // A rank that has been waiting seconds says what it believes it holds on every
             // link. Silent in a healthy run - nothing waits this long - and the one thing that
@@ -256,7 +316,13 @@ void FMI::Comm::TcpChannelBase::write_all(Utils::peer_num rcpt_id, const char* d
     // a large buffer, and a silent short send would desynchronize the byte stream.
     std::size_t sent = 0;
     const long deadline = steady_now_ms() + static_cast<long>(max_timeout);
+    const int fd_at_entry = sockets[rcpt_id];
     while (sent < len) {
+        if (sockets[rcpt_id] != fd_at_entry) {
+            throw LinkReplaced(transport_tag + ": link to peer " + std::to_string(rcpt_id) +
+                               " replaced after " + std::to_string(sent) + "/" +
+                               std::to_string(len) + " bytes written");
+        }
         long n = ::send(sockets[rcpt_id], data + sent, len - sent,
                         MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n == -1) {
@@ -286,7 +352,13 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
     // loop while progress is made and only throw Timeout when a call yields nothing.
     std::size_t received = 0;
     const long deadline = steady_now_ms() + static_cast<long>(max_timeout);
+    const int fd_at_entry = sockets[sender_id];
     while (received < len) {
+        if (sockets[sender_id] != fd_at_entry) {
+            throw LinkReplaced(transport_tag + ": link to peer " + std::to_string(sender_id) +
+                               " replaced after " + std::to_string(received) + "/" +
+                               std::to_string(len) + " bytes read");
+        }
         long n = ::recv(sockets[sender_id], data + received, len - received, MSG_DONTWAIT);
         if (n == 0) {
             if (received == 0 && eof_before_data_is_timeout && !recover_links) {
@@ -354,6 +426,15 @@ void FMI::Comm::TcpChannelBase::write_frame(Utils::peer_num rcpt_id, const Frame
 void FMI::Comm::TcpChannelBase::exchange_handshake(Utils::peer_num partner_id) {
     // One way; nothing is read here. The peer's handshake arrives as an ordinary frame.
     const HandshakePayload mine = links[partner_id].local_handshake();
+    if (link_trace()) {
+        const auto& suffix = links[partner_id].replay_suffix();
+        std::fprintf(stderr, "[lt] handshake-out peer=%u send=%llu recv=%llu replay=%zu[%llu..%llu]\n",
+                     static_cast<unsigned>(partner_id),
+                     (unsigned long long) mine.next_send_seq,
+                     (unsigned long long) mine.next_expected_seq, suffix.size(),
+                     suffix.empty() ? 0ull : (unsigned long long) suffix.front().header.transport_seq,
+                     suffix.empty() ? 0ull : (unsigned long long) suffix.back().header.transport_seq);
+    }
     char payload[handshake_bytes];
     encode_handshake(mine, payload);
     write_frame(partner_id, make_handshake_frame(), payload);
@@ -381,6 +462,11 @@ void FMI::Comm::TcpChannelBase::reconcile_handshake(Utils::peer_num partner_id,
 }
 
 void FMI::Comm::TcpChannelBase::repair_link(Utils::peer_num partner_id) {
+    if (link_trace()) {
+        std::fprintf(stderr, "[lt] repair_link peer=%u fd=%d\n",
+                     static_cast<unsigned>(partner_id),
+                     partner_id < sockets.size() ? sockets[partner_id] : -2);
+    }
     if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
         close(sockets[partner_id]);
         sockets[partner_id] = -1;
@@ -437,6 +523,10 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
     stamped.cumulative_ack = links[rcpt_id].next_received();
     try {
         write_frame(rcpt_id, stamped, buf.buf);
+    } catch (const LinkReplaced&) {
+        // The transport already re-established this link under us; the frame is retained, and
+        // paying the handshake debt replays it on the new connection. Nothing to repair.
+        reconcile_if_needed(rcpt_id);
     } catch (const std::exception&) {
         // The frame is retained, so the repair replays it; the send obligation is intact.
         repair_link(rcpt_id);
@@ -444,6 +534,27 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
 }
 
 void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num sender_id) {
+    if (framed && recover_links) {
+        // The drain queue BEFORE any socket work. The message may already be in local memory
+        // — drained while some other operation waited — and the link itself may be gone for a
+        // reason that needs no repair at all: a peer that finalized after its last send is
+        // not an error, but insisting on a live socket here would try to re-establish to a
+        // process that no longer exists and time out with the answer already in hand.
+        ensure_link_state();
+        const FrameHeader early = expected_identity(buf.len);
+        if (links[sender_id].pending(early.lane) > 0) {
+            const SequencedLink::Accept drained =
+                    links[sender_id].deliver_into(early, buf.buf, buf.len);
+            if (drained == SequencedLink::Accept::Delivered) {
+                return;
+            }
+            if (drained == SequencedLink::Accept::IdentityMismatch) {
+                throw std::runtime_error(transport_tag + ": message identity mismatch from peer " +
+                                         std::to_string(sender_id) + " - expected [" +
+                                         describe(early) + "] at the head of the drain queue");
+            }
+        }
+    }
     check_socket(sender_id, link_name(sender_id, false));
     reconcile_if_needed(sender_id);
     if (!framed) {
@@ -453,23 +564,7 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
 
     ensure_link_state();
 
-    // A frame already taken off this link — by service_established_links, while this rank was
-    // stuck establishing a different one — is OLDER than anything still on the socket, so it
-    // must be delivered first or the stream is reordered. deliver_into validates identity
-    // exactly as the inline path does.
     const FrameHeader wanted = expected_identity(buf.len);
-    if (recover_links && links[sender_id].pending(wanted.lane) > 0) {
-        const SequencedLink::Accept drained =
-                links[sender_id].deliver_into(wanted, buf.buf, buf.len);
-        if (drained == SequencedLink::Accept::Delivered) {
-            return;
-        }
-        if (drained == SequencedLink::Accept::IdentityMismatch) {
-            throw std::runtime_error(transport_tag + ": message identity mismatch from peer " +
-                                     std::to_string(sender_id) + " - expected [" +
-                                     describe(wanted) + "] at the head of the drain queue");
-        }
-    }
 
     int repairs = 0;
     // Read that survives the link dying under it. Returns false once the link has been
@@ -488,6 +583,11 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
             throw;   // nothing arrived in time; that is not the same as a dead link
         } catch (const LinkProtocolError&) {
             throw;
+        } catch (const LinkReplaced&) {
+            // The transport already holds a fresh connection for this peer; the peer replays
+            // from its retention on it. Start again at the header - no repair to do, and no
+            // charge against the repair budget for a link that is already back.
+            return false;
         } catch (const std::exception&) {
             // The connection died — one end sees a failed write, the other EOF or a reset —
             // so both re-establish, reconcile and replay. Bounded, because a peer that has
@@ -502,10 +602,89 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         }
     };
 
+    // Header read that yields to the drain queue. Any pump below this frame's wait services
+    // the OTHER links with their own skip — so a wait inside, say, a handshake replay to a
+    // third rank legitimately drains THIS link into its lanes. Once that has happened the
+    // socket's next frame is no longer the oldest undelivered one, and a read that kept
+    // blocking here could wait forever on a sender with nothing more to say while the wanted
+    // frame sits in local memory. Yield only while no header byte has been consumed: from the
+    // first byte on, the frame boundary is this read's to finish.
+    //   1 = header in `dst`, 0 = the lane gained frames (deliver from it), -1 = link repaired.
+    auto read_header_yielding = [&](char* dst) -> int {
+        if (!recover_links) {
+            read_all(sender_id, dst, frame_header_bytes);
+            return 1;
+        }
+        std::size_t got = 0;
+        const long deadline = steady_now_ms() + static_cast<long>(max_timeout);
+        int fd_at_entry = sockets[sender_id];
+        while (got < frame_header_bytes) {
+            if (sockets[sender_id] != fd_at_entry) {
+                // Replaced mid-wait. Anything partially read died with the old stream; the
+                // new one starts at a frame boundary, so simply restart the header.
+                fd_at_entry = sockets[sender_id];
+                got = 0;
+            }
+            if (got == 0 && links[sender_id].pending(wanted.lane) > 0) {
+                return 0;
+            }
+            long n = ::recv(sockets[sender_id], dst + got, frame_header_bytes - got,
+                            MSG_DONTWAIT);
+            if (n > 0) {
+                got += static_cast<std::size_t>(n);
+                continue;
+            }
+            if (n == -1 && errno == EINTR) {
+                continue;
+            }
+            if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                if (steady_now_ms() >= deadline) {
+                    throw Utils::Timeout();
+                }
+                // Short slices, so the lane check above re-runs promptly after any nested
+                // servicing; pump itself keeps meeting this rank's obligations meanwhile.
+                pump(sender_id, POLLIN,
+                     std::min<long>(deadline, steady_now_ms() + 100));
+                continue;
+            }
+            // EOF or a hard error: same repair contract as guarded_read.
+            if (++repairs > max_link_repairs) {
+                throw std::runtime_error(transport_tag + ": link to peer " +
+                                         std::to_string(sender_id) + " could not be repaired after " +
+                                         std::to_string(max_link_repairs) + " attempts");
+            }
+            repair_link(sender_id);
+            return -1;
+        }
+        return 1;
+    };
+
     while (true) {
+        // The drain queue first, EVERY iteration — not once at entry. A frame already taken
+        // off this link by a nested pump is OLDER than anything still on the socket, so it
+        // must go first or the stream is silently reordered; with p2p identity carrying no
+        // per-operation counter, sequence order here is the only thing standing between the
+        // application and a wrong-round payload. deliver_into validates identity exactly as
+        // the inline path does.
+        if (recover_links && links[sender_id].pending(wanted.lane) > 0) {
+            const SequencedLink::Accept drained =
+                    links[sender_id].deliver_into(wanted, buf.buf, buf.len);
+            if (drained == SequencedLink::Accept::Delivered) {
+                return;
+            }
+            if (drained == SequencedLink::Accept::IdentityMismatch) {
+                throw std::runtime_error(transport_tag + ": message identity mismatch from peer " +
+                                         std::to_string(sender_id) + " - expected [" +
+                                         describe(wanted) + "] at the head of the drain queue");
+            }
+        }
+
         char encoded[frame_header_bytes];
-        if (!guarded_read(encoded, frame_header_bytes)) {
-            continue;
+        {
+            const int header_state = read_header_yielding(encoded);
+            if (header_state <= 0) {
+                continue;   // 0: serve the lane; -1: repaired, start over
+            }
         }
 
         FrameHeader arrived;
@@ -561,6 +740,22 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
                                      " but received " + std::to_string(arrived.transport_seq));
         }
 
+        if (recover_links && accepted == SequencedLink::Accept::Delivered &&
+            links[sender_id].pending(arrived.lane) > 0) {
+            // Older frames entered the drain queue while this one's header was being read —
+            // the yielding read closes that window before the first byte, but not after it.
+            // Deliver strictly in sequence: park this frame behind the queued ones and loop;
+            // the lane check at the top serves the true head. Identity is judged at drain
+            // time, exactly as for any other queued frame.
+            std::vector<char> park(arrived.payload_length);
+            if (arrived.payload_length > 0 && !guarded_read(park.data(), park.size())) {
+                continue;
+            }
+            links[sender_id].accept(arrived, park.data());
+            maybe_send_ack(sender_id);
+            continue;
+        }
+
         const FrameHeader expected = expected_identity(buf.len);
         if (!same_identity(arrived, expected)) {
             // The peer is in a different logical operation. Under the unframed protocol this is
@@ -584,6 +779,12 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         }
         // Committed only now: a link that died anywhere above left this frame unacknowledged,
         // so the peer still holds it and replays it after the repair.
+        if (link_trace() && buf.len >= sizeof(int)) {
+            int fi; std::memcpy(&fi, buf.buf, sizeof(int));
+            std::fprintf(stderr, "[lt] inline-deliver peer=%u seq=%llu first=%d\n",
+                         static_cast<unsigned>(sender_id),
+                         (unsigned long long) arrived.transport_seq, fi);
+        }
         links[sender_id].commit_inline(arrived);
         // On a link the peer never receives on, this is the only thing that will ever let it
         // release what it is holding for us.
@@ -615,8 +816,29 @@ void FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) 
         for (int taken = 0; taken < 64; taken++) {
             char encoded[frame_header_bytes];
             long n = ::recv(sockets[peer], encoded, frame_header_bytes, MSG_PEEK | MSG_DONTWAIT);
+            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                // The peer's end is gone. A first fix closed and marked the link here and gave
+                // servicing a bounded re-dial; it made the post-restore establishment wedge
+                // WORSE (1/8 vs 4/6 on variable_payloads at 7 ranks) - build_mesh re-entered
+                // from inside the servicing loop it itself drives was never proven safe. Left
+                // as a trace-visible observation until that is designed properly.
+                if (link_trace()) {
+                    std::fprintf(stderr, "[lt] SERVICING-SAW-DEAD peer=%u fd=%d n=%ld errno=%d\n",
+                                 static_cast<unsigned>(peer), sockets[peer], n, errno);
+                }
+                if (link_suspect_since.size() != num_peers) {
+                    link_suspect_since.assign(num_peers, 0);
+                }
+                if (link_suspect_since[peer] == 0) {
+                    link_suspect_since[peer] = steady_now_ms();
+                }
+                break;
+            }
             if (n < 0 || static_cast<std::size_t>(n) < frame_header_bytes) {
                 break;
+            }
+            if (peer < link_suspect_since.size()) {
+                link_suspect_since[peer] = 0;   // bytes arrived; the link is alive after all
             }
             FrameHeader arrived;
             if (decode_header(encoded, frame_header_bytes, link_max_frame_bytes, arrived)
@@ -644,8 +866,15 @@ void FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) 
                     reconcile_handshake(peer, payload.data());
                     continue;
                 }
-                if (links[peer].accept(arrived, payload.data()) == SequencedLink::Accept::Delivered) {
+                const auto drained = links[peer].accept(arrived, payload.data());
+                if (drained == SequencedLink::Accept::Delivered) {
                     maybe_send_ack(peer);
+                } else if (drained == SequencedLink::Accept::FatalGap) {
+                    std::fprintf(stderr,
+                                 "[FMI] DRAIN GAP peer %u: expected %llu received %llu\n",
+                                 static_cast<unsigned>(peer),
+                                 static_cast<unsigned long long>(links[peer].next_received()),
+                                 static_cast<unsigned long long>(arrived.transport_seq));
                 }
             } catch (const std::exception&) {
                 break;   // the receive path owns repair; leave this link to it
@@ -755,18 +984,39 @@ void FMI::Comm::TcpChannelBase::prepare_for_checkpoint() {
 
 bool FMI::Comm::TcpChannelBase::reconfigure_for_epoch(const std::string& new_comm_name,
                                                       const std::vector<Utils::peer_num>& moved_ranks) {
+    const bool self_moved =
+            std::find(moved_ranks.begin(), moved_ranks.end(), peer_id) != moved_ranks.end();
+    if (self_moved) {
+        // This rank IS the one that moved. Every survivor is about to reset its link to this
+        // rank to zero, so every link this side holds must reset too — resetting only
+        // links[self] (which the loop below would do) is meaningless, and keeping the others
+        // makes this rank's first framed send report a gap that never happened on the wire.
+        // A fresh replacement gets this for free (its links are zero by construction); the
+        // in-place and CRIU-restored shapes re-enter here with the old process's counters
+        // still in memory, which is exactly what must not survive the epoch.
+        close_sockets();
+        for (auto& link : links) {
+            link = SequencedLink({link_window_frames, link_max_frame_bytes,
+                                  link_retention_limit_bytes});
+            link.set_incarnation(local_incarnation);
+        }
+        set_comm_name(new_comm_name);
+        return true;
+    }
     for (auto rank : moved_ranks) {
         if (rank < sockets.size() && sockets[rank] >= 0) {
             close(sockets[rank]);
             sockets[rank] = -1;
         }
         // The transport sequence is scoped to a link, and re-pairing to a migrated rank
-        // creates a new one: the replacement is a fresh process whose counters necessarily
-        // start at zero. Carrying the old link's counters over would make the survivor's
-        // first framed exchange with the replacement report a gap that never happened.
+        // creates a new one: the replacement's counters start at zero whether it is a fresh
+        // process or the migrated rank re-entering under the branch above. Carrying the old
+        // link's counters over would make the survivor's first framed exchange with the
+        // replacement report a gap that never happened.
         if (rank < links.size()) {
             links[rank] = SequencedLink({link_window_frames, link_max_frame_bytes,
                                          link_retention_limit_bytes});
+            links[rank].set_incarnation(local_incarnation);
         }
     }
     set_comm_name(new_comm_name);

@@ -16,6 +16,16 @@ namespace FMI::Comm {
         using std::runtime_error::runtime_error;
     };
 
+    //! The transport replaced a connection underneath an in-progress read or write: the peer
+    //! re-dialed and accept adopted the new socket while this rank was mid-frame on the old
+    //! one. The bytes moved so far belong to a stream that no longer exists; the operation
+    //! must restart at a frame boundary on the new connection, where the peer's handshake and
+    //! replay begin. Continuing the old byte count against the new stream would splice two
+    //! streams into one buffer with no error anything could catch.
+    struct LinkReplaced : public std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
+
     //! Peer-to-peer channel over one blocking TCP socket per peer.
     /*!
      * Holds everything about TCP byte-stream messaging that does not depend on *how* the
@@ -93,6 +103,10 @@ namespace FMI::Comm {
          */
         virtual void service_transport() {}
 
+        //! Attempt a bounded re-establishment of a dead link this rank is the dialer for.
+        //! Called only from pump-level servicing, never from inside an establishment (the
+        //! caller guards with establishment_depth). Backends that cannot bound it decline.
+        virtual bool redial_dead_link(Utils::peer_num, long) { return false; }
         //! One-line description of subclass-owned transport state, for stuck-rank diagnostics.
         virtual std::string transport_state_note() const { return {}; }
 
@@ -141,6 +155,13 @@ namespace FMI::Comm {
          * the break. Requires framed.
          */
         bool recover_links = false;
+        //! Per-peer steady-clock ms when servicing first peeked EOF/hard-error on the link;
+        //! 0 = healthy. Observation only - the close happens on the dialer's side, aged.
+        std::vector<long> link_suspect_since;
+        //! Depth of establishment calls on this stack. Redial is forbidden inside one: the
+        //! first attempt at this ran build_mesh from the servicing loop build_mesh itself
+        //! drives, and made the wedge worse instead of better.
+        int establishment_depth = 0;
 
         //! How many times one receive may re-establish before giving up on the peer.
         int max_link_repairs = 4;

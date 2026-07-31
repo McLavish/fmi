@@ -1,7 +1,29 @@
 #include "../../include/comm/SequencedLink.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
+
+namespace {
+    //! Env-gated tracing (FMI_LINK_TRACE=1): every event that moves link state, one line each,
+    //! with the payload's first int where one exists — the checkpoint shapes encode the round
+    //! in it, so a trace shows exactly which seq carried which application message.
+    bool link_trace_enabled() {
+        static const bool on = [] {
+            const char* v = std::getenv("FMI_LINK_TRACE");
+            return v != nullptr && v[0] == '1';
+        }();
+        return on;
+    }
+    int first_int(const char* payload, std::size_t len) {
+        if (payload == nullptr || len < sizeof(int)) return -1;
+        int v; std::memcpy(&v, payload, sizeof(int)); return v;
+    }
+}
+#define FMI_LTRACE(...) do { if (link_trace_enabled()) { \
+        std::fprintf(stderr, "[lt %p] ", static_cast<const void*>(this)); \
+        std::fprintf(stderr, __VA_ARGS__); std::fputc('\n', stderr); } } while (0)
 
 namespace {
     //! Snapshot format tag. Bumped whenever the serialization below changes shape.
@@ -39,6 +61,9 @@ bool FMI::Comm::SequencedLink::admit(const FrameHeader& identity, const char* pa
     retention.push_back(std::move(r));
 
     ++next_send;
+    FMI_LTRACE("admit seq=%llu first=%d retained=%zu",
+               (unsigned long long) stamped.transport_seq,
+               first_int(payload, len), retention.size());
     return true;
 }
 
@@ -56,6 +81,9 @@ bool FMI::Comm::SequencedLink::ack_due(std::uint64_t interval) const {
 }
 
 void FMI::Comm::SequencedLink::reset_stream() {
+    FMI_LTRACE("RESET_STREAM send=%llu recv=%llu retained=%zu lanes=%zu/%zu",
+               (unsigned long long) next_send, (unsigned long long) next_recv,
+               retention.size(), lanes[0].size(), lanes[1].size());
     next_send = 0;
     retention.clear();
     retention_bytes = 0;
@@ -69,9 +97,14 @@ void FMI::Comm::SequencedLink::reset_stream() {
 void FMI::Comm::SequencedLink::on_ack(std::uint64_t cumulative) {
     // Acks are cumulative: everything strictly below `cumulative` is durably held by the peer.
     // A stale or duplicated ack is simply a no-op rather than an error.
+    const std::size_t before = retention.size();
     while (!retention.empty() && retention.front().header.transport_seq < cumulative) {
         retention_bytes -= retention.front().payload.size();
         retention.pop_front();
+    }
+    if (retention.size() != before) {
+        FMI_LTRACE("on_ack cum=%llu pruned=%zu left=%zu",
+                   (unsigned long long) cumulative, before - retention.size(), retention.size());
     }
 }
 
@@ -97,6 +130,10 @@ FMI::Comm::SequencedLink::accept(const FrameHeader& header, const char* payload)
     // Committed to a drain queue, so it is now durably held: the ack may be issued, and under
     // a checkpoint the queue travels inside the image.
     ack_safe_seq = next_recv;
+    FMI_LTRACE("accept->lane seq=%llu first=%d depth=%zu",
+               (unsigned long long) header.transport_seq,
+               first_int(payload, header.payload_length),
+               lanes[lane_index(header.lane)].size());
     return Accept::Delivered;
 }
 
@@ -120,6 +157,8 @@ void FMI::Comm::SequencedLink::commit_inline(const FrameHeader& header) {
         return;
     }
     ++next_recv;
+    FMI_LTRACE("commit_inline seq=%llu pending=%zu/%zu",
+               (unsigned long long) header.transport_seq, lanes[0].size(), lanes[1].size());
     // Only reached once the payload is in the application's buffer, so the frame really is
     // durably held and the ack may be issued. Committing any earlier would let a freeze
     // between the header and the payload advance the watermark past a message whose bytes
@@ -153,6 +192,9 @@ FMI::Comm::SequencedLink::deliver_into(const FrameHeader& expected, char* dst, s
         return Accept::IdentityMismatch;
     }
     std::memcpy(dst, queue.front().payload.data(), len);
+    FMI_LTRACE("deliver_from_lane seq=%llu first=%d left=%zu",
+               (unsigned long long) queue.front().header.transport_seq,
+               first_int(queue.front().payload.data(), len), queue.size() - 1);
     queue.pop_front();
     return Accept::Delivered;
 }
@@ -212,6 +254,10 @@ bool FMI::Comm::SequencedLink::reconcile(const HandshakePayload& peer, std::stri
                 + " which is below our lowest retained " + std::to_string(lowest_retained());
         return false;
     }
+    FMI_LTRACE("reconcile same-lineage peer_expects=%llu peer_send=%llu my_send=%llu my_recv=%llu low_ret=%llu",
+               (unsigned long long) peer.next_expected_seq, (unsigned long long) peer.next_send_seq,
+               (unsigned long long) next_send, (unsigned long long) next_recv,
+               (unsigned long long) lowest_retained());
     // The peer's next_expected doubles as a cumulative ack, which is what reconciles two ranks
     // whose final acks crossed while the link was down.
     on_ack(peer.next_expected_seq);
