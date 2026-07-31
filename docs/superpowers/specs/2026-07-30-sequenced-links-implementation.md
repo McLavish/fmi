@@ -283,6 +283,17 @@ be found by a wedge:
   drain (a growing frame, an app-owned stream, a capped decode failure) would otherwise
   turn the poll into a busy loop, while never coming back at all is how the original
   listener-side stall slept through a jammed frame.
+- **`build_mesh` re-tests `have_link(target)` after its servicing pass, not only at the loop
+  top.** The servicing pass nests pumps, pumps run `service_transport`, and `adopt_pending`
+  can complete the very establishment the loop is waiting on from inside its own body. The
+  traced specimen (variable_payloads, 5 ranks, seed 113): a restored rank's frozen bcast
+  receive repaired into `build_mesh(3)`; one nested sweep adopted link 3, paid every debt,
+  and parked the exact frame the application wanted in `links[3].lanes[Collective]` — then
+  the body fell through to its poll with 58.6 s of budget, every peer socket drained, and
+  four ranks transitively blocked on the sleeper. Their 60 s receive deadlines expired
+  ~50 ms before the sleeper's own deadline would have woken it. No cycle, no loss: a sleep
+  on an already-satisfied condition. Predates R9 — the same top-only test was always there —
+  and is plausibly part of the original residual family.
 - **Replay never iterates the live retention.** Writing a replay frame pumps; the pump
   services; an inbound frame's piggybacked ack — or a nested reconcile — prunes the very
   deque being iterated, and the dangling reference puts freed-heap bytes on the wire as a

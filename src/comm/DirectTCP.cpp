@@ -909,6 +909,17 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
         // rebuild at once — every rank ends up holding a frame another rank is waiting for.
         const bool serviced_progress = service_established_links(target);
 
+        // Re-test the exit condition HERE, not only at the loop top: the servicing pass
+        // above nests pumps, pumps run service_transport, and adopt_pending can complete
+        // this very establishment from inside the body. Falling through to the poll with
+        // the condition already satisfied slept a restored rank for its entire repair
+        // deadline once — every peer socket drained, nothing left to wake it, the frame its
+        // application wanted already parked in a lane one stack frame above — and its four
+        // peers timed out ~50 ms before its own deadline would have woken it.
+        if (have_link(target)) {
+            continue;
+        }
+
         // Always poll the listener, even when the peer we want is one we connect to: a lower
         // rank blocked here still owes accepts and acknowledgements to the ranks above it.
         std::vector<struct pollfd> pfds;
@@ -959,6 +970,20 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             // jammed by observing NO growth across a slice, and a stalled frame's rescue is
             // the pass after that judgement. One pump-slice heartbeat.
             budget = std::min<long>(budget, 20);
+        }
+        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
+            // Before the poll, not only at the loop top: a body that never returns from its
+            // poll is invisible to the loop-top beacon, and that silence cost a forensic
+            // pass exactly one inference it could not witness directly.
+            static thread_local long last_bp_note = 0;
+            const long now_bp = monotonic_ms();
+            if (now_bp - last_bp_note > 3000) {
+                last_bp_note = now_bp;
+                std::fprintf(stderr,
+                             "[lt] BUILD-MESH-POLL target=%u budget=%ld nfds=%zu progress=%d\n",
+                             static_cast<unsigned>(target), budget, pfds.size(),
+                             serviced_progress ? 1 : 0);
+            }
         }
         int pr = ::poll(pfds.data(), pfds.size(), static_cast<int>(std::max<long>(budget, 0)));
         if (pr < 0) {
