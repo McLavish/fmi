@@ -89,8 +89,10 @@ MUTS = [
  # rank 0 establishes to rank 2 BEFORE it blocks - an earlier ordering let build_mesh do the
  # accepting, and the mutation sailed through.
  ("waiting_rank_serves_nobody","src/comm/TcpChannelBase.cpp",
-  "        service_transport();\n        service_established_links(peer);",
-  "        (void) 0;"),
+  "MULTI",
+  [["        service_transport();\n","        \n"],
+   ["        service_established_links((events & POLLIN) ? peer : num_peers);",
+    "        (void) 0;"]]),
  ("waiting_rank_never_accepts","src/comm/TcpChannelBase.cpp",
   "        service_transport();\n","        \n"),
  ("waiting_rank_never_reconciles","src/comm/TcpChannelBase.cpp",
@@ -98,8 +100,8 @@ MUTS = [
  ("accepted_links_are_never_adopted","src/comm/DirectTCP.cpp",
   "                adopt_link(rank, fd);","                (void) fd;"),
  ("adoption_skips_the_handshake_debt","src/comm/TcpChannelBase.cpp",
-  "    link_needs_reconcile[partner_id] = 0;\n    exchange_handshake(partner_id);\n}",
-  "    link_needs_reconcile[partner_id] = 0;\n}"),
+  "    link_needs_reconcile[partner_id] = 0;\n    try {\n        exchange_handshake(partner_id);\n    }",
+  "    link_needs_reconcile[partner_id] = 0;\n    try {\n        (void) partner_id;\n    }"),
 
  # --- delivery order under nested servicing (the 2026-07-30 silent-substitution family) ------
  # A nested pump (entered with a different skip) may drain the link the application is
@@ -129,7 +131,7 @@ MUTS = [
    ["            if (got == 0 && links[sender_id].pending(wanted.lane) > 0) {\n                return 0;\n            }",
     ""]]),
  ("replaced_link_keeps_the_old_byte_count","src/comm/TcpChannelBase.cpp",
-  "        if (sockets[sender_id] != fd_at_entry) {\n            throw LinkReplaced(transport_tag + \": link to peer \" + std::to_string(sender_id) +",
+  "        if (sockets[sender_id] != fd_at_entry || generation(sender_id) != gen_at_entry) {\n            throw LinkReplaced(transport_tag + \": link to peer \" + std::to_string(sender_id) +",
   "        if (false) {\n            throw LinkReplaced(transport_tag + \": link to peer \" + std::to_string(sender_id) +"),
  # --- epoch reconfigure: the moved rank's own chair ------------------------------------------
  ("moved_rank_keeps_links_to_survivors","src/comm/TcpChannelBase.cpp",
@@ -157,7 +159,8 @@ MUTS = [
   "    h.next_expected_seq = next_recv;","    h.next_expected_seq = 0;"),
  # --- durability wired into the transport ---
  ("repair_does_not_replay","src/comm/TcpChannelBase.cpp",
-  "    for (const auto& retained : links[partner_id].replay_suffix()) {","    for (const auto& retained : std::deque<SequencedLink::Retained>()) {"),
+  "    for (std::uint64_t seq = links[partner_id].lowest_retained(); seq < replay_end; seq++) {",
+  "    for (std::uint64_t seq = replay_end; seq < replay_end; seq++) {"),
  ("send_does_not_retain","src/comm/TcpChannelBase.cpp",
   "    if (!links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {","    links[rcpt_id].note_sent(); stamped = header; stamped.transport_seq = links[rcpt_id].next_send_seq() - 1; stamped.payload_length = static_cast<std::uint32_t>(buf.len); if (false) {"),
  ("piggyback_ack_ignored","src/comm/TcpChannelBase.cpp",
@@ -174,8 +177,8 @@ MUTS = [
 
  # --- checkpoint mechanics: the receive watermark and what it lets the peer forget --------
  ("commit_before_the_payload_is_read","src/comm/TcpChannelBase.cpp",
-  "        if (!guarded_read(buf.buf, buf.len)) {\n            continue;\n        }\n        // Committed only now: a link that died anywhere above left this frame unacknowledged,",
-  "        links[sender_id].commit_inline(arrived);\n        if (!guarded_read(buf.buf, buf.len)) {\n            continue;\n        }\n        // Committed only now: a link that died anywhere above left this frame unacknowledged,"),
+  "        if (!guarded_read(buf.buf, buf.len)) {\n            continue;\n        }\n        // The payload is fully consumed",
+  "        links[sender_id].commit_inline(arrived);\n        if (!guarded_read(buf.buf, buf.len)) {\n            continue;\n        }\n        // The payload is fully consumed"),
  ("payload_length_unchecked","src/comm/TcpChannelBase.cpp",
   "        if (arrived.payload_length != buf.len) {","        if (false) {"),
  ("sigpipe_left_fatal","src/utils/Signals.cpp",
@@ -186,7 +189,8 @@ MUTS = [
   "MULTI",
   [["            maybe_send_ack(sender_id);",""],
    ["        maybe_send_ack(sender_id);",""],
-   ["                    maybe_send_ack(peer);",""]]),
+   ["                    maybe_send_ack(peer);",""],
+   ["        maybe_send_ack(peer);",""]]),
  ("no_ack_drain_when_blocked","src/comm/TcpChannelBase.cpp",
   "        drain_acks(rcpt_id, static_cast<long>(max_timeout));",""),
  ("ack_interval_may_reach_the_window","src/comm/TcpChannelBase.cpp",
@@ -196,6 +200,42 @@ MUTS = [
  ("ack_never_marked_sent","src/comm/SequencedLink.cpp",
   "    if (value > acked_to_peer) {\n        acked_to_peer = value;\n    }",""),
 
+ # --- R9: servicing must be able to drain a frame larger than the socket buffer -----------
+ # The post-restore stall's enabling condition. Each mutation removes one leg of the fix;
+ # the big-frame and mutual-jam LinkLiveness cases were written to kill the first three
+ # deterministically (both wedge in exactly these shapes without the fix).
+ ("oversized_frames_are_never_staged","src/comm/TcpChannelBase.cpp",
+  "                if (available > inbound_stage[peer].stalled_available) {",
+  "                if (true) {"),
+ ("establishment_wait_ignores_established_links","src/comm/DirectTCP.cpp",
+  "                pfds.push_back({sockets[q], POLLIN, 0});\n                pfd_rank.push_back(q);",
+  "                (void) q;"),
+ ("writer_pump_skips_its_peer","src/comm/TcpChannelBase.cpp",
+  "        service_established_links((events & POLLIN) ? peer : num_peers);",
+  "        service_established_links(peer);"),
+ ("stages_survive_link_replacement","src/comm/TcpChannelBase.cpp",
+  "        inbound_stage[partner_id] = InboundStage{};\n",""),
+ ("app_claim_never_armed","src/comm/TcpChannelBase.cpp",
+  "                claim.arm();\n",""),
+ ("adopted_target_still_times_out","src/comm/DirectTCP.cpp",
+  "            if (partner_id < sockets.size() && sockets[partner_id] >= 0) {\n"
+  "                return sockets[partner_id];\n            }",""),
+ ("acks_splice_into_partial_frames","src/comm/TcpChannelBase.cpp",
+  "    if (frozen(partner_id)) {\n"
+  "        // A write_all is mid-frame toward this peer; an ack sent now would splice into that\n"
+  "        // frame. Best-effort by contract: re-offered from the next servicing pass and the\n"
+  "        // next commit.\n"
+  "        return;\n    }",""),
+ ("reconcile_splices_into_partial_frames","src/comm/TcpChannelBase.cpp",
+  "    if (frozen(partner_id)) {\n"
+  "        // A write_all is mid-frame toward this peer; a handshake and replay written now\n"
+  "        // would splice into that frame. The mark stays set and is paid once the frame\n"
+  "        // completes.\n"
+  "        return;\n    }",""),
+ ("servicing_ignores_a_desynced_stream","src/comm/TcpChannelBase.cpp",
+  "                if (++decode_fail_marks[peer] <= 2) {",
+  "                if (false) {"),
+
  # --- establishment must not stall the rank's other links ---
  # This was carried as a KNOWN SURVIVOR for a while, on the reasoning that the drain only has an
  # observable effect during a >=3-rank establishment race and so could not be pinned
@@ -204,7 +244,8 @@ MUTS = [
  # all. Worth remembering as a caution about the label — "no test can see this" meant "no test
  # I had written could see this".
  ("establishment_reads_no_other_link","src/comm/DirectTCP.cpp",
-  "        service_established_links(target);","        (void) 0;"),
+  "        const bool serviced_progress = service_established_links(target);",
+  "        const bool serviced_progress = false; (void) target;"),
  ("drained_frames_are_never_delivered","src/comm/TcpChannelBase.cpp",
   "    if (recover_links && links[sender_id].pending(wanted.lane) > 0) {","    if (false) {"),
  # --- contract 3: lineage ----------------------------------------------------------------

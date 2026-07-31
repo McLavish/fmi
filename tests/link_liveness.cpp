@@ -418,4 +418,145 @@ BOOST_AUTO_TEST_CASE(a_moved_rank_starts_every_link_afresh_after_reconfigure) {
     BOOST_CHECK_MESSAGE(ok[1] == 1, "the moved rank could not send in the new epoch");
 }
 
+BOOST_AUTO_TEST_CASE(a_frame_larger_than_the_socket_buffer_drains_while_its_receiver_waits_elsewhere) {
+    // The post-restore stall, reduced to three ranks and no checkpoint. Servicing used to
+    // take a frame only when ALL of it was in the socket buffer, so a frame larger than
+    // SO_RCVBUF could never be drained by anyone except the application receiving on that
+    // exact link. Arrange for that receiver to be parked on a third rank instead — which is
+    // precisely what an aged redial or an accept-replace leaves behind after a restore — and
+    // the sender's write_all jams forever, closing the cycle below:
+    //
+    //   rank 1 --write(12 MiB)--> rank 0 --recv--> rank 2 --recv--> rank 1
+    //
+    // With incremental staging, rank 0's pump drains the big frame into the lane a socket
+    // buffer at a time while it waits for rank 2, rank 1's write completes, and the ring
+    // unwinds. 12 MiB is far beyond anything the kernel can absorb on its own
+    // (tcp_wmem max 4 MiB here), so the jam is real without the fix.
+    constexpr int num_peers = 3;
+    constexpr std::size_t big_ints = 3u << 20;   // 12 MiB of int payload
+    const std::string name = unique_comm("big-frame");
+    int* ok = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    ok[peer_id] = 0;
+
+    try {
+        auto ch = Channel::get_channel("DirectTCP", one_way_params(), model_params());
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(name);
+
+        if (peer_id == 0) {
+            int small = -1;
+            {   // Parks rank 0 on rank 2 while rank 1's big frame arrives; only servicing
+                // from inside this wait can drain it.
+                OperationScope scope(p2p_identity(0));
+                ch->recv({reinterpret_cast<char*>(&small), sizeof(small)}, 2);
+            }
+            std::vector<int> big(big_ints, 0);
+            {
+                OperationScope scope(p2p_identity(0));
+                ch->recv({reinterpret_cast<char*>(big.data()), big.size() * sizeof(int)}, 1);
+            }
+            bool intact = (small == 42);
+            for (std::size_t i = 0; i < big.size(); i += 65536) {
+                if (big[i] != static_cast<int>(i / 65536)) {
+                    intact = false;
+                    break;
+                }
+            }
+            ok[0] = intact;
+        } else if (peer_id == 1) {
+            std::vector<int> big(big_ints);
+            for (std::size_t i = 0; i < big.size(); i += 65536) {
+                big[i] = static_cast<int>(i / 65536);
+            }
+            {   // Jams here without staging: rank 0 is parked on rank 2 for the duration.
+                OperationScope scope(p2p_identity(0));
+                ch->send({reinterpret_cast<char*>(big.data()), big.size() * sizeof(int)}, 0);
+            }
+            int v = 7;
+            OperationScope scope(p2p_identity(2));
+            ch->send({reinterpret_cast<char*>(&v), sizeof(v)}, 2);
+            ok[1] = 1;
+        } else {
+            int got = -1;
+            {   // Completes only after rank 1's big write does.
+                OperationScope scope(p2p_identity(2));
+                ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 1);
+            }
+            int v = 42;
+            OperationScope scope(p2p_identity(0));
+            ch->send({reinterpret_cast<char*>(&v), sizeof(v)}, 0);
+            ok[2] = (got == 7);
+        }
+        ch->finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "the 12 MiB write jammed against a receiver parked on a third rank");
+    BOOST_CHECK_MESSAGE(ok[2] == 1, "rank 2 never got the message that follows the big write");
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "the staged frame did not arrive intact through the lane");
+}
+
+BOOST_AUTO_TEST_CASE(two_ranks_writing_oversized_frames_to_each_other_both_complete) {
+    // The write/write shape staging alone cannot break: both ends block pushing a frame
+    // bigger than the kernel will absorb, and a POLLOUT pump that skipped its own peer —
+    // the pre-R9 behaviour — would leave each rank refusing to drain exactly the frame the
+    // other is stuck writing. Symmetric, so no third rank can rescue it. The pump's skip
+    // now applies to POLLIN waits only (the inbound cursor is what it protects, and
+    // app_owns_stream covers that on every path), so each writer stages the other's frame
+    // while it waits for room and both writes complete.
+    constexpr int num_peers = 2;
+    constexpr std::size_t big_ints = 2u << 20;   // 8 MiB of int payload, each direction
+    const std::string name = unique_comm("mutual-jam");
+    int* ok = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    ok[peer_id] = 0;
+
+    try {
+        auto ch = Channel::get_channel("DirectTCP", one_way_params(), model_params());
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(name);
+
+        const int other = 1 - peer_id;
+        std::vector<int> mine(big_ints);
+        for (std::size_t i = 0; i < mine.size(); i += 65536) {
+            mine[i] = peer_id * 1000 + static_cast<int>(i / 65536);
+        }
+        {
+            OperationScope scope(p2p_identity(static_cast<std::uint32_t>(other)));
+            ch->send({reinterpret_cast<char*>(mine.data()), mine.size() * sizeof(int)}, other);
+        }
+        std::vector<int> theirs(big_ints, -1);
+        {
+            OperationScope scope(p2p_identity(static_cast<std::uint32_t>(peer_id)));
+            ch->recv({reinterpret_cast<char*>(theirs.data()), theirs.size() * sizeof(int)}, other);
+        }
+        bool intact = true;
+        for (std::size_t i = 0; i < theirs.size(); i += 65536) {
+            if (theirs[i] != other * 1000 + static_cast<int>(i / 65536)) {
+                intact = false;
+                break;
+            }
+        }
+        ok[peer_id] = intact;
+        ch->finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "rank 0's write jammed against rank 1's, or its receive was wrong");
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "rank 1's write jammed against rank 0's, or its receive was wrong");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
