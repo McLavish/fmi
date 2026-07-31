@@ -4,10 +4,10 @@ This runbook checkpoints one rank of a **running, unmodified FMI application** w
 restores it, and verifies that the job finishes with exactly the results a clean run produced.
 
 The application does not participate. `checkpoint_subject.cpp` constructs a `FMI::Communicator`
-and calls `barrier`, `bcast`, `send`/`recv`, `allreduce`, `reduce`, `gather`, `scatter` and
-`scan` in a loop. There is no checkpoint API in it, no migration hook, no annotation, and it
-never learns that it was frozen. Everything that makes the freeze survivable happens inside the
-library, below `Channel`.
+and hands it to one named **app shape** — the default, `baseline`, calls `barrier`, `bcast`,
+`send`/`recv`, `allreduce`, `reduce`, `gather`, `scatter` and `scan` in a loop. There is no
+checkpoint API in it, no migration hook, no annotation, and it never learns that it was frozen.
+Everything that makes the freeze survivable happens inside the library, below `Channel`.
 
 ## What has to be true for this to work
 
@@ -30,6 +30,52 @@ broken at some point in getting this to run:
    its peers reconcile with its sequences instead of resetting them. That is what the
    incarnation in the handshake is for; a restored process keeps the one its image was taken
    with, because it never re-runs the constructor that claims a new one.
+
+## App shapes
+
+One shape is one application workload. Each lives in its own file under `shapes/`, registers
+itself, and is selected by name:
+
+```bash
+$SUBJECT --list-shapes                     # what is compiled in
+$SUBJECT 0 2 fmi.json "$COMM" 20000 0 500 --shape p2p_ring
+FMI_SHAPE=p2p_ring $SUBJECT 0 2 ...        # or from the environment
+python3 sweep.py --shape p2p_ring ...      # the sweep passes it through
+```
+
+`--shape` may appear anywhere on the command line and never moves a positional argument, so the
+`pgrep` patterns below keep working. The default is `baseline`.
+
+### Adding one
+
+Write `shapes/shape_<name>.cpp`, implement one function, register it. Nothing else — no shared
+list to edit, and CMake globs `shapes/*.cpp`:
+
+```cpp
+#include "../shapes.h"
+
+namespace FMI::Runbooks::Checkpoint {
+namespace {
+
+unsigned long long run_my_shape(FMI::Communicator& comm, FMI::Utils::peer_num rank,
+                                FMI::Utils::peer_num num_peers, const ShapeParams& params) {
+    unsigned long long checksum = 0;
+    // ...operations; check every result inline; fold received values into checksum...
+    return checksum;   // throw ShapeFailure{N} after printing a MISMATCH line instead
+}
+
+FMI_REGISTER_SHAPE("my_shape", "one line about what it exercises", run_my_shape)
+
+} // namespace
+} // namespace FMI::Runbooks::Checkpoint
+```
+
+**The checksum must depend only on the shape, the rank, the rank count and `ShapeParams`** —
+never on timing, pids, addresses or how many times the rank was checkpointed. The sweep compares
+a checkpointed run against a clean baseline run of the same shape, so a checksum that varies
+between two clean runs fails every trial, and one that does not fold in *received* data passes
+every trial while proving nothing. `shapes.h` documents the full contract and every field of
+`ShapeParams`; `shapes/shape_p2p_ring.cpp` is a short worked example.
 
 ## Requirements
 
@@ -76,12 +122,20 @@ and comparing every rank's final checksum against a clean baseline of the same s
 
 ```bash
 python3 sweep.py --trials 20 --peers 2 4 --rounds 40000 --max-checkpoints 3
+python3 sweep.py --trials 20 --peers 2 4 --rounds 40000 --shape p2p_ring
 ```
 
 A trial passes only if every rank reaches `DONE` with the baseline checksum **and** the
 checkpointed rank logged a round after its restore. A trial whose job finished before the
-checkpoint fired is reported as a failure rather than a pass — such a trial proves nothing, and
-early versions of this sweep reported a clean 12/12 while checkpointing nothing at all.
+checkpoint fired is reported as `SKIP` rather than a pass — such a trial proves nothing, and
+early versions of this sweep reported a clean 12/12 while checkpointing nothing at all. (It
+was once scored a FAIL, which several readers misread as a protocol failure; a skip says what
+it means.)
+
+**Give it enough rounds.** The default `--rounds 40000` leaves ample time for the 0.25–1.2 s
+the sweep waits before it freezes anything. If you shorten it, a run that finishes before the
+freeze lands ends `ALREADY FINISHED (trial is void)` and is skipped; lengthen a round with
+`--ms` if you want fewer, slower rounds instead.
 
 `--max-checkpoints N` checkpoints up to N times per run, choosing a fresh rank each time, which
 exercises a rank being frozen while a peer is itself mid-repair.
@@ -98,9 +152,11 @@ exercises a rank being frozen while a peer is itself mid-repair.
 
 ## Scope
 
-**Verified at 2, 3, 5, 7, 8 and 16 ranks — 48 randomized trials, 48 passed.** Non-powers of two
-are covered deliberately: FMI's collectives are binomial trees and take a different shape when
-the rank count is not a power of two.
+**Verified at 2, 3, 5, 7, 8 and 16 ranks — 48 randomized trials, 48 passed**, all of them on the
+`baseline` shape, whose workload is unchanged since that run. Non-powers of two are covered
+deliberately: FMI's collectives are binomial trees and take a different shape when the rank
+count is not a power of two. Other shapes have their own, much smaller, evidence: `p2p_ring` has
+3/3 at 4 ranks.
 
 If a rank ever does stall, it says so: after three seconds of waiting it prints what it believes
 it holds on every link — descriptor, bytes queued, whether the link still owes a handshake —
