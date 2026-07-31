@@ -9,7 +9,9 @@ This exists because the original suite passed with 9 of 21 faults injected: ever
 "identity ignores field X" mutation survived, because each test varied two or more fields
 at once and some other comparison always caught the break.
 
-Usage:  python3 tests/tools/mutation_sweep.py
+Usage:  python3 tests/tools/mutation_sweep.py [mutation-name ...]
+With names, only those mutations run — for reconciling new entries without paying for the
+whole ledger. The summary is only authoritative for what actually ran.
 Expects a configured build/ directory and Redis on 127.0.0.1:6379.
 Restores every file it touches, including on failure.
 """
@@ -185,12 +187,13 @@ MUTS = [
   "        if (current.sa_handler != SIG_DFL) {\n            return;\n        }","        return;"),
 
  # --- liveness: releasing retention on a link the peer never writes to --------------------
+ # One strike at the root rather than a site list: the R9 work added re-offer sites
+ # (servicing passes, lane deliveries, pre-wait offers) precisely so that losing any one
+ # of them is survivable, which made a remove-the-sites mutation pass the suite while
+ # proving nothing. Gating ack_due closed kills every standalone ack at once.
  ("no_standalone_acks","src/comm/TcpChannelBase.cpp",
-  "MULTI",
-  [["            maybe_send_ack(sender_id);",""],
-   ["        maybe_send_ack(sender_id);",""],
-   ["                    maybe_send_ack(peer);",""],
-   ["        maybe_send_ack(peer);",""]]),
+  "    if (!links[partner_id].ack_due(link_ack_interval)) {",
+  "    if (true) {"),
  ("no_ack_drain_when_blocked","src/comm/TcpChannelBase.cpp",
   "        drain_acks(rcpt_id, static_cast<long>(max_timeout));",""),
  ("ack_interval_may_reach_the_window","src/comm/TcpChannelBase.cpp",
@@ -300,6 +303,29 @@ BY_DESIGN = {
     "replaced_link_keeps_the_old_byte_count":
         "audit-pinned (certain-from-code); criu sweep 19/20 vs 54/54 pristine - real but weak "
         "statistical signal (mid-frame replacement is rare); kept for the guard it documents",
+    "stages_survive_link_replacement":
+        "audit-pinned: a stage resumed across a replaced stream fills a half-built payload "
+        "with the new stream's replay bytes; needs a replacement to land while a stage is "
+        "mid-fill on that exact link - not aligned in 8 sweep trials (seed 213, 8/8)",
+    "acks_splice_into_partial_frames":
+        "adversarial-review finding with a concrete interleaving on record; the splice needs "
+        "socket-buffer ROOM at the instant an ack falls due inside a mid-frame write, and the "
+        "deterministic jams that exercise the path have full buffers (the DONTWAIT ack send "
+        "fails harmlessly); sweep seed 213 8/8; kept for the wire-integrity invariant",
+    "reconcile_splices_into_partial_frames":
+        "same family as acks_splice: needs a reconcile debt to fall due toward the exact peer "
+        "a write is mid-frame on, with room to write; sweep seed 213 8/8; kept for the "
+        "wire-integrity invariant",
+    "app_claim_never_armed":
+        "closed by construction; a violation needs nested servicing to consume bytes mid-frame "
+        "AND those payload bytes to decode as a valid header - probabilistic, no deterministic "
+        "reproducer (sweep seed 213 8/8); the claim is what makes the POLLOUT no-skip rule "
+        "provable rather than lucky",
+    "servicing_ignores_a_desynced_stream":
+        "defence in depth whose trigger (a desynchronised stream) lost its only known producer "
+        "when the replay use-after-free was fixed; while that bug existed this exact marking "
+        "was the difference between self-healing and a silent 60 s wedge; capped at two marks "
+        "per connection so a content-level rejection cannot become a redial storm",
 }
 
 CRIU_KILLED = {
@@ -311,6 +337,9 @@ CRIU_KILLED = {
     "delivery_order_guards_both_removed":
         "criu sweep 7 peers 2MB payloads, seed 47: 20/20 clean build -> 16/20 with 3 "
         "wrong-round MISMATCH trials (the original R6 substitution reappearing)",
+    "adopted_target_still_times_out":
+        "criu sweep 7 peers variable_payloads, seed 213: 8/8 pristine -> 6/8 without the "
+        "establish() adopted-socket sentinel (spurious Timeout for a link that is up)",
 }
 # Every file this sweep will touch, saved up front. A mutation left behind in a source tree is
 # far worse than a sweep that did not finish: it is a deliberately broken protocol that looks
@@ -332,8 +361,16 @@ def on_signal(signum, _frame):
 signal.signal(signal.SIGINT, on_signal)
 signal.signal(signal.SIGTERM, on_signal)
 
+only = set(sys.argv[1:])
+if only:
+    unknown = only - {m[0] for m in MUTS}
+    if unknown:
+        print(f"unknown mutation(s): {sorted(unknown)}"); sys.exit(2)
+
 try:
     for name, rel, old, new in MUTS:
+        if only and name not in only:
+            continue
         path=os.path.join(WT,rel)
         src=PRISTINE[rel]
         # A MULTI entry applies several (old, new) pairs at once - for redundant-pair guards
