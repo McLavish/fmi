@@ -160,9 +160,17 @@ round 0 — while the mesh was still being built lazily:
 
 > **Normative (b):** `build_mesh` adopts accepted connections for every rank EXCEPT its
 > target while it waits. The target's pending entry is the wait's completion condition,
-> popped by `establish()` — adopting it breaks that contract loudly (13 suite failures the
-> one time it was tried). Everyone else was acknowledged at accept and has moved on to
-> sending frames nobody would otherwise read.
+> popped by `establish()` — adopting it from build_mesh's own accept path broke that contract
+> loudly (13 suite failures the one time it was tried). Everyone else was acknowledged at
+> accept and has moved on to sending frames nobody would otherwise read. The pop contract is
+> deliberately *tolerant* now, not exclusive: `service_transport` — reachable from INSIDE an
+> in-flight establishment through servicing → reconcile → `write_all` → pump — excludes
+> nothing, so the target can legitimately be adopted out from under its own establishment
+> (observed in the trial-0 specimen of the post-restore stall corpus). `establish()` treats
+> "no pending entry but the socket is held" as a completed establishment and returns the
+> held socket; skipping the target in `service_transport` instead was considered and
+> rejected, because it strands the target's sender — acknowledged at accept, its handshake
+> and replay pushed into a connection nobody reads for as long as the establishment lasts.
 
 > **Normative (c):** a link that servicing has observed dead for over a second, whose DIALER
 > this rank is, gets one bounded re-dial attempt per pump slice — never from inside an
@@ -181,17 +189,120 @@ drives. It took the failing shape from 4/6 to 1/8. Both mistakes are structural,
 observation-time closing forces readers through re-establishment for deaths that need no
 repair at all (a peer that finalized after its last message — which is also why the drain
 queue must be consulted *before* `check_socket`), and establishment reentrancy was never
-proven safe. Measured after the corrected version, honestly: **the wedge is reduced, not closed.** Pooled
-across seeds, the failing shape went from 19/26 (73%) before the re-dial to 20/24 (83%) with
-it — 11/12 on one seed, 9/12 on another — with the ring shape 12/12 unchanged throughout. The
-obligations (a) and (b) are specimen-backed and keep their measured wedges from recurring;
-(c) is principled and harmless but its measured effect is modest, and the remaining ~15%
-post-restore stalls at 7 ranks on `variable_payloads` are an **open defect**: their traced
-specimens were lost to the harness's shared artifact directory (itself now fixed to
-per-invocation subdirectories), so the residual mechanism is uncharacterized. Anyone
-resuming: run the sweep with `FMI_LINK_TRACE=1 --keep` on that shape and read the
-`BUILD-MESH-WAIT`/`SOLO-POLL`/`DRAIN-ACKS-WAIT`/`SERVICING-SAW-DEAD`/`REDIALED` beacons of a
-failing trial - one specimen locates the wait.
+proven safe. Measured after the corrected version, honestly: **the wedge was reduced, not
+closed.** Pooled across seeds, the failing shape went from 19/26 (73%) before the re-dial to
+20/24 (83%) with it — and the remaining ~15-25% post-restore stalls at 7 ranks on
+`variable_payloads` stood as an open defect until their specimens were finally traced (four
+failing trials, seed 71, `FMI_LINK_TRACE=1 --keep`). The residual mechanism was **not** an
+establishment gap at all — it is what R9 below fixes, and (c) itself was implicated: a redial
+repairs a link from inside a wait on a *third* peer, then leaves the repaired link readable
+by nobody but servicing, which until R9 could not take a frame larger than the socket buffer.
+Suspicion hygiene that the specimens also forced: a replaced link sheds the dead connection's
+`link_suspect_since` mark (`note_link_replaced`), and a link the application is mid-frame on
+is never a redial candidate — the application actively consuming it is stronger liveness
+evidence than any peek, and without both rules the aged redial tears down healthy links.
+
+### R9 — Servicing must be able to drain a frame larger than the socket buffer
+
+> **Normative:** `service_established_links` may take a frame in two ways: whole, exactly as
+> before, when every byte is already buffered; or **staged** — header consumed, payload
+> accumulated across servicing passes in a per-link `InboundStage`, never blocking, committed
+> (`accept` → lane, ack) only when the last byte is in local memory. A frame is staged only
+> when it can *never* be wholly buffered (its size exceeds a conservative floor of the
+> stopped arriving while incomplete — FIONREAD unchanged across at least one full pump
+> slice, the closed-window signature; the time floor matters because two servicing passes
+> can be microseconds apart inside an establishment loop); every frame still growing keeps
+> the whole-frame path byte for byte. Deliberately NOT judged against `SO_RCVBUF`: receive autotuning inflates the reported
+> size while a reader drains fast, and trusting it stranded a 2 MiB frame behind a ~512 KB
+> closed window, silently, in the first attempt.
+> An incomplete stage is unacked by construction and is **discarded whenever the connection
+> is replaced** (`note_link_replaced`) — the peer still retains the frame and replays it
+> whole. While the application is mid-frame on a link (`app_owns_stream`, armed at the first
+> header byte, released at every frame boundary), servicing must not touch that socket at
+> all; symmetrically, the application's header read finishes an active stage before
+> consuming a raw byte, and `drain_acks` advances a stage rather than peeking through it.
+
+The failure this fixes is the R8 residual — the last ~15-25% of post-restore stalls at 7
+ranks on `variable_payloads`. All four traced specimens share one triple, and the six passing
+trials of the same run lack it: (1) a rank blocked in `write_all` pushing a post-restore
+replay that contains a 2 MiB frame, (2) the receiving end's diagnostic showing that frame
+jammed behind a ~128 KB socket buffer (`rq≈98k-127k`, never moving), (3) the receiver parked
+in a wait on a *third* rank — an arrangement the aged redial (R8(c)) and accept-replace both
+create routinely. The old whole-frame rule made such a frame undrainable by anyone except the
+application receiving on that exact link, so the writer jammed forever and the wait-for graph
+closed. The passes passed because every peer happened to repair the link from its own
+application receive path, where the replay drains inline.
+
+Three obligations that make staging compose, each found by adversarial review before it could
+be found by a wedge:
+
+- **Waits must wake for staged bytes.** `build_mesh`'s poll now includes the established
+  links; a listener-side establishment used to sleep until its deadline, which was harmless
+  when servicing left oversized frames alone and is fatal once a peer's half-delivered frame
+  is waiting on this loop's servicing pass. Deterministically pinned by
+  `LinkLiveness/a_frame_larger_than_the_socket_buffer_drains_while_its_receiver_waits_elsewhere`,
+  which wedged on exactly this before the poll change.
+- **A POLLOUT pump does not skip its own peer.** The pump's skip protects the caller's
+  inbound cursor, which only a POLLIN wait owns; `app_owns_stream` protects it on every other
+  path. With the skip in place for writers, two ranks replaying oversized suffixes to each
+  other would each block writing and neither would ever stage the other's frames — a mutual
+  wedge staging alone cannot break.
+- **`fill_stage` is bounded per call** (256 KB): against a blocked writer on loopback the
+  sender refills as fast as the receiver drains, and an until-EAGAIN drain inside someone
+  else's 20 ms slice would consume the aged redial's entire budget in one visit.
+- **Nothing may write to a peer that any in-flight `write_all` is mid-frame toward**
+  (`outbound_frozen`, a per-peer DEPTH — a scalar slot was tried first and adversarial
+  review produced the counterexample: a nested write to a different peer un-froze the outer
+  peer, and the splice happened one level down). Servicing wants to write — a standalone ack
+  after a drained frame, a handshake-plus-replay for a reconcile debt — and once a POLLOUT
+  pump services its own peer, those writes would land in the MIDDLE of the frame the caller
+  is writing. Both are deferrable by contract: the ack is best-effort and re-offered, the
+  reconcile mark stays set. The old skip was silently providing this guarantee alongside the
+  inbound one; splitting the two (claim for inbound, freeze for outbound) is what makes the
+  POLLOUT no-skip rule sound.
+- **A deferred ack must have a re-offer path that does not depend on more traffic.** Every
+  commit-time ack offer fires only when another frame arrives, and when the suppressed ack
+  is precisely what opens the peer's window, no frame ever does. Acks are therefore
+  re-offered (self-gated by `ack_due` and the freeze) from every servicing pass, from lane
+  deliveries, and by a receiver immediately before it parks in a header wait — that last one
+  because a POLLIN wait's servicing skips its own peer, so nothing else would ever ack the
+  very link being waited on.
+- **Mid-operation replacement is detected by a per-link GENERATION, not by fd number.** The
+  kernel reuses the lowest free descriptor number, and an accept-close-accept inside one
+  servicing pass can hand the replacement the same number the dead link had — the forensics
+  corpus caught a redial doing exactly this. `note_link_replaced`, `adopt_link` and
+  `check_socket` bump the generation; `write_all`/`read_all`/`read_header_yielding` compare
+  it alongside the fd.
+- **Decode-failure suspicion is capped at two per connection.** A desynchronised stream
+  heals through the redial-and-replay the suspicion triggers; a content-level rejection (a
+  version or size the peer legitimately produced) reproduces identically after every replay,
+  and an uncapped mark turns one loud error into an endless redial storm. After two
+  attempts servicing falls silent and the application's own read reports it the loud way.
+- **An establishment wait polls the established links only after a servicing pass that made
+  progress**, and sleeps at most one slice otherwise: a readable socket servicing refused to
+  drain (a growing frame, an app-owned stream, a capped decode failure) would otherwise
+  turn the poll into a busy loop, while never coming back at all is how the original
+  listener-side stall slept through a jammed frame.
+- **Replay never iterates the live retention.** Writing a replay frame pumps; the pump
+  services; an inbound frame's piggybacked ack — or a nested reconcile — prunes the very
+  deque being iterated, and the dangling reference puts freed-heap bytes on the wire as a
+  perfectly silent stream corruption (found via a hexdump of a 60-second `BadVersion` decode
+  loop: heap pointers where a header should be). `exchange_handshake` replays by sequence,
+  one re-validated `copy_retained` frame at a time; a frame pruned before its turn is one
+  the peer just declared it holds, so skipping it is correct. This hazard predates R9 (any
+  nested pump with a different skip could reach the prune) but the POLLOUT rule made it
+  routine.
+- **A full 72-byte peek that fails to decode marks the link suspect.** The same bytes will
+  be there forever — waiting cannot realign a stream — so servicing hands the link to the
+  aged redial (dialer side) while the application's own read of the same bytes throws loudly
+  and repairs (listener side). Before this, a desynchronised link wedged silently for the
+  job's whole deadline with 400 KB sitting unread.
+
+Receiver-side memory: a staged frame plus its lane copy live on the heap, so the kernel
+socket buffer is no longer the receive-side bound for oversized frames. The true bound is
+transitive: a sender admits nothing past `link_retention_limit_bytes`, so no link can ever
+have more unacked bytes in flight — staged, laned, or buffered — than the sender's own
+retention cap.
 
 ### A property R6 leans on: p2p identity does not number operations
 
@@ -406,9 +517,10 @@ Honest limits of what is built, all of which the design's engine would address:
   socket-driven survivor would wait for its receive timeout rather than repairing promptly.
   The runbook's flow avoids this because the dump kills the original, so the peer sees the
   connection go.
-- **No CREDIT.** Receiver-side buffering is bounded by the kernel socket buffer, as before; the
-  design's separate credit dimension is not implemented, so a divergent peer's backlog is
-  bounded by TCP rather than by policy.
+- **No CREDIT.** The design's separate credit dimension is not implemented, so a divergent
+  peer's backlog is bounded by TCP plus, since R9, the heap that staging and the lanes may
+  hold — transitively capped by the sender's `link_retention_limit_bytes`, not by receiver
+  policy.
 - **Standalone acks are best effort.** An ack that will not fit in the socket is dropped and
   re-offered after the next commit; a *partial* ack is completed with a blocking write, bounded
   by `SO_SNDTIMEO`, because a half-written frame would desynchronise the peer.
