@@ -9,7 +9,13 @@
 BOOST_AUTO_TEST_SUITE(Communicator);
 
 std::string comm_name = std::to_string(std::time(nullptr));
+// The suite's transport follows the build: Direct under TCPunch builds (the original
+// configuration), DirectTCP otherwise — needs only the Redis registry, no rendezvous server.
+#if FMI_ENABLE_TCPUNCH
 std::string config_path = "../../config/fmi_test.json";
+#else
+std::string config_path = "../../config/fmi_directtcp_test.json";
+#endif
 
 BOOST_AUTO_TEST_CASE(sending_receiving) {
     FMI::Comm::Data<int> d_single = 1;

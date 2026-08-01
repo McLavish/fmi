@@ -8,10 +8,13 @@ option(FMI_ENABLE_CRIU "Build experimental CRIU checkpoint/restore support" OFF)
 option(FMI_ENABLE_TCPUNCH "Enable the Direct backend (TCP NAT hole punching via TCPunch)" ON)
 option(FMI_USE_STATIC_BOOST "Prefer static Boost libraries" ON)
 
-# The migration counterexample corpus hardcodes Backend::Direct, and the CRIU runbooks pin
-# preferred_data_backend=Direct. Fail at configure time rather than at link time.
+# CRIU state transfer no longer pins the Direct data plane: DirectTCP is checkpoint-safe
+# (include/ft/experimental/CriuRequirements.h), so a TCPunch-free CRIU build is a supported
+# shape - it is what runs on clusters with direct peer connectivity. Test cases and runbook
+# configs that exercise the Direct backend specifically skip or fail loudly at runtime when
+# it was disabled at build time, same as every other disabled backend.
 if(FMI_ENABLE_CRIU AND NOT FMI_ENABLE_TCPUNCH)
-    message(FATAL_ERROR "FMI_ENABLE_CRIU=ON requires FMI_ENABLE_TCPUNCH=ON (the CRIU paths pin the Direct data plane)")
+    message(STATUS "FMI_ENABLE_CRIU=ON with FMI_ENABLE_TCPUNCH=OFF: CRIU paths will use the DirectTCP/Redis data planes")
 endif()
 
 # Direct needs TCPunch and DirectTCP needs Redis for its peer registry; with both off there is

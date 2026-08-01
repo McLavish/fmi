@@ -79,6 +79,16 @@ namespace {
         // ofstream does not create missing parent directories; without this the config file is
         // never written, redis_available() throws "cannot open file", and the test silently
         // skips (skip == no assertions == green) — masking real coverage gaps.
+#if !FMI_ENABLE_TCPUNCH
+        // This build cannot instantiate Direct; the same cases run their data plane over
+        // DirectTCP instead (checkpoint-safe either way, same migration protocol). Rewriting
+        // here keeps every call site build-agnostic; only cases that actually construct a
+        // Communicator ever notice.
+        if (enable_direct) {
+            enable_direct = false;
+            enable_direct_tcp = true;
+        }
+#endif
         fs::create_directories(config_path.parent_path());
         std::ofstream out(config_path);
         out << "{\n"
@@ -148,7 +158,8 @@ namespace {
                "    \"control_host\": \"127.0.0.1\",\n"
                "    \"control_port\": 6379,\n"
                "    \"poll_interval_ms\": 25,\n"
-               "    \"preferred_data_backend\": \"Direct\",\n"
+            << "    \"preferred_data_backend\": \""
+            << (enable_direct_tcp && !enable_direct ? "DirectTCP" : "Direct") << "\",\n"
                "    \"state_transfer\": \"criu\",\n"
                "    \"criu\": {\n"
             << "      \"images_dir\": \"" << images_dir.string() << "\",\n"

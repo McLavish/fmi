@@ -2,8 +2,9 @@
 
 #include "../include/fmi.h"
 #if FMI_ENABLE_TCPUNCH
-// Only the selective-re-pair case needs this, for Direct::pairing_count(). That case lives
-// inside the FMI_ENABLE_CRIU block below, and CRIU implies TCPUNCH at configure time.
+// Only the selective-re-pair case needs this, for Direct::pairing_count(). CRIU builds no
+// longer imply TCPUNCH (DirectTCP is checkpoint-safe), so that case carries its own
+// FMI_ENABLE_TCPUNCH gate too.
 #include "../include/comm/Direct.h"
 #endif
 
@@ -30,7 +31,14 @@ namespace {
         return (fs::path(__FILE__).parent_path().parent_path() / "config" / name).lexically_normal().string();
     }
 
+    // The suite's data plane follows the build: Direct when TCPunch is compiled in (the
+    // original configuration), DirectTCP otherwise — same migration protocol either way,
+    // which is rather the point of the checkpoint-safe allowlist covering both.
+#if FMI_ENABLE_TCPUNCH
     const std::string ft_config_path = repo_config_path("fmi_ft_test.json");
+#else
+    const std::string ft_config_path = repo_config_path("fmi_ft_directtcp_test.json");
+#endif
     const std::string missing_direct_config_path = repo_config_path("fmi_ft_direct_missing.json");
 
     std::string unique_comm_name() {
@@ -530,7 +538,13 @@ static void run_cut_timing_stress(const std::string& stress_config_file, bool ne
 }
 
 BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress) {
+#if FMI_ENABLE_TCPUNCH
     run_cut_timing_stress("fmi_ft_stress_test.json", /*needs_tcpunchd=*/true);
+#else
+    // Same torture, DirectTCP data plane: no rendezvous server, the registry is the Redis
+    // the control plane already requires.
+    run_cut_timing_stress("fmi_ft_stress_directtcp_test.json", /*needs_tcpunchd=*/false);
+#endif
 }
 
 // The same protocol torture over the Redis (ClientServer) data plane — checkpoint-safe since
@@ -548,6 +562,7 @@ BOOST_AUTO_TEST_CASE(transparent_migration_cut_timing_stress_redis) {
 // records Direct::pairing_count() after warm-up and asserts on the number of NEW pairings its
 // process performed after the cut: survivors must re-establish strictly fewer links than they
 // own (their survivor<->survivor link is kept), which under a full rebuild would be violated.
+#if FMI_ENABLE_TCPUNCH
 BOOST_AUTO_TEST_CASE(transparent_migration_selective_repair_keeps_survivor_links) {
     constexpr unsigned int world = 3;
     constexpr FMI::Utils::peer_num moved_rank = 1;
@@ -693,6 +708,7 @@ BOOST_AUTO_TEST_CASE(transparent_migration_selective_repair_keeps_survivor_links
     control_plane.clear_job_state();
     control_plane.clear_criu_state();
 }
+#endif   // FMI_ENABLE_TCPUNCH (Direct::pairing_count instrumentation)
 #endif
 
 BOOST_AUTO_TEST_SUITE_END();
