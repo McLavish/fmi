@@ -35,16 +35,17 @@ FMI::FT::TransparentMigrationRuntime::TransparentMigrationRuntime(
     if (config.state_transfer == "criu") {
 #ifdef FMI_ENABLE_CRIU
         // CRIU freezes the whole process image, so every data-plane channel the policy might
-        // select must release its sockets before the dump. Pin the data plane to Direct (the only
-        // backend that releases sockets) so channel selection can never pick an unsupported one;
-        // the rank agent enforces the same rule via this shared helper.
+        // select must release its sockets before the dump. Pin the data plane to a checkpoint-
+        // safe backend (Direct, DirectTCP or Redis — the ones whose prepare_for_checkpoint
+        // releases every socket) so channel selection can never pick an unsupported one; the
+        // rank agent enforces the same rule via this shared helper.
         require_checkpoint_safe_data_plane(config);
 
         // No SIGPIPE guard needed here anymore: the quiesce path holds the control-plane
         // connection closed while waiting to be dumped (socket-free wait), so the captured
         // image contains no established TCP socket and the restored rank's first write goes
         // to a freshly opened connection, never to a dead one. The data plane is covered by
-        // Direct's MSG_NOSIGNAL sends.
+        // the TCP transports' MSG_NOSIGNAL sends (Redis by hiredis reconnect-on-error).
 
         // Advertise this rank's host in the CRIU registry now, at construction, so the
         // host-local rank agent can discover which ranks run on its host BEFORE they reach
@@ -145,8 +146,8 @@ void FMI::FT::TransparentMigrationRuntime::checkpoint_and_wait_for_restore() {
     std::uint64_t target_epoch = active_epoch + 1;
     // Data backend name recorded in the CRIU image registry, and this host's identity for
     // same-host scoping. Resolved here so non-CRIU migration pays for neither. The constructor
-    // guarantees a checkpoint-safe preferred_data_backend (Direct or Redis) on this path, so
-    // it is recorded truthfully.
+    // guarantees a checkpoint-safe preferred_data_backend (Direct, DirectTCP or Redis) on this
+    // path, so it is recorded truthfully.
     std::string backend_name = config.preferred_data_backend;
     std::string host_id = FMI::FT::resolve_host_id(config);
 

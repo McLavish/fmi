@@ -186,8 +186,14 @@ fault tolerance layered around the user API.
   - On multi-homed hosts and in containers, set `advertise_host` explicitly (in K8s, the pod IP
     via the downward API — never a Service VIP, which load-balances to an arbitrary pod).
     Otherwise the rank advertises whichever local address routes to the registry.
-  - Scope today is plain messaging: it is not registered as checkpoint-safe
-    (`include/ft/experimental/CriuRequirements.h`) and no runbook uses it.
+  - Registered as checkpoint-safe (`include/ft/experimental/CriuRequirements.h`), and for a
+    stronger reason than `Direct`: `prepare_for_checkpoint` drops the listener, the cached
+    advertised address and the registry client, so a restored rank re-binds, re-resolves the
+    address peers must dial on whichever host it woke up on, and re-publishes it.
+    (`prepare_for_checkpoint` runs only on the FT-managed path; `runbooks/criu-transparent-checkpoint/`
+    freezes an unmodified DirectTCP job raw — no hooks — and survives on the sequenced-link
+    recovery alone, which is why that runbook is single-host: a raw restore keeps the old
+    listener and advertised address.)
   - Note `ChannelPolicy` breaks ties by `std::map` order, so `Direct` beats `DirectTCP`
     alphabetically at equal modelled cost — `model.DirectTCP.overhead` is set below `Direct`'s
     to reflect its cheaper connection setup, which is also what makes the policy pick it.

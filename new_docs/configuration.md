@@ -83,9 +83,10 @@ constructor verifies that the named backend is active in `backends`.
 
 For `state_transfer = "criu"`, validation is stricter:
 
-- `Direct` must be active
-- no other data backend may be active
-- `preferred_data_backend` must be empty or `Direct`
+- every active data backend must be checkpoint-safe: `Direct`, `DirectTCP` or
+  `Redis` (they release their transport before the dump; S3 would carry live
+  AWS SDK sockets and threads into the image)
+- `preferred_data_backend` must name one of those three
 
 Redis control-plane support is separate from the Redis data backend. A config
 can disable the `Redis` data backend and still use Redis for FT control.

@@ -84,7 +84,8 @@ namespace FMI::FT {
 
     private:
         //! Preconditions for driving a CRIU migration: fault tolerance enabled, Redis control
-        //! plane, state_transfer="criu", and a checkpoint-safe data plane (Direct or Redis).
+        //! plane, state_transfer="criu", and a checkpoint-safe data plane (Direct, DirectTCP or
+        //! Redis).
         void ensure_migration_mode() const;
         //! Block until every rank in @p ranks has published a checkpoint-ready image (QUIESCED for
         //! @p target_epoch, pid>0) on this host, returning their registry entries. Throws

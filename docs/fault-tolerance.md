@@ -183,8 +183,9 @@ no shell quoting, so individual flags must not contain spaces.
 #### v1 limitations
 
 - same host only (criu restores on the dumping host)
-- `Direct` and `Redis` are the supported (checkpoint-safe) data backends; S3 is rejected
-  (live AWS SDK sockets/threads would be captured in the image). Redis is the control plane
+- `Direct`, `DirectTCP` and `Redis` are the supported (checkpoint-safe) data backends; S3 is
+  rejected (live AWS SDK sockets/threads would be captured in the image). Redis is the control
+  plane
 - one targeted rank per migration; no in-flight-collective preservation
 - no Python binding for the CRIU path (the demo is C++)
 - the rank agent is the migration authority and must complete `migrate_rank` (dump → restore →
