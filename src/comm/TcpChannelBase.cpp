@@ -84,7 +84,7 @@ namespace {
     }
 }
 
-void FMI::Comm::TcpChannelBase::maybe_send_ack(Utils::peer_num partner_id) {
+void FMI::Comm::TcpChannelBase::maybe_send_ack(Utils::peer_num partner_id, bool flush_tail) {
     if (!recover_links || partner_id >= links.size() || sockets[partner_id] < 0) {
         return;
     }
@@ -94,7 +94,7 @@ void FMI::Comm::TcpChannelBase::maybe_send_ack(Utils::peer_num partner_id) {
         // next commit.
         return;
     }
-    if (!links[partner_id].ack_due(link_ack_interval)) {
+    if (!links[partner_id].ack_due(flush_tail ? 1 : link_ack_interval)) {
         return;
     }
     const std::uint64_t watermark = links[partner_id].next_received();
@@ -327,7 +327,7 @@ bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long de
         // does, and the application may be blocked right here in a wait that transitively
         // needs that very peer. Guarded against establishment reentrancy, aged so ordinary
         // teardown never triggers it, and skipped for the peer this pump is already about.
-        if (recover_links && establishment_depth == 0 &&
+        if (recover_links && establishment_depth == 0 && !tearing_down &&
             link_suspect_since.size() == num_peers) {
             const long now_ms = steady_now_ms();
             for (Utils::peer_num q = 0; q < num_peers; q++) {
@@ -1393,6 +1393,13 @@ double FMI::Comm::TcpChannelBase::get_price(Utils::peer_num producer, Utils::pee
 }
 
 void FMI::Comm::TcpChannelBase::finalize() {
+    // The goodbye must happen HERE, not (only) in the subclass destructor: the Communicator
+    // finalizes every channel explicitly before destruction, so by destructor time the
+    // sockets are long closed and a destructor-side drain is a no-op over dead fds. Traced
+    // on baseline@16p: the finisher's TEARDOWN-BEGIN showed every fd already -1 with 960
+    // bytes still retained for one peer — retention this close() then destroyed, wedging
+    // that peer in establishment for its whole deadline.
+    drain_links_for_shutdown();
     close_sockets();
     close_transport_state();
 }
@@ -1444,6 +1451,172 @@ bool FMI::Comm::TcpChannelBase::reconfigure_for_epoch(const std::string& new_com
     }
     set_comm_name(new_comm_name);
     return true;
+}
+
+void FMI::Comm::TcpChannelBase::drain_links_for_shutdown() {
+    // Only the framed, recoverable transport has retention and acks to settle; the legacy
+    // modes keep their abrupt close. Contract and rationale on the declaration.
+    if (!framed || !recover_links || links.empty() || sockets.empty()) {
+        return;
+    }
+    // Idle deadline, not total: a peer 25 rounds behind (deep_rounds' pipelined drift)
+    // legitimately takes many seconds to work through its lanes, and it only advances our
+    // retention when its own consumption reaches the socket again — its ack watermark is
+    // its committed prefix, so no fixed grace can cover it without covering every possible
+    // backlog. Progress (retention shrinking, a link resolving) re-arms the grace; only a
+    // QUIET grace — no progress at all — gives up. The absolute cap is the transport's own
+    // patience, so teardown can never outwait what an operation would.
+    tearing_down = true;
+    struct TearingGuard {
+        bool& flag;
+        ~TearingGuard() { flag = false; }
+    } tearing_guard{tearing_down};
+    const long absolute_cap = steady_now_ms() + static_cast<long>(max_timeout);
+    long quiet_deadline = steady_now_ms() + teardown_grace_ms;
+    if (link_trace()) {
+        std::string held;
+        for (Utils::peer_num q = 0; q < num_peers && q < sockets.size(); q++) {
+            if (q == peer_id || q >= links.size()) { continue; }
+            held += " p" + std::to_string(q) + "{fd=" + std::to_string(sockets[q]) +
+                    " ret=" + std::to_string(links[q].retained_bytes()) + "}";
+        }
+        std::fprintf(stderr, "[lt] TEARDOWN-BEGIN%s\n", held.c_str());
+    }
+    // Any exception here means the goodbye cannot be completed on some link; falling through
+    // to the caller's abrupt close is exactly the pre-drain behaviour, and a destructor must
+    // not let anything propagate.
+    try {
+        // Phase 1: stay until every live link's retention is empty. An unacked frame is one
+        // the peer has not committed yet; those bytes may still be in flight, and only the
+        // peer's ack proves them safe from the close below. Links whose socket is already
+        // dead cannot drain and are not waited for.
+        std::size_t last_outstanding_bytes = SIZE_MAX;
+        while (steady_now_ms() < quiet_deadline && steady_now_ms() < absolute_cap) {
+            // The FULL transport, not just established links: a peer still mid-job may be
+            // re-dialing us right now, and its connect sits in the listener backlog until
+            // accept_one/adopt_pending answer it. A teardown that stops accepting turns
+            // that peer's recoverable redial into its whole establishment deadline.
+            service_transport();
+            service_established_links(num_peers);
+            // Flush the sub-interval ack tail on every live link. Without this the drain
+            // CANNOT converge: standalone acks are interval-gated, no data frame will ever
+            // piggyback again, so the last (interval-1) committed frames of every link
+            // would go unacknowledged on both sides forever and both peers would burn
+            // their whole grace (adversarial-review finding, confirmed).
+            for (Utils::peer_num q = 0; q < num_peers && q < sockets.size(); q++) {
+                if (q != peer_id && sockets[q] >= 0) {
+                    maybe_send_ack(q, /*flush_tail=*/true);
+                }
+            }
+            std::size_t outstanding_bytes = 0;
+            bool outstanding = false;
+            for (Utils::peer_num q = 0; q < num_peers && q < sockets.size(); q++) {
+                if (q == peer_id || sockets[q] < 0 || q >= links.size()) {
+                    continue;
+                }
+                if (links[q].replay_suffix().empty()) {
+                    continue;
+                }
+                // A link whose inbound is already EOF or error can never drain: acks are
+                // writes from the peer, and a peer that half-closed (or died) sends no more
+                // of them. Waiting for it would burn the whole grace on a ghost. Close it
+                // and move on — its retention is lost exactly as it would have been at the
+                // grace deadline, no later.
+                char probe;
+                const long n = ::recv(sockets[q], &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+                if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+                               errno != EINTR)) {
+                    ::close(sockets[q]);
+                    sockets[q] = -1;
+                    continue;
+                }
+                outstanding = true;
+                outstanding_bytes += links[q].retained_bytes();
+            }
+            if (!outstanding) {
+                break;
+            }
+            if (outstanding_bytes < last_outstanding_bytes) {
+                last_outstanding_bytes = outstanding_bytes;
+                quiet_deadline = steady_now_ms() + teardown_grace_ms;
+            }
+            poll_live_sockets(20);
+        }
+        // Phases 2+3, merged into one pass: half-close every link whose current connection
+        // has not had its FIN yet, then wait for the peers' own FINs, still servicing the
+        // whole transport — a peer repairing its last link may redial (the listener must
+        // answer), replay frames at us, and our acks are what release its phase 1. FINs are
+        // tracked per link GENERATION, not once up front: an adoption during this wait hands
+        // the peer a fresh connection whose replay has already been written by the adopt,
+        // and that connection needs its own goodbye. EOF is only reported once the stream
+        // before it is drained, so a close here never outraces data. Same idle-not-total
+        // regime: every link that resolves re-arms the quiet grace, because a still-working
+        // peer FINs only when it finishes.
+        std::vector<std::uint64_t> finned_gen(sockets.size(), UINT64_MAX);
+        int last_open = -1;
+        quiet_deadline = std::max(quiet_deadline, steady_now_ms() + teardown_grace_ms);
+        while (steady_now_ms() < quiet_deadline && steady_now_ms() < absolute_cap) {
+            service_transport();
+            service_established_links(num_peers);
+            int open = 0;
+            for (Utils::peer_num q = 0; q < sockets.size(); q++) {
+                if (q == peer_id || sockets[q] < 0) {
+                    continue;
+                }
+                // Settle acks BEFORE the FIN: shutdown(WR) closes our ack channel, and an
+                // unsent tail ack would leave the peer's phase 1 waiting its whole grace
+                // for an acknowledgment that can never come.
+                maybe_send_ack(q, /*flush_tail=*/true);
+                if (finned_gen[q] != generation(q) &&
+                    (q >= links.size() || !links[q].ack_due(1))) {
+                    ::shutdown(sockets[q], SHUT_WR);
+                    finned_gen[q] = generation(q);
+                }
+                char probe;
+                const long n = ::recv(sockets[q], &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+                if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+                               errno != EINTR)) {
+                    ::close(sockets[q]);
+                    sockets[q] = -1;
+                } else {
+                    open++;
+                }
+            }
+            if (open == 0) {
+                if (link_trace()) {
+                    std::fprintf(stderr, "[lt] TEARDOWN-DONE all-fins\n");
+                }
+                return;
+            }
+            if (last_open < 0 || open < last_open) {
+                last_open = open;
+                quiet_deadline = steady_now_ms() + teardown_grace_ms;
+            }
+            poll_live_sockets(20);
+        }
+        if (link_trace()) {
+            std::fprintf(stderr, "[lt] TEARDOWN-GAVE-UP quiet=%d cap=%d\n",
+                         steady_now_ms() >= quiet_deadline,
+                         steady_now_ms() >= absolute_cap);
+        }
+    } catch (...) {
+        // Fall through to the abrupt close the caller performs anyway.
+        if (link_trace()) {
+            std::fprintf(stderr, "[lt] TEARDOWN-THREW\n");
+        }
+    }
+}
+
+void FMI::Comm::TcpChannelBase::poll_live_sockets(int slice_ms) {
+    std::vector<pollfd> fds;
+    for (Utils::peer_num q = 0; q < sockets.size(); q++) {
+        if (q != peer_id && sockets[q] >= 0) {
+            fds.push_back(pollfd{sockets[q], POLLIN, 0});
+        }
+    }
+    if (!fds.empty()) {
+        ::poll(fds.data(), fds.size(), slice_ms);
+    }
 }
 
 void FMI::Comm::TcpChannelBase::close_sockets() {

@@ -136,6 +136,58 @@ namespace FMI::Comm {
 
         void close_sockets();
 
+        //! Say goodbye before closing: drain retention, half-close, wait for the peers' FINs.
+        /*!
+         * Final-teardown counterpart to close_sockets(), for the framed/recoverable transport
+         * only, and only on the finalize()/destructor path (finalize is where it matters:
+         * Communicator finalizes channels before their destructors ever run). An abrupt close() from a rank that finished
+         * the job sends RST whenever the peer's acks sit unread in our receive queue — and an
+         * RST arriving at a peer still inside its last round DESTROYS whatever delivered-but-
+         * unconsumed frames it had queued from us. That peer then repairs the link to recover
+         * the loss by replay, but the process it must replay from has exited: establishment
+         * waits its whole deadline at a registry entry nobody will answer, and a healthy rank
+         * dies of Timeout in its final round. Observed only across real hosts (loopback
+         * consumes everything before the window opens): baseline@4/8/16p, deep_rounds@4p.
+         *
+         * Three phases: (1) service links until every live link's retention is empty — an
+         * unacked frame is one the peer has NOT yet committed, so leaving while it is
+         * outstanding risks exactly the loss above; (2) shutdown(WR) each live socket — FIN,
+         * unlike close, lets everything already written drain to the peer; (3) keep servicing
+         * (frames may still be replayed at us, and our acks are what release the peers' own
+         * phase 1) until every peer answers with its FIN, then close. The waits are bounded
+         * by a QUIET grace, not a total one: a peer legitimately many rounds behind (deep_
+         * rounds drifts ~25 rounds) drains our retention only as fast as its own consumption
+         * reaches the socket again, so progress — retention shrinking, a link resolving —
+         * re-arms the grace, and only teardown_grace_ms of no progress at all (or the
+         * transport's own max_timeout in total) gives up and closes. A link that gave up is
+         * closed exactly as before this path existed — the residual RST risk shrinks from
+         * "every job end" to "peer made no progress for a whole grace".
+         *
+         * NOT called from prepare_for_checkpoint(): there the process resumes with its memory
+         * intact and unacked retention is precisely the recovery mechanism, proven by the
+         * checkpoint sweeps; draining would only stall the quiesce. NOT called from the
+         * reconfigure/repair paths: those replace links between live processes, where replay
+         * handles everything.
+         */
+        void drain_links_for_shutdown();
+
+        //! One bounded POLLIN wait over every live peer socket; the drain phases' idle step.
+        void poll_live_sockets(int slice_ms);
+
+        //! True for the duration of drain_links_for_shutdown. Nested pumps reached through
+        //! drain-time servicing (a reconcile debt, a partial ack completing under write_all)
+        //! must not run the aged re-dial: an establishment attempt from inside a teardown
+        //! dials peers that are themselves exiting, with a fresh full deadline, from a
+        //! destructor (adversarial-review finding, confirmed).
+        bool tearing_down = false;
+
+        //! Upper bound a finished rank spends on the goodbye above before closing anyway.
+        //! Sized for the phase that carries correctness: a peer mid-final-round on a loaded
+        //! host consumed a 240-frame backlog in well under a second when idle, but 2000 was
+        //! measured marginal under CPU contention at 16 ranks — one undrained link at grace
+        //! expiry reproduces the RST loss this whole path exists to prevent.
+        static constexpr long teardown_grace_ms = 10000;
+
         //! Parse the parameters every TCP transport shares. Missing keys throw, as before.
         void parse_tcp_params(std::map<std::string, std::string>& params);
 
@@ -195,7 +247,11 @@ namespace FMI::Comm {
          * after the next commit. What is not optional is that the peer eventually hears
          * something, which is what drain_acks guarantees from the other side.
          */
-        void maybe_send_ack(Utils::peer_num partner_id);
+        //! flush_tail bypasses the ack interval: the teardown drain needs the FINAL sub-
+        //! interval tail (up to interval-1 committed frames) acknowledged, and at job end no
+        //! data frame will ever piggyback it and no interval will ever fill. Everywhere else
+        //! the interval gate stands.
+        void maybe_send_ack(Utils::peer_num partner_id, bool flush_tail = false);
 
         //! Collect the peer's acks without disturbing the message stream.
         /*!

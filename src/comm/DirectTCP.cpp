@@ -321,6 +321,11 @@ FMI::Comm::DirectTCP::DirectTCP(std::map<std::string, std::string> params,
 }
 
 FMI::Comm::DirectTCP::~DirectTCP() {
+    // Settle retention and half-close before the abrupt close below: a straight close() from
+    // a finished rank RSTs away frames a still-working peer had not yet consumed, and that
+    // peer then re-establishes toward a process that no longer exists. See
+    // drain_links_for_shutdown's declaration for the full mechanism.
+    drain_links_for_shutdown();
     close_sockets();
     close_transport_state();
 }
