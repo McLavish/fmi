@@ -190,4 +190,11 @@ cells failed, up to 9 ranks cascading in one trial).
 
 `multihost_ft_migration.py` drives the FT-managed cross-host path over ssh (the plain-VM mirror
 of `runbooks/k8s-criu-node-evacuation`): `evacuate-local` on the source node, `restore-remote`
-on the destination, one `promote`, DirectTCP data plane throughout.
+on the destination, one `promote`, DirectTCP data plane throughout. Verified on the same 4-node
+cluster, 3/3: `baseline` at 4 ranks (one rank, node 2 → node 3), `baseline` at 7 ranks (ranks 1
+and 5 evacuated in ONE cut, both restored on a node already hosting a third rank), and
+`variable_payloads` at 4 ranks (2 MiB frames in flight). Every run finished with the exact
+clean-run checksums after the epoch promotion. The restored process keeps its dumped PID, so
+each node's `/proc/sys/kernel/ns_last_pid` must be seeded into a disjoint band, and
+`advertise_host` must be empty so the restored rank re-advertises the address of the machine it
+actually woke up on.
