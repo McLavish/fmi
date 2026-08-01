@@ -188,13 +188,16 @@ until the peers' own FINs. Multi-host evidence on the fixed transport: **all 8 s
 4, 7, 8 and 16 ranks across 4 EC2 nodes — 32/32 clean-run cells passed** (before the fix, 10+
 cells failed, up to 9 ranks cascading in one trial).
 
-`multihost_ft_migration.py` drives the FT-managed cross-host path over ssh (the plain-VM mirror
-of `runbooks/k8s-criu-node-evacuation`): `evacuate-local` on the source node, `restore-remote`
-on the destination, one `promote`, DirectTCP data plane throughout. Verified on the same 4-node
-cluster, 3/3: `baseline` at 4 ranks (one rank, node 2 → node 3), `baseline` at 7 ranks (ranks 1
-and 5 evacuated in ONE cut, both restored on a node already hosting a third rank), and
-`variable_payloads` at 4 ranks (2 MiB frames in flight). Every run finished with the exact
-clean-run checksums after the epoch promotion. The restored process keeps its dumped PID, so
-each node's `/proc/sys/kernel/ns_last_pid` must be seeded into a disjoint band, and
+`multihost_ft_migration.py` drives the migration-managed cross-host path over ssh (the plain-VM
+mirror of `runbooks/k8s-criu-node-evacuation`): `evacuate-local` on the source node,
+`restore-remote` on the destination, one `promote`, DirectTCP data plane throughout. Verified on
+the same 4-node cluster, 7 migrations, 7 passed — including on a TCPunch-free build
+(`-DFMI_ENABLE_TCPUNCH=OFF -DFMI_ENABLE_CRIU=ON`, where the same 32-cell clean-run matrix also
+passed 32/32): `baseline` at 4 ranks (one rank, node 2 → node 3); `baseline` at 7 ranks with
+ranks 1 and 5 evacuated in ONE cut, both restored on a node already hosting a third rank (twice);
+`variable_payloads` at 4 ranks, 2 MiB frames in flight (twice); `deep_rounds` at 4 ranks
+(pipelined drift); and `uneven_participation` at 4 ranks (compute skew). Every run finished with
+the exact clean-run checksums after the epoch promotion. The restored process keeps its dumped
+PID, so each node's `/proc/sys/kernel/ns_last_pid` must be seeded into a disjoint band, and
 `advertise_host` must be empty so the restored rank re-advertises the address of the machine it
 actually woke up on.
