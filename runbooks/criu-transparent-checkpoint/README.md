@@ -162,7 +162,32 @@ If a rank ever does stall, it says so: after three seconds of waiting it prints 
 it holds on every link — descriptor, bytes queued, whether the link still owes a handshake —
 which is how the last of the deadlocks here was found.
 
-Single host. The restored rank re-uses the listening socket and advertised address the image
-captured, which is correct on the same machine and wrong on any other; cross-host restore needs
-the rank to re-publish its registry entry, which the migration runtime does and this runbook
-does not exercise.
+This file's sweep is single host. The restored rank re-uses the listening socket and advertised
+address the image captured, which is correct on the same machine and wrong on any other;
+cross-host restore needs the rank to re-publish its registry entry, which the migration runtime
+does and this sweep does not exercise.
+
+## Multi-host
+
+`multihost_sweep.py` is the multi-machine sibling: ranks spread round-robin over `--nodes` via
+ssh, criu dump/restore driven on whichever host holds the target rank, and `--restore
+same|next|random` choosing whether a dumped rank wakes up on the machine it left or a different
+one. Its module docstring lists the environmental prerequisites (shared checkout at one absolute
+path, identical library versions, criu file caps, disjoint PID bands per node, a
+cluster-reachable registry, `advertise_host` left empty). `--max-checkpoints 0` turns it into a
+pure multi-host liveness/correctness harness — no freezes, every rank must still reach DONE with
+the single-host baseline checksum.
+
+Taking the job multi-host is what exposed the END-OF-JOB teardown race (a finished rank's
+abrupt close RST-destroys final-round frames a lagging peer had not yet consumed; the peer
+re-establishes toward the exited process and dies of Timeout) — loopback consumes everything
+before the window opens, so a single-host sweep can never see it. The fix is the sequenced
+transport's graceful goodbye (`TcpChannelBase::drain_links_for_shutdown`, run from
+`finalize()`): drain retention with tail-ack flushing, half-close, keep accepting and servicing
+until the peers' own FINs. Multi-host evidence on the fixed transport: **all 8 shapes at
+4, 7, 8 and 16 ranks across 4 EC2 nodes — 32/32 clean-run cells passed** (before the fix, 10+
+cells failed, up to 9 ranks cascading in one trial).
+
+`multihost_ft_migration.py` drives the FT-managed cross-host path over ssh (the plain-VM mirror
+of `runbooks/k8s-criu-node-evacuation`): `evacuate-local` on the source node, `restore-remote`
+on the destination, one `promote`, DirectTCP data plane throughout.
