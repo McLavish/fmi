@@ -123,13 +123,10 @@ namespace {
 
 //! Minimal Redis client for the peer registry.
 /*!
- * Deliberately modelled on FT::ControlPlane's command path (redisCommandArgv, explicit
- * argument lengths, reconnect-and-retry once) rather than on the Redis channel, which builds
- * commands by string concatenation and passes them as printf format strings — a comm_name
+ * Commands go out through redisCommandArgv with explicit argument lengths, and a dead context
+ * is reconnected and the batch retried once. Deliberately NOT built like the Redis channel,
+ * which concatenates commands into a string and passes it as a printf format — a comm_name
  * containing '%' or a space corrupts those.
- *
- * Not shared with ControlPlane: that class throws unless fault tolerance is configured, and
- * this backend must work in plain non-FT runs.
  */
 class FMI::Comm::DirectTCP::Registry {
 public:
