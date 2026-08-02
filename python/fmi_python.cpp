@@ -11,7 +11,7 @@ BOOST_PYTHON_MODULE(fmi)
 {
     class_<FMI::Utils::PythonCommunicator>("Communicator",
             init<FMI::Utils::peer_num, FMI::Utils::peer_num, std::string, std::string,
-                 optional<unsigned int, std::string, std::string> >())
+                 optional<unsigned int> >())
         .def("send", &FMI::Utils::PythonCommunicator::send)
         .def("recv", &FMI::Utils::PythonCommunicator::recv)
         .def("bcast", &FMI::Utils::PythonCommunicator::bcast)

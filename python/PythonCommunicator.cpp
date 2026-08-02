@@ -5,10 +5,8 @@
 #include <iostream>
 
 FMI::Utils::PythonCommunicator::PythonCommunicator(FMI::Utils::peer_num peer_id, FMI::Utils::peer_num num_peers, std::string config_path,
-                                                   std::string comm_name, unsigned int faas_memory,
-                                                   std::string worker_id, std::string placement) {
-    comm = std::make_shared<FMI::Communicator>(peer_id, num_peers, config_path, comm_name, faas_memory,
-                                               std::move(worker_id), std::move(placement));
+                                                   std::string comm_name, unsigned int faas_memory) {
+    comm = std::make_shared<FMI::Communicator>(peer_id, num_peers, config_path, comm_name, faas_memory);
     this->peer_id = peer_id;
     this->num_peers = num_peers;
 }
