@@ -140,6 +140,89 @@ freeze lands ends `ALREADY FINISHED (trial is void)` and is skipped; lengthen a 
 `--max-checkpoints N` checkpoints up to N times per run, choosing a fresh rank each time, which
 exercises a rank being frozen while a peer is itself mid-repair.
 
+## ClientServer (Redis) data plane
+
+Everything above runs over `DirectTCP`. The store-backed family checkpoints too, by an entirely
+different mechanism, and the same sweep drives it — `--config` chooses the plane:
+
+```bash
+python3 sweep.py --config fmi_redis.json --trials 20 --peers 2 4 8 --max-checkpoints 3 \
+    --seed 1 --rounds 6000
+```
+
+The config must enable **exactly one** backend, and `fmi_redis.json` enables Redis only. That is
+not tidiness: with DirectTCP also enabled the cost model picks DirectTCP for every operation this
+subject issues, so a sweep against a mixed config exercises no Redis code and reports green.
+Cleanup follows the plane the config names — DirectTCP `redis-cli DEL fmi:direct:<comm>`, Redis a
+scan-and-delete of the comm's own keys, S3 an `aws s3 rm --recursive` of its prefix.
+
+**Rounds are much more expensive here.** Measured on loopback Redis: 6.7 ms per round at 2 ranks,
+8.7 ms at 4, 10.2 ms at 8, against microseconds for DirectTCP. `--rounds 6000` is a ~40 s clean
+run at 2 ranks, which is the window the sweep's 0.25–1.2 s freeze delay needs; `p2p_ring` costs
+1.17 ms per round at 4 ranks, hence `--rounds 30000` for that shape.
+
+### `max_timeout` counts iterations, not milliseconds
+
+A peer waiting for an object polls `max_timeout / timeout` times, sleeping `timeout` ms and paying
+one store round trip on each pass. Its patience is therefore
+`(max_timeout / timeout) × (sleep + RTT)`, not `max_timeout` milliseconds. `fmi_redis.json`'s
+`60000 / 1` is 60000 passes — about 66 s of wall clock at 2 ranks on loopback, and more at higher
+rank counts, where each pass buys more RTT. Work the formula out for your store's latency; do not
+read the number as a wall clock.
+
+### What the recovery relies on
+
+Not the sequenced link. No frames, no sequence numbers, no retention, no replay, no incarnation:
+points 2, 3 and 4 at the top of this runbook are properties of the TCP transport, and none of them
+applies here. A store rank keeps all of its protocol state in process-local memory — the
+per-operation counters, the poll loop's own locals — which criu restores byte-exact, and the store
+holds durable whole values written by idempotent `SET`/`GET`/`DEL`. A restored process resumes on
+the instruction it was frozen on, with the same key it was about to write or read, so nothing can
+be re-executed into a collision.
+
+The only casualty of the freeze is the TCP connection to the store, and `"recover": "true"` is
+about exactly that. Point 1 applies verbatim — same hiredis, same `SIGPIPE` on the first write
+after a restore — and past it, the next command notices the dead context, frees it, dials again
+within `connect_timeout_ms` and re-issues within `io_timeout_ms`. Re-issuing blind is safe because
+every command is idempotent. A write that cannot be completed within the poll budget throws
+instead of being logged and dropped, so a lost message surfaces at the sender rather than as an
+unexplained `Timeout` at the peer.
+
+### Store cleanup and `comm_name`
+
+Under `recover`, `finalize()` deletes nothing: a rank that leaves cannot know whether a peer still
+needs what it wrote, and deleting at that moment is what makes a staggered finalize deadlock.
+Instead every write carries `EX object_ttl_s` (3600 in `fmi_redis.json`; `0` means no expiry at
+all, which under this flag means no cleanup at all) and the store expires the objects.
+
+That makes **a `comm_name` unique per run** a precondition rather than a convention. `sweep.py`
+already names each run `fmisw<pid>-…` and deletes the comm's keys around every trial, but by hand
+do not reuse a name inside the TTL window: the barrier markers are not deleted either, so the
+second run's first barrier is satisfied instantly by the first run's markers.
+
+### Evidence
+
+All on `fmi_redis.json`, single host, live Redis on `127.0.0.1:6379`, criu 4.2.1:
+
+| run | result |
+| --- | --- |
+| `--trials 20 --peers 2 4 8 --max-checkpoints 3 --seed 1 --rounds 6000` | 20 passed, 0 failed, 0 skipped |
+| `--shape p2p_ring --trials 5 --peers 4 --max-checkpoints 3 --seed 1 --rounds 30000` | 5 passed, 0 failed, 0 skipped |
+| `--shape mixed_p2p_collective --trials 5 --peers 4 --max-checkpoints 3 --seed 1 --rounds 8000` | 5 passed, 0 failed, 0 skipped |
+| by hand, 2 ranks, rank 1 dumped at round 1000 of 6000 | both `DONE` with the baseline checksums; rank 1 logged round 5500 after its restore |
+
+The DirectTCP profile was re-verified against the same `sweep.py` after the `--config` refactor —
+`--trials 3 --peers 2 --rounds 8000 --seed 7` on the unchanged `fmi.json`, 3 passed, 0 failed.
+
+`--shape collectives_sweep` is **not** covered, and the reason is not the store: its *clean*
+baseline fails at 4 ranks before any trial runs, on a pre-existing `ClientServer::reduce` bug. For
+an ordered (non-commutative) reduction with a root other than 0, the root seeds the accumulator
+with its own contribution and then folds the remaining ranks in ascending order, computing
+`f(v_root, v_0, …)` instead of `f(v_0, …, v_n-1)`; `ClientServer::scan` already parks its own
+contribution in its own slot and is correct. Reproduced on the commit this work branched from,
+unrelated to the recovery flag, and not fixed here. `--shape noncommutative` rotates its root the
+same way and is affected identically.
+
 ## Interpreting failures
 
 | symptom | meaning |

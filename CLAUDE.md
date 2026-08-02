@@ -100,11 +100,11 @@ cd build/tests
 ./Boost_Tests_run --list_content                   # list all suites/cases
 ```
 
-Thirteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
+Fourteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
 `Channels`, `Communicator`, `LinkLayer`, `LinkRecovery`, `LinkLiveness`, `LinkIncarnations`,
 `FramedTransport`, `TransportRecovery`, `OperationIdentity`, `ProtocolValidation`,
-`ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`. (`tests/client.cpp` is a
-standalone sample, not a suite, and is not compiled into the binary.)
+`ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`, `ClientServerRecovery`.
+(`tests/client.cpp` is a standalone sample, not a suite, and is not compiled into the binary.)
 
 **Most tests need live infrastructure:** everything that talks `DirectTCP` needs a running
 Redis, which is its peer registry, and `config/fmi_identity_test.json` drives the `Redis`
@@ -239,6 +239,56 @@ The dependency direction is: user API → channel policy → channel → transpo
     permanently `0` today: its producer was the deleted control plane and nothing has replaced
     it, so the field is inert rather than absent — see the comment on
     `Communicator::incarnation`.
+
+- **Store-family recovery** (`include/comm/RecoverableClientServer.h`,
+  `src/comm/RecoverableClientServer.cpp`, `src/comm/Redis.cpp`): the same idea as the sequenced
+  link layer for the other channel family, in the same place in the hierarchy —
+  `RecoverableClientServer` sits between `ClientServer`, which keeps the collective algorithms
+  and is untouched, and the concrete backends, exactly as `TcpChannelBase` sits between
+  `PeerToPeer` and `Direct`/`DirectTCP`. One opt-in flag, `"recover": "true"` on the backend's
+  config block, **off by default**: unset, every override delegates to the base and the keys, the
+  deletes and the byte copies are what the family always wrote. The only flag-off difference
+  anywhere is that a NULL hiredis reply is now a named `std::runtime_error` instead of a null
+  dereference. `Redis` implements the flag; `S3` is re-based onto the class but **refuses the
+  flag at construction**, because the family half (no deletion) without an S3 half (a lifecycle
+  rule) is unbounded cost plus silent data loss.
+  - Why the store family needs so much less machinery than TCP: all protocol state is
+    process-local memory that criu restores byte-exact (the `num_operations` counters, the poll
+    loops' locals), the store holds durable whole values, and every command is an idempotent
+    SET/GET/DEL — so there is nothing to sequence, retain or replay. The only thing a freeze
+    destroys is the connection to the store. Under `recover`, `Redis::command()` therefore
+    reconnects and re-issues: `redisFree` plus a fresh dial, **never** clearing `err` in place,
+    since a context frozen mid-command can hold a partial command in its output buffer.
+    `connect_timeout_ms` and `io_timeout_ms` (both default 1000 ms, the latter clamped to
+    [100, 60000] and never derived from the poll `timeout`, which is 1 ms in the shipped configs)
+    bound a dial and an I/O against a store that has gone away.
+  - A write is a delivery obligation — the analogue of sender retention — so `upload_object`
+    retries under the poll budget and then **throws** rather than logging and dropping;
+    a `-OOM`/`-READONLY`/`-MISCONF` reply throws immediately. `download_object` never throws for
+    a connection reason (its callers are bounded poll loops whose budget is the failure
+    detector, and they only re-enter on `false`), but a value whose length is not the length
+    expected does throw instead of being silently truncated.
+  - Cleanup moves to the store. Under `recover` `finalize()` deletes **nothing** — a rank that
+    leaves cannot know whether a peer still needs what it wrote, and deleting there is what makes
+    a staggered finalize deadlock — and every write carries `EX object_ttl_s` (default 3600; `0`
+    means no expiry, which under this flag means no cleanup at all). `barrier()` correspondingly
+    stops calling `get_object_names()` (a `KEYS *` per poll from every rank) and probes the N
+    exact marker keys, which also ends the cross-communicator suffix false-arrivals; and
+    `object_key_prefix()` gains a `|` separator, closing the `"job"` rank 11 vs `"job1"` rank 1
+    key collision for recovered jobs.
+  - Two preconditions this makes load-bearing. **`comm_name` must be unique per job run**: with
+    nothing deleted, a same-named run inside the TTL window reads stale keys as live data, and
+    its first barrier is satisfied instantly by the previous run's markers. And under a
+    multi-backend config a send and its matching recv must size their buffers identically —
+    `Communicator::recv` sizes the policy query with the *receiver's* buffer — which the
+    exact-length check now reports rather than truncating past. `Utils::Timeout` remains
+    **terminal for the communicator** (the counters are not retry-safe): `recover` makes timeouts
+    rarer, not recoverable.
+  - `runbooks/criu-transparent-checkpoint/fmi_redis.json` is the checkpointing config for this
+    data plane, and it enables Redis and nothing else on purpose — with DirectTCP also enabled
+    the cost model routes every operation of that subject to DirectTCP, so a sweep would exercise
+    no store code at all and report green. That runbook's README documents the sweep invocation
+    and the evidence.
 
 - **Python bindings** (`python/`): a Boost.Python module. `fmi_python.cpp` is the module entry
   point — it registers the `Communicator` class and the type/op helpers (`hints`, `func`, `op`,
