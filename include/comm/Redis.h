@@ -99,6 +99,14 @@ namespace FMI::Comm {
         bool connection_warned = false;
         //! The same latch for downloads, which swallow a connection failure under recover.
         bool download_warned = false;
+        //! And one for a store that answers, but with an error; cleared by any other reply.
+        /*!
+         * Separate from download_warned because the two are cleared by different things: an error
+         * reply IS a completed command, so a store that answers every GET with -LOADING or -NOAUTH
+         * clears the connection latch on every pass and would be reported once per poll — a
+         * thousand console writes a second, per rank, for the whole budget.
+         */
+        bool download_error_warned = false;
         //! Error text of the context that carried the last failure; it is freed before the caller reports.
         std::string last_error;
         // Model params

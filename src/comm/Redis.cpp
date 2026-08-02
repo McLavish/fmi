@@ -297,18 +297,27 @@ bool FMI::Comm::Redis::download_object(channel_data buf, std::string name) {
         }
         return false;
     }
-    // A completed command re-arms the latch, so a later outage is reported once too.
+    // A completed command re-arms the connection latch, so a later outage is reported once too.
     download_warned = false;
-    if (reply->type == REDIS_REPLY_NIL) {
+    if (reply->type == REDIS_REPLY_ERROR) {
+        if (recover && !download_error_warned) {
+            // Loud, because none of the errors a GET can draw (-MISCONF, -LOADING, -NOAUTH) get
+            // better by polling, and the caller can only report a timeout minutes later. Once,
+            // because they are the errors of a store that is in a state, not of a request: every
+            // one of them lasts for as long as the condition does, which is seconds to minutes,
+            // and this function runs once a millisecond per rank. Its own latch, because a store
+            // answering every GET with an error is answering — it completes each command, so the
+            // connection latch above is cleared on every pass and would report nothing at all.
+            download_error_warned = true;
+            BOOST_LOG_TRIVIAL(error) << "Redis: error on GET " << name << ": "
+                                     << (reply->str == nullptr ? "unknown error" : reply->str)
+                                     << " (waiting out the poll budget)";
+        }
         return false;
     }
-    if (reply->type == REDIS_REPLY_ERROR) {
-        if (recover) {
-            // Loud, because none of the errors a GET can draw (-MISCONF, -LOADING, -NOAUTH) get
-            // better by polling, and the caller can only report a timeout minutes later.
-            BOOST_LOG_TRIVIAL(error) << "Redis: error on GET " << name << ": "
-                                     << (reply->str == nullptr ? "unknown error" : reply->str);
-        }
+    // Anything that is not an error is the store answering normally again.
+    download_error_warned = false;
+    if (reply->type == REDIS_REPLY_NIL) {
         return false;
     }
     if (reply->str == nullptr) {

@@ -18,13 +18,17 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <boost/log/core.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <new>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -193,6 +197,197 @@ namespace {
         redisFree(context);
         return ttl;
     }
+
+    //! A port nothing was listening on at the moment the kernel was asked, or 0.
+    int free_port() {
+        const int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (probe < 0) {
+            return 0;
+        }
+        struct sockaddr_in addr {};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = ::inet_addr("127.0.0.1");
+        addr.sin_port = 0;
+        int port = 0;
+        socklen_t len = sizeof(addr);
+        if (::bind(probe, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0 &&
+            ::getsockname(probe, reinterpret_cast<struct sockaddr*>(&addr), &len) == 0) {
+            port = ntohs(addr.sin_port);
+        }
+        ::close(probe);
+        return port;
+    }
+
+    //! A redis-server of this case's own, on a port of its own, killed however the case leaves.
+    /*!
+     * Some properties can only be shown against a store that answers badly — one that is out of
+     * memory, or that refuses every command — which the development Redis this suite otherwise
+     * uses must not be turned into.
+     *
+     * fork + exec of a server, not of a rank: the child replaces itself with redis-server before it
+     * can run a line of test code, so there is no forked-rank body for ForkedRankGuard to protect
+     * (nothing here can fork again, which is what that guard is for). What it does need is an
+     * owner. A case that leaves by an unexpected exception — a BOOST_REQUIRE, a throw from a
+     * constructor — unwinds past any kill() written after it and leaves a server running for the
+     * life of the machine; a leaked one on a fixed port then makes the next run's readiness probe
+     * succeed against a server started with none of the settings the case depends on, and the
+     * failure that follows names the wrong thing. So the pid is owned by an object and the port is
+     * asked for rather than assumed.
+     */
+    class EphemeralRedisServer {
+    public:
+        explicit EphemeralRedisServer(const std::vector<std::string>& extra_args) {
+            server_port = free_port();
+            if (server_port == 0) {
+                return;
+            }
+            std::vector<std::string> args = {"redis-server", "--port", std::to_string(server_port),
+                                             "--bind", "127.0.0.1", "--save", "",
+                                             "--appendonly", "no"};
+            args.insert(args.end(), extra_args.begin(), extra_args.end());
+            std::vector<char*> argv;
+            argv.reserve(args.size() + 1);
+            for (auto& arg : args) {
+                argv.push_back(const_cast<char*>(arg.c_str()));
+            }
+            argv.push_back(nullptr);
+
+            pid = ::fork();
+            if (pid < 0) {
+                return;
+            }
+            if (pid == 0) {
+                // Its startup banner is not this suite's output.
+                const int null_fd = ::open("/dev/null", O_WRONLY);
+                if (null_fd >= 0) {
+                    ::dup2(null_fd, STDOUT_FILENO);
+                    ::dup2(null_fd, STDERR_FILENO);
+                }
+                ::execvp("redis-server", argv.data());
+                std::_Exit(127);
+            }
+            ready = wait_until_accepting();
+            if (!ready) {
+                stop();
+            }
+        }
+
+        EphemeralRedisServer(const EphemeralRedisServer&) = delete;
+        EphemeralRedisServer& operator=(const EphemeralRedisServer&) = delete;
+
+        ~EphemeralRedisServer() { stop(); }
+
+        //! Whether there is a server to talk to; false means no usable redis-server binary.
+        bool up() const { return ready; }
+
+        std::string port() const { return std::to_string(server_port); }
+
+    private:
+        bool wait_until_accepting() {
+            for (int attempt = 0; attempt < 100; attempt++) {
+                const int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+                if (probe < 0) {
+                    return false;
+                }
+                struct sockaddr_in addr {};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(static_cast<uint16_t>(server_port));
+                addr.sin_addr.s_addr = ::inet_addr("127.0.0.1");
+                const bool accepted =
+                        ::connect(probe, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
+                ::close(probe);
+                if (accepted) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            return false;
+        }
+
+        void stop() {
+            if (pid > 0) {
+                // SIGKILL: it was started with no persistence, so there is nothing for it to write
+                // out, and a shutdown that can be ignored is one this destructor could hang on.
+                ::kill(pid, SIGKILL);
+                ::waitpid(pid, nullptr, 0);
+            }
+            pid = -1;
+            ready = false;
+        }
+
+        pid_t pid = -1;
+        int server_port = 0;
+        bool ready = false;
+    };
+
+    //! Everything the library logs while this object is alive, counted in lines.
+    /*!
+     * At the descriptor, not at std::cout: with no sink configured BOOST_LOG_TRIVIAL goes through
+     * the core's default sink, which writes to standard output without going through the stream
+     * object — lending std::cout (or std::clog) another buffer captures nothing. Standard output
+     * is redirected to a file of our own for the duration instead, which is true however the sink
+     * gets there.
+     *
+     * What the case using it needs is the count, not the text: the property under test is how often
+     * a poll loop repeats itself, and a thousand-line answer and a one-line answer differ by
+     * nothing else.
+     */
+    class CapturedLog {
+    public:
+        CapturedLog() {
+            flush_all();
+            saved_stdout = ::dup(STDOUT_FILENO);
+            char path[] = "/tmp/fmi_clientserver_log_XXXXXX";
+            sink_fd = ::mkstemp(path);
+            if (sink_fd >= 0) {
+                ::unlink(path);   // it exists only as this descriptor
+                ::dup2(sink_fd, STDOUT_FILENO);
+            }
+        }
+
+        CapturedLog(const CapturedLog&) = delete;
+        CapturedLog& operator=(const CapturedLog&) = delete;
+
+        ~CapturedLog() { restore(); }
+
+        std::size_t lines() {
+            flush_all();
+            if (sink_fd < 0) {
+                return 0;
+            }
+            ::lseek(sink_fd, 0, SEEK_SET);
+            char buf[4096];
+            std::size_t count = 0;
+            ssize_t n;
+            while ((n = ::read(sink_fd, buf, sizeof(buf))) > 0) {
+                count += static_cast<std::size_t>(std::count(buf, buf + n, '\n'));
+            }
+            return count;
+        }
+
+    private:
+        static void flush_all() {
+            boost::log::core::get()->flush();
+            std::cout.flush();
+            std::fflush(stdout);
+        }
+
+        void restore() {
+            flush_all();
+            if (saved_stdout >= 0) {
+                ::dup2(saved_stdout, STDOUT_FILENO);
+                ::close(saved_stdout);
+                saved_stdout = -1;
+            }
+            if (sink_fd >= 0) {
+                ::close(sink_fd);
+                sink_fd = -1;
+            }
+        }
+
+        int saved_stdout = -1;
+        int sink_fd = -1;
+    };
 
     //! Count the objects whose name ends in suffix, the way ClientServer::barrier does.
     std::size_t count_with_suffix(const std::vector<std::string>& names, const std::string& suffix) {
@@ -592,66 +787,66 @@ BOOST_AUTO_TEST_CASE(reconnect_survives_the_middle_of_a_collective) {
  * recover the refusal is raised where it happened.
  */
 BOOST_AUTO_TEST_CASE(store_rejection_is_not_silently_lost) {
-    constexpr int port = 6390;
-
-    // fork + exec of a server, not of a rank: the child replaces itself with redis-server before
-    // it can run a line of test code, so there is no forked-rank body here for ForkedRankGuard to
-    // protect. If the exec fails the child leaves immediately by the same rule.
-    const pid_t server = ::fork();
-    BOOST_REQUIRE(server >= 0);
-    if (server == 0) {
-        // Its startup banner is not this suite's output.
-        const int null_fd = ::open("/dev/null", O_WRONLY);
-        if (null_fd >= 0) {
-            ::dup2(null_fd, STDOUT_FILENO);
-            ::dup2(null_fd, STDERR_FILENO);
-        }
-        ::execlp("redis-server", "redis-server", "--port", std::to_string(port).c_str(),
-                 "--bind", "127.0.0.1", "--maxmemory", "1", "--maxmemory-policy", "noeviction",
-                 "--save", "", "--appendonly", "no", static_cast<char*>(nullptr));
-        std::_Exit(127);
-    }
-
-    // Wait for it to accept connections, or decide it is not there.
-    bool up = false;
-    for (int attempt = 0; attempt < 100 && !up; attempt++) {
-        const int probe = ::socket(AF_INET, SOCK_STREAM, 0);
-        BOOST_REQUIRE(probe >= 0);
-        struct sockaddr_in addr {};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = ::inet_addr("127.0.0.1");
-        up = ::connect(probe, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
-        ::close(probe);
-        if (!up) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-    }
-    if (!up) {
-        ::kill(server, SIGKILL);
-        ::waitpid(server, nullptr, 0);
+    EphemeralRedisServer server({"--maxmemory", "1", "--maxmemory-policy", "noeviction"});
+    if (!server.up()) {
         BOOST_TEST_MESSAGE("no usable redis-server binary: skipping the store-rejection case");
         return;
     }
 
-    {
-        const std::string comm_name = unique_comm_name("oom");
-        // A short budget: an -OOM is a completed command and is raised at once, so anything that
-        // does reach the retry loop is a different failure and should not sit in it.
-        auto params = recover_params({{"port", std::to_string(port)}, {"max_timeout", "20"}});
-        auto channel = make_breakable(comm_name, 0, 1, params);
+    const std::string comm_name = unique_comm_name("oom");
+    // A short budget: an -OOM is a completed command and is raised at once, so anything that does
+    // reach the retry loop is a different failure and should not sit in it.
+    auto params = recover_params({{"port", server.port()}, {"max_timeout", "20"}});
+    auto channel = make_breakable(comm_name, 0, 1, params);
 
-        std::vector<char> payload(4096, 'x');
-        BOOST_CHECK_EXCEPTION(channel->upload_object({payload.data(), payload.size()},
-                                                     comm_name + "refused"),
-                              std::runtime_error,
-                              [] (const std::runtime_error& e) {
-                                  return std::string(e.what()).find("OOM") != std::string::npos;
-                              });
+    std::vector<char> payload(4096, 'x');
+    BOOST_CHECK_EXCEPTION(channel->upload_object({payload.data(), payload.size()},
+                                                 comm_name + "refused"),
+                          std::runtime_error,
+                          [] (const std::runtime_error& e) {
+                              return std::string(e.what()).find("OOM") != std::string::npos;
+                          });
+}
+
+//! A store that answers every read with an error is reported once, not once per poll.
+/*!
+ * The errors a GET can draw are states rather than events — -LOADING while a restarted Redis reads
+ * its dump back, -MISCONF when background saves are failing, -READONLY after a failover, -NOAUTH
+ * after a credential rotation — and each lasts as long as its condition does. Each is also a
+ * completed command, which is what makes it different from an outage: the connection is fine, so
+ * every poll draws another one, and a poll is a millisecond.
+ *
+ * A rank in that state wrote one console line per poll — 2000 of them from a single download()
+ * against a password-protected store — each taking Boost.Log's console sink lock and doing blocking
+ * I/O. Under the 60 s budget the sweep configuration asks for, that is a rank spending its failure
+ * describing it, on every rank at once, onto the disk of the machine running the sweep.
+ */
+BOOST_AUTO_TEST_CASE(a_store_that_answers_with_errors_is_reported_once) {
+    EphemeralRedisServer server({"--requirepass", "secret"});
+    if (!server.up()) {
+        BOOST_TEST_MESSAGE("no usable redis-server binary: skipping the error-flood case");
+        return;
     }
 
-    ::kill(server, SIGTERM);
-    ::waitpid(server, nullptr, 0);
+    const std::string comm_name = unique_comm_name("noauth");
+    // No password on the channel, so every command it sends is answered -NOAUTH: a store that is
+    // reachable, answering, and of no use whatsoever.
+    auto params = recover_params({{"port", server.port()}, {"max_timeout", "500"}});
+    auto channel = make_redis(comm_name, 0, 1, params);
+
+    std::size_t lines = 0;
+    {
+        CapturedLog log;
+        int seen = 0;
+        BOOST_CHECK_THROW(channel->download({reinterpret_cast<char*>(&seen), sizeof(seen)},
+                                            comm_name + "unreadable"), FMI::Utils::Timeout);
+        lines = log.lines();
+    }
+    // At least one, because a store that cannot be read must say so — and because a count of zero
+    // would mean this case is measuring nothing rather than that nothing was written.
+    BOOST_CHECK_MESSAGE(lines >= 1 && lines <= 3,
+                        "expected the refusal to be reported once, got " << lines
+                        << " log lines from a 500-poll download");
 }
 
 //! A communicator name is data, not a format string, and it survives being either.
