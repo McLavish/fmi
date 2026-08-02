@@ -186,7 +186,7 @@ MUTS = [
  # of them is survivable, which made a remove-the-sites mutation pass the suite while
  # proving nothing. Gating ack_due closed kills every standalone ack at once.
  ("no_standalone_acks","src/comm/TcpChannelBase.cpp",
-  "    if (!links[partner_id].ack_due(link_ack_interval)) {",
+  "    if (!links[partner_id].ack_due(flush_tail ? 1 : link_ack_interval)) {",
   "    if (true) {"),
  ("no_ack_drain_when_blocked","src/comm/TcpChannelBase.cpp",
   "        drain_acks(rcpt_id, static_cast<long>(max_timeout));",""),

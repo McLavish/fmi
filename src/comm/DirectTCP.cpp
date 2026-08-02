@@ -500,8 +500,8 @@ bool FMI::Comm::DirectTCP::read_frame(int fd, Utils::peer_num& sender,
     if (receiver != peer_id || claimed >= num_peers || claimed == peer_id) {
         return false;
     }
-    // The link hash carries the epoch-qualified comm_name, so a straggler from an earlier epoch
-    // cannot pass itself off as the legitimate party for this one.
+    // The link hash carries the comm_name, so a connector belonging to a different
+    // communicator cannot pass itself off as the legitimate party for this one.
     if (get64(buf + 16) != fnv1a64(link_name(claimed, false))) {
         return false;
     }
@@ -676,7 +676,7 @@ FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
         }
         // With it, this connection IS the evidence. A peer only dials a rank it already had a
         // link to after deciding that link is gone, and the hello it just passed proves it is
-        // that peer, on this comm, at this epoch. Believing the local descriptor instead is
+        // that peer, on this comm. Believing the local descriptor instead is
         // what wedged a restored rank: after criu the old descriptor can still *report*
         // ESTABLISHED while nothing is on the other end, so probing it answers "live", the
         // reconnect is refused, and the peer's handshake sits unread on a connection this rank

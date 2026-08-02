@@ -1,8 +1,6 @@
 #ifndef FMI_COMMON_H
 #define FMI_COMMON_H
-#include <chrono>
 #include <exception>
-#include <thread>
 
 //! Contains various utilities that are used in FMI
 namespace FMI::Utils {
@@ -15,30 +13,6 @@ namespace FMI::Utils {
             return "Timeout was reached";
         }
     };
-
-    //! Poll @p predicate every @p poll_interval_ms until it returns true (then return true) or
-    //! @p timeout_ms elapses (then return false). @p timeout_ms == 0 waits indefinitely. Shared
-    //! by the FT control-plane wait loops (epoch promotion, checkpoint-ready, migration watch).
-    template <typename Predicate>
-    bool poll_until(Predicate&& predicate, unsigned int timeout_ms, unsigned int poll_interval_ms) {
-        auto start = std::chrono::steady_clock::now();
-        while (true) {
-            if (predicate()) {
-                return true;
-            }
-            if (timeout_ms != 0) {
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - start).count();
-                // Compare in the signed millisecond domain: elapsed is monotonic (>= 0) and the
-                // widening cast of timeout_ms is exact, so this avoids the truncating
-                // unsigned cast that would wrap past ~49.7 days.
-                if (elapsed >= static_cast<decltype(elapsed)>(timeout_ms)) {
-                    return false;
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
-        }
-    }
 
     //! Set by the client, controls the optimization goal of the Channel Policy
     enum Hint {

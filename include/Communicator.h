@@ -176,9 +176,6 @@ namespace FMI {
         //! Set the hint (optimization objective) of the channel selection procedure.
         void hint(FMI::Utils::Hint hint);
 
-        //! Returns the communicator name passed to the underlying channels.
-        [[nodiscard]] std::string get_comm_name() const { return comm_name; }
-
     private:
         std::shared_ptr<FMI::Utils::ChannelPolicy> policy;
         std::map<std::string, std::shared_ptr<FMI::Comm::Channel>> channels;

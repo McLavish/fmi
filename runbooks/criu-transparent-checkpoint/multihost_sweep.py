@@ -261,8 +261,12 @@ def main():
     ap.add_argument("--delay-range", type=float, nargs=2, default=[0.25, 1.2])
     ap.add_argument("--max-checkpoints", type=int, default=1,
                     help="0 = no checkpointing: a pure multi-host liveness/correctness trial")
-    ap.add_argument("--restore", choices=["same", "next", "random"], default="next",
-                    help="where a dumped rank is restored, relative to its dump host")
+    ap.add_argument("--restore", choices=["same", "next", "random"], default="same",
+                    help="where a dumped rank is restored, relative to its dump host. "
+                         "'next'/'random' are cross-host and currently UNBACKED: a restored "
+                         "rank keeps advertising the address of the machine it was dumped on, "
+                         "because the hook that dropped the cached address went with the epoch "
+                         "migration runtime. See README.md.")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--trace", action="store_true",

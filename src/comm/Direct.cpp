@@ -10,14 +10,6 @@ FMI::Comm::Direct::Direct(std::map<std::string, std::string> params, std::map<st
     parse_tcp_model_params(model_params);
 }
 
-namespace {
-    std::atomic<unsigned int> total_pairings{0};
-}
-
-unsigned int FMI::Comm::Direct::pairing_count() {
-    return total_pairings.load();
-}
-
 std::string FMI::Comm::Direct::link_name(Utils::peer_num partner_id, bool outbound) const {
     if (outbound) {
         return comm_name + std::to_string(peer_id) + "_" + std::to_string(partner_id);
@@ -27,9 +19,7 @@ std::string FMI::Comm::Direct::link_name(Utils::peer_num partner_id, bool outbou
 
 int FMI::Comm::Direct::establish(Utils::peer_num, const std::string& link_name) {
     try {
-        int fd = pair(link_name, hostname, port, max_timeout);
-        total_pairings.fetch_add(1);
-        return fd;
+        return pair(link_name, hostname, port, max_timeout);
     // The unqualified name below is TCPunch's GLOBAL ::Timeout from <tcpunch.h>: neither FMI
     // nor FMI::Comm declares a Timeout, so unqualified lookup falls through to global scope.
     // Do not "fix" this to FMI::Utils::Timeout — that catch would silently never fire, and

@@ -170,10 +170,16 @@ namespace FMI::Comm {
 
         //! Which lineage of the local rank owns this link state (contract 3).
         /*!
-         * Set once, from the control plane, before the link carries anything. A process
-         * restored from a checkpoint never re-enters this path, so it keeps the incarnation
-         * its image was taken with — which is precisely the property that lets its peers tell
-         * "restored, reconcile" from "replaced, start again".
+         * Set once, before the link carries anything, by whatever supplies the rank's lineage.
+         * A process restored from a checkpoint never re-enters this path, so it keeps the
+         * incarnation its image was taken with — which is precisely the property that lets its
+         * peers tell "restored, reconcile" from "replaced, start again".
+         *
+         * NOTE: nothing supplies a non-zero lineage today. The epoch protocol that used to
+         * claim one per process was removed and no coordinator has replaced it, so every
+         * process presents 0 and only the same-lineage branch of reconcile() is reachable.
+         * The field stays on the wire (frame_wire_version 3) so a decentralised coordinator
+         * can populate it without a format change.
          */
         void set_incarnation(std::uint64_t value) { local_incarnation = value; }
         [[nodiscard]] std::uint64_t incarnation() const { return local_incarnation; }

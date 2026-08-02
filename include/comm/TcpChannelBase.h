@@ -35,9 +35,9 @@ namespace FMI::Comm {
      *
      * Deliberately declares no destructor. Channel documents why there is no virtual
      * destructor (see Channel::finalize), and a base destructor that closed sockets here would
-     * close them a second time after finalize() — Communicator::reconfigure_to_epoch finalizes
-     * a channel and then destroys it, by which point those fd numbers may already have been
-     * handed out again.
+     * close them a second time after finalize() — ~Communicator finalizes every channel and
+     * then destroys it, and any other rank in the process may have been handed those fd
+     * numbers again in between.
      */
     class TcpChannelBase : public PeerToPeer {
     public:
@@ -68,9 +68,9 @@ namespace FMI::Comm {
         //! Name that both ends of a link derive identically.
         /*!
          * The default is rank-ordered, so it does not depend on which side touches the link
-         * first. The explicit separators matter: an epoch-qualified comm_name ends in digits,
-         * and concatenating bare rank numbers onto it lets distinct (epoch, rank pair)
-         * combinations collide.
+         * first. The explicit separators matter: comm names routinely end in digits — the
+         * test suite builds one out of a timestamp, i.e. digits only — and concatenating bare
+         * rank numbers onto such a name lets distinct (comm, rank pair) combinations collide.
          */
         virtual std::string link_name(Utils::peer_num partner_id, bool outbound) const;
 

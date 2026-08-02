@@ -350,8 +350,9 @@ rules hold trivially.
 
 **What contract 3 does *not* have yet:** the design's full membership state machine — `dirgen`,
 `PAUSING`/`QUIESCED`/`CHECKPOINTED`/`RESTORE_RESERVED`/`LOST`, idempotent operation tokens,
-directory-driven repair, the restore budget. Those are specified and model-checked
-(`docs/tla/Membership.tla`, and see the bounded-restore fix) but not written. What is
+directory-driven repair, the restore budget. Those were specified and model-checked at the
+time (in `docs/tla/Membership.tla`, since deleted with the epoch protocol) but never written,
+and the contract they belonged to no longer exists. What is
 implemented is the part the link layer needs to be unambiguous: the incarnation, its fencing
 rules, and where the number comes from.
 
@@ -391,7 +392,7 @@ layer: with TCPunch out of the build, the same collectives pass.
 | --- | --- |
 | identity fields are each necessary | `docs/tla/MessageIdentity.tla`, 10 configs; TLC exhibits a silent substitution for every weaker envelope |
 | the link state machine is safe and live | `docs/tla/SequencedLink.tla`, 15 configs including 4 freeze positions and 6 deliberately-broken variants |
-| the membership contract is live | `docs/tla/Membership.tla`; `Membership.cfg` violates its temporal properties, `MembershipBudget.cfg` is clean over 2,436 distinct states |
+| ~~the membership contract is live~~ | *Retired.* `Membership.tla` and its 11 configurations were deleted with the Redis-coordinated epoch migration protocol they modelled; the library no longer has a membership contract. |
 | identity flows from every collective with no application change | `OperationIdentity`, `FramedTransport` |
 | a divergent schedule fails loudly rather than substituting | `FramedTransport`, `ProtocolEdgeCases`, `ProtocolFuzz` (framed: 0 silent completions of a divergent program; unframed: 17) |
 | a severed link loses and duplicates nothing | `LinkRecovery`, `TransportRecovery` |

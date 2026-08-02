@@ -20,18 +20,15 @@ namespace FMI::Comm {
     public:
         explicit Direct(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params);
 
-        //! Process-wide count of completed TCPunch pairings. Cheap telemetry for measuring
-        //! reconfiguration cost; also what the selective re-pair test asserts on.
-        static unsigned int pairing_count();
-
     protected:
         int establish(Utils::peer_num partner_id, const std::string& link_name) override;
 
         //! TCPunch pairing names, in the original direction-dependent form.
         /*!
-         * Kept exactly as it was rather than adopting the base class's rank-ordered name: the
-         * fault-tolerance runbooks are verified against this behaviour, and changing how a link
-         * is named changes which registrations pair up on the rendezvous server.
+         * Kept exactly as it was rather than adopting the base class's rank-ordered name:
+         * changing how a link is named changes which registrations pair up on the rendezvous
+         * server, so every deployment already running against this backend would have to be
+         * upgraded in lockstep.
          */
         std::string link_name(Utils::peer_num partner_id, bool outbound) const override;
 

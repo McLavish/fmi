@@ -30,9 +30,8 @@ namespace FMI::Comm {
 
         ~DirectTCP();
 
-        //! Process-wide count of established links, mirroring Direct::pairing_count().
-        //! Deliberately a separate counter: a shared one would let either backend inflate the
-        //! number the other's tests assert on.
+        //! Process-wide count of established links. Cheap telemetry for measuring
+        //! establishment cost; scoped to this backend so it counts only its own links.
         static unsigned int connection_count();
 
     protected:
