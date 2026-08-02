@@ -3,6 +3,7 @@
 
 #include "RecoverableClientServer.h"
 #include <sys/types.h>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <string>
@@ -62,7 +63,7 @@ namespace FMI::Comm {
 
         //! How many times a poll-loop-shaped retry may run before the caller's budget is spent.
         /*!
-         * The ClientServer download loops give up after max_timeout / timeout passes; an upload,
+         * The ClientServer download loops give up after ceil(max_timeout / timeout) passes; an upload,
          * which has nobody polling on its behalf, retries under the same budget so that a rank
          * writing and a rank waiting for what it writes give up at roughly the same moment.
          */
@@ -86,6 +87,14 @@ namespace FMI::Comm {
         bool apply_timeouts = false;
         //! The process that dialled the current connection; see command().
         pid_t owner_pid = -1;
+        //! No dial before this instant, under recover; set by connect() after one fails.
+        /*!
+         * A dial against a store that answers nothing costs connect_timeout_ms, while the poll
+         * loop that asked for it charges its budget one `timeout` — 1 ms in the shipped configs.
+         * Without this the two diverge by that ratio and max_timeout stops bounding anything.
+         * See connect().
+         */
+        std::chrono::steady_clock::time_point dial_not_before {};
         //! One log line per outage, not one per operation: the poll loops call this thousands of times.
         bool connection_warned = false;
         //! The same latch for downloads, which swallow a connection failure under recover.

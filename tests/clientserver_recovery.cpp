@@ -736,6 +736,48 @@ BOOST_AUTO_TEST_CASE(unreachable_store_fails_within_the_io_timeout) {
     BOOST_CHECK_MESSAGE(elapsed < 3000, "an unreachable store took " << elapsed << " ms to be noticed");
 }
 
+//! And the poll budget above that failure is spent in milliseconds, not in dials.
+/*!
+ * The budget is the failure detector under recover, which only means anything if a pass through
+ * the poll loop costs about what the loop charges for it. A dial against an address that answers
+ * nothing costs the whole connect timeout while the loop charges one `timeout` — 1 ms in every
+ * shipped config — so a channel that dialled on every pass turned a 20 ms budget into twelve
+ * seconds, and the 5000 ms of config/fmi_identity_test.json into the better part of an hour.
+ *
+ * The bound below is deliberately loose: what it has to catch is the ratio, not the constant. One
+ * dial's worth of overrun is unavoidable (an unreachable store cannot be recognised faster than a
+ * connect attempt takes to fail), six hundred is the bug.
+ */
+BOOST_AUTO_TEST_CASE(unreachable_store_gives_up_within_its_poll_budget) {
+    const std::string comm_name = unique_comm_name("blackhole_budget");
+    auto params = recover_params({{"host", "10.255.255.1"},
+                                  {"max_timeout", "20"},
+                                  {"connect_timeout_ms", "300"},
+                                  {"io_timeout_ms", "300"}});
+
+    auto channel = make_redis(comm_name, 0, 1, params);
+
+    // download(), not download_object(): the poll loop is what carries the budget.
+    const auto download_started = std::chrono::steady_clock::now();
+    int seen = 0;
+    BOOST_CHECK_THROW(channel->download({reinterpret_cast<char*>(&seen), sizeof(seen)},
+                                        comm_name + "never"), FMI::Utils::Timeout);
+    const auto download_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - download_started).count();
+    BOOST_CHECK_MESSAGE(download_ms < 2000,
+                        "a 20 ms download budget took " << download_ms << " ms against a blackholed store");
+
+    // The write side carries the same budget, and had the same problem.
+    const auto upload_started = std::chrono::steady_clock::now();
+    int value = 7;
+    BOOST_CHECK_THROW(channel->upload_object({reinterpret_cast<char*>(&value), sizeof(value)},
+                                             comm_name + "unwritable"), std::runtime_error);
+    const auto upload_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - upload_started).count();
+    BOOST_CHECK_MESSAGE(upload_ms < 2000,
+                        "a 20 ms upload budget took " << upload_ms << " ms against a blackholed store");
+}
+
 //! However an operation ends, its counter has advanced exactly once.
 /*!
  * The counters name the objects of the next operation of the same kind, so a rank that gave up and

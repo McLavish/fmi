@@ -67,6 +67,7 @@ FMI::Comm::Redis::~Redis() {
 
 void FMI::Comm::Redis::connect() {
     drop_connection();
+    const auto dial_started = std::chrono::steady_clock::now();
     if (apply_timeouts) {
         struct timeval connect_timeout {connect_timeout_ms / 1000, (connect_timeout_ms % 1000) * 1000};
         context = redisConnectWithTimeout(hostname.c_str(), port, connect_timeout);
@@ -80,6 +81,20 @@ void FMI::Comm::Redis::connect() {
     }
     owner_pid = ::getpid();
     if (context == nullptr || context->err) {
+        // A dial that fails is not free. Against an address that answers nothing at all it costs
+        // the whole connect timeout, while the poll loop that asked for it charges its budget one
+        // `timeout` — a millisecond in every shipped config — for the pass that paid it. Dialling
+        // on every pass therefore overruns max_timeout by the ratio between the two, which is a
+        // thousandfold at the shipped numbers: the budget would stop being a failure detector at
+        // exactly the failure it is meant to detect.
+        //
+        // So a failed dial buys silence equal to what it cost: until that much time has passed
+        // again, command() reports "could not complete" without touching the network. The polls in
+        // between are free and advance the budget at the rate it assumes, which keeps the wall
+        // clock of a doomed operation within a factor of two of the patience configured for it,
+        // and still notices a store that comes back within twice the time it takes to fail.
+        const auto cost = std::chrono::steady_clock::now() - dial_started;
+        dial_not_before = std::chrono::steady_clock::now() + cost;
         last_error = context == nullptr ? "could not allocate a Redis context" : context->errstr;
         if (!connection_warned) {
             connection_warned = true;
@@ -89,6 +104,7 @@ void FMI::Comm::Redis::connect() {
     } else {
         // Re-arm the latch, so a later outage is reported once too.
         connection_warned = false;
+        dial_not_before = std::chrono::steady_clock::time_point{};
         last_error.clear();
     }
 }
@@ -113,7 +129,10 @@ unsigned int FMI::Comm::Redis::poll_attempts() const {
         // under recover — and nothing on this path retries there. One pass, no division.
         return 1;
     }
-    return std::max(1u, max_timeout / timeout);
+    // Rounded up, because that is how many passes the download loops make: they stop when
+    // elapsed_time reaches max_timeout having added timeout per pass, so a budget that is not a
+    // multiple of the interval buys one more pass, not one fewer.
+    return std::max(1u, (max_timeout + timeout - 1) / timeout);
 }
 
 std::string FMI::Comm::Redis::last_failure() const {
@@ -144,6 +163,12 @@ std::string FMI::Comm::Redis::last_failure() const {
  * channel sends is idempotent (SET / GET / DEL / KEYS) and no caller reads a retry-sensitive
  * part of the reply.
  *
+ * That is the only thing the second attempt is for, so it is spent only on an attempt that
+ * inherited a connection. An attempt that dialled one itself and still failed has already learnt
+ * what a repeat would tell it, and repeating would double the cost of every failing call — the
+ * dial is the expensive part, and the budget the caller is counting against pays for it. The
+ * quiet window connect() sets is the other half of that accounting.
+ *
  * The pid check is the fork guard, mirroring DirectTCP::Registry (src/comm/DirectTCP.cpp:131):
  * an inherited connection must not be shared, because two processes reading one RESP stream
  * steal each other's replies. That helper stays separate deliberately — it pipelines batches,
@@ -153,23 +178,33 @@ std::string FMI::Comm::Redis::last_failure() const {
 FMI::Comm::Redis::ReplyPtr FMI::Comm::Redis::command(int argc, const char** argv, const std::size_t* argvlen) {
     const int attempts = recover ? 2 : 1;
     for (int attempt = 0; attempt < attempts; attempt++) {
+        bool dialed = false;
         if (context == nullptr || context->err || (recover && owner_pid != ::getpid())) {
+            if (recover && std::chrono::steady_clock::now() < dial_not_before) {
+                // Still inside the window the last failed dial bought. Saying so costs nothing,
+                // and every caller under recover is a loop that will come back and ask again.
+                break;
+            }
             connect();
+            dialed = true;
         }
-        if (context == nullptr) {
-            continue;
+        if (context != nullptr) {
+            auto* reply = static_cast<redisReply*>(redisCommandArgv(context, argc, argv, argvlen));
+            if (reply != nullptr) {
+                return ReplyPtr(reply);
+            }
+            // Read the reason before dropping the context, which frees it.
+            const int reason = context->err;
+            drop_connection();
+            if (reason == REDIS_ERR_OTHER) {
+                // Not a transport failure: a malformed command, or hiredis refusing the arguments.
+                // Reconnecting changes nothing, and a second identical failure would report the
+                // outage that never happened instead of the argument that did.
+                break;
+            }
         }
-        auto* reply = static_cast<redisReply*>(redisCommandArgv(context, argc, argv, argvlen));
-        if (reply != nullptr) {
-            return ReplyPtr(reply);
-        }
-        // Read the reason before dropping the context, which frees it.
-        const int reason = context->err;
-        drop_connection();
-        if (reason == REDIS_ERR_OTHER) {
-            // Not a transport failure: a malformed command, or hiredis refusing the arguments.
-            // Reconnecting changes nothing, and a second identical failure would report the
-            // outage that never happened instead of the argument that did.
+        if (dialed) {
+            // See above: the connection this attempt failed on was its own.
             break;
         }
     }
