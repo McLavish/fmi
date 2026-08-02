@@ -11,7 +11,7 @@ void FMI::Comm::ClientServer::send(channel_data buf, FMI::Utils::peer_num dest) 
     } else {
         operation_num = num_operation_entry->second;
     }
-    std::string file_name = data_plane_name() + std::to_string(peer_id) + "_" + std::to_string(dest) + "_" + std::to_string(operation_num);
+    std::string file_name = comm_name + std::to_string(peer_id) + "_" + std::to_string(dest) + "_" + std::to_string(operation_num);
     operation_num++;
     num_operations["send" + std::to_string(dest)] = operation_num;
     upload(buf, file_name);
@@ -25,14 +25,14 @@ void FMI::Comm::ClientServer::recv(channel_data buf, FMI::Utils::peer_num dest) 
     } else {
         operation_num = num_operation_entry->second;
     }
-    std::string file_name = data_plane_name() + std::to_string(dest) + "_" + std::to_string(peer_id) + "_" + std::to_string(operation_num);
+    std::string file_name = comm_name + std::to_string(dest) + "_" + std::to_string(peer_id) + "_" + std::to_string(operation_num);
     operation_num++;
     num_operations["recv" + std::to_string(dest)] = operation_num;
     download(buf, file_name);
 }
 
 void FMI::Comm::ClientServer::bcast(channel_data buf, FMI::Utils::peer_num root) {
-    std::string file_name = data_plane_name() + std::to_string(root) + "_bcast_" + std::to_string(num_operations["bcast"]);
+    std::string file_name = comm_name + std::to_string(root) + "_bcast_" + std::to_string(num_operations["bcast"]);
     num_operations["bcast"]++;
     if (peer_id == root) {
         upload(buf, file_name);
@@ -44,7 +44,7 @@ void FMI::Comm::ClientServer::bcast(channel_data buf, FMI::Utils::peer_num root)
 void FMI::Comm::ClientServer::barrier() {
     auto barrier_num = num_operations["barrier"];
     std::string barrier_suffix = "_barrier_" + std::to_string(barrier_num);
-    std::string file_name = data_plane_name() + std::to_string(peer_id) + barrier_suffix;
+    std::string file_name = comm_name + std::to_string(peer_id) + barrier_suffix;
     num_operations["barrier"]++;
     char b = '1';
     upload({&b, sizeof(b)}, file_name);
@@ -108,7 +108,7 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
                 if (received[i]) {
                     continue;
                 }
-                std::string file_name = data_plane_name() + std::to_string(i) + "_reduce_" + std::to_string(num_operations["reduce"]);
+                std::string file_name = comm_name + std::to_string(i) + "_reduce_" + std::to_string(num_operations["reduce"]);
                 if (download_object({data.data() + i * buffer_length, buffer_length}, file_name)) {
                     received[i] = true;
                 }
@@ -132,7 +132,7 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
             throw Utils::Timeout();
         }
     } else {
-        std::string file_name = data_plane_name() + std::to_string(peer_id) + "_reduce_" + std::to_string(num_operations["reduce"]);
+        std::string file_name = comm_name + std::to_string(peer_id) + "_reduce_" + std::to_string(num_operations["reduce"]);
         num_operations["reduce"]++;
         upload(sendbuf, file_name);
     }
@@ -140,7 +140,7 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
 
 void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, raw_function f) {
     if (peer_id != num_peers - 1) {
-        std::string file_name = data_plane_name() + std::to_string(peer_id) + "_scan_" + std::to_string(num_operations["scan"]);
+        std::string file_name = comm_name + std::to_string(peer_id) + "_scan_" + std::to_string(num_operations["scan"]);
         upload(sendbuf, file_name);
     }
     bool left_to_right = !(f.commutative && f.associative);
@@ -204,7 +204,7 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
             if (received[i]) {
                 continue;
             }
-            std::string file_name = data_plane_name() + std::to_string(i) + "_scan_" + std::to_string(num_operations["scan"]);
+            std::string file_name = comm_name + std::to_string(i) + "_scan_" + std::to_string(num_operations["scan"]);
             if (download_object({data.data() + static_cast<std::size_t>(i) * buffer_length, buffer_length}, file_name)) {
                 received[i] = true;
             }
