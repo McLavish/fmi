@@ -2,6 +2,7 @@
 #define FMI_REDIS_H
 
 #include "RecoverableClientServer.h"
+#include <sys/types.h>
 #include <map>
 #include <memory>
 #include <string>
@@ -27,6 +28,17 @@ namespace FMI::Comm {
 
         double get_price(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;
 
+    protected:
+        //! The descriptor the current connection is on, or -1 when there is no connection.
+        /*!
+         * A test seam, not part of the channel contract: it exists so that a case can
+         * shutdown() the descriptor and leave this channel holding exactly what a
+         * `criu restore --tcp-close` hands a restored rank — a valid fd whose connection is
+         * gone, with the context none the wiser (context->err is still 0). Nothing in the
+         * library reads it, and no caller may close it: the channel owns the number.
+         */
+        int connection_fd() const;
+
     private:
         //! Reply ownership for the command helper; freeReplyObject is NULL-safe.
         struct ReplyDeleter {
@@ -48,11 +60,36 @@ namespace FMI::Comm {
         //! Why the last command could not be completed, for messages built after the context is gone.
         std::string last_failure() const;
 
+        //! How many times a poll-loop-shaped retry may run before the caller's budget is spent.
+        /*!
+         * The ClientServer download loops give up after max_timeout / timeout passes; an upload,
+         * which has nobody polling on its behalf, retries under the same budget so that a rank
+         * writing and a rank waiting for what it writes give up at roughly the same moment.
+         */
+        unsigned int poll_attempts() const;
+
         std::string hostname;
         int port;
         redisContext* context;
+        //! Connect and per-command timeouts, and whether they are applied at all.
+        /*!
+         * Without them hiredis blocks on the socket indefinitely, so a store that accepts the
+         * connection and then stops answering — the shape a frozen or partitioned server has —
+         * hangs the rank inside one command, where no poll budget can see it.
+         *
+         * Deliberately NOT derived from the poll `timeout`: that is the sleep between polls and
+         * is 1 ms in every shipped config, which as a socket timeout would abort healthy commands
+         * on any loaded machine. They are separate knobs because they measure different things.
+         */
+        long connect_timeout_ms = 1000;
+        long io_timeout_ms = 1000;
+        bool apply_timeouts = false;
+        //! The process that dialled the current connection; see command().
+        pid_t owner_pid = -1;
         //! One log line per outage, not one per operation: the poll loops call this thousands of times.
         bool connection_warned = false;
+        //! The same latch for downloads, which swallow a connection failure under recover.
+        bool download_warned = false;
         //! Error text of the context that carried the last failure; it is freed before the caller reports.
         std::string last_error;
         // Model params
