@@ -152,8 +152,8 @@ namespace FMI::Comm {
          * closed exactly as before this path existed — the residual RST risk shrinks from
          * "every job end" to "peer made no progress for a whole grace".
          *
-         * Only from finalize(), i.e. the end of the job. NOT from reset_link or repair_link:
-         * those replace a link between live processes, where replay handles everything. And
+         * Only from finalize(), i.e. the end of the job. NOT from repair_link: that replaces
+         * a link between live processes, where replay handles everything. And
          * deliberately not from any checkpoint path — a process frozen by criu resumes with
          * its memory intact, so unacked retention IS the recovery mechanism (the checkpoint
          * sweeps prove it) and draining would only stall the freeze.
@@ -226,20 +226,6 @@ namespace FMI::Comm {
 
         //! Grow the per-peer link state to num_peers on first use.
         void ensure_link_state();
-
-        //! Forget everything about one peer's link: drop the socket, discard any half-read
-        //! frame, and start its sequence state over from zero.
-        /*!
-         * The primitive behind "that peer is not the process I was talking to any more". A
-         * transport sequence is scoped to a link, so a peer served by a new process starts at
-         * zero; carrying the old counters over would make the next framed exchange report a
-         * gap that never happened on the wire.
-         *
-         * Distinct from repair_link, which re-establishes to the SAME process and replays what
-         * it has not acknowledged. This one discharges the obligation instead of preserving it,
-         * so it is only correct when the peer really has been replaced.
-         */
-        void reset_link(Utils::peer_num partner_id);
 
         //! Re-establish a dead link and retransmit whatever the peer has not acknowledged.
         void repair_link(Utils::peer_num partner_id);

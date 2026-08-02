@@ -1404,36 +1404,6 @@ void FMI::Comm::TcpChannelBase::finalize() {
     close_transport_state();
 }
 
-
-void FMI::Comm::TcpChannelBase::reset_link(Utils::peer_num partner_id) {
-    if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
-        close(sockets[partner_id]);
-        sockets[partner_id] = -1;
-    }
-    if (partner_id < inbound_stage.size()) {
-        inbound_stage[partner_id] = InboundStage{};
-    }
-    // Both marks belong to the connection just dropped, and note_link_replaced clears them
-    // for exactly this reason: carried onto the replacement, a standing suspicion lets the
-    // aged redial tear down a healthy link the moment nothing happens to clear it — and the
-    // application being mid-frame on it (which suppresses servicing's peek, the usual
-    // clearer) is precisely such a moment.
-    if (partner_id < link_suspect_since.size()) {
-        link_suspect_since[partner_id] = 0;
-    }
-    if (partner_id < decode_fail_marks.size()) {
-        decode_fail_marks[partner_id] = 0;
-    }
-    // The transport sequence is scoped to a link, and a peer served by a new process starts
-    // its own counters at zero. Carrying the old link's counters over would make the first
-    // framed exchange with that process report a gap that never happened on the wire.
-    if (partner_id < links.size()) {
-        links[partner_id] = SequencedLink({link_window_frames, link_max_frame_bytes,
-                                           link_retention_limit_bytes});
-        links[partner_id].set_incarnation(local_incarnation);
-    }
-}
-
 void FMI::Comm::TcpChannelBase::drain_links_for_shutdown() {
     // Only the framed, recoverable transport has retention and acks to settle; the legacy
     // modes keep their abrupt close. Contract and rationale on the declaration.
