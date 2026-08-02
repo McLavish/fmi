@@ -49,8 +49,5 @@
       "requests_per_hour": 1000,
       "include_infrastructure_costs": true
     }
-  },
-  "fault_tolerance": {
-    "enabled": false
   }
 }
