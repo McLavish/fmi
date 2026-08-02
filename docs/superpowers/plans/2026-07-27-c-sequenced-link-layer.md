@@ -103,9 +103,12 @@ transport (C2+), CRIU 4.2 (Plan B / C2+), POSIX threads and processes.
     questions). If Plan A has not landed it when C2 begins, C2 keeps epoch-qualified names and
     inherits the collision — it must not grow a second, competing naming scheme.
 - Canonical configure for this machine:
-  `cmake -S . -B build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON -DFMI_ENABLE_S3=OFF`.
-  `-DFMI_ENABLE_CRIU=ON` is **required** — without it neither counterexample binary is built
-  (`tests/CMakeLists.txt:19` and `:33` both gate on `FMI_ENABLE_CRIU`).
+  `cmake -S . -B build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_S3=OFF`.
+  This recipe also required `-DFMI_ENABLE_CRIU=ON`, without which neither counterexample
+  binary was built (`tests/CMakeLists.txt:19` and `:33` both gated on `FMI_ENABLE_CRIU`).
+  **That option and both binaries were removed together with the epoch migration protocol**;
+  the flag has been dropped from the recipes here, and any step below that builds or runs a
+  counterexample target can no longer be re-run as written.
 - Infrastructure on this machine: Redis native at `127.0.0.1:6379` (verify with
   `redis-cli -h 127.0.0.1 -p 6379 ping` → `PONG`); `tcpunchd` from
   `extern/TCPunch/server/build-fresh/tcpunchd` on port 10000 (the `server/build/` binary is stale
@@ -188,7 +191,7 @@ at parse** that throws `std::runtime_error` with a field-naming message on any v
 Write the failing test first in `tests/link_layer.cpp` (suite `LinkLayer`), then run:
 
 ```bash
-cmake -S . -B build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON -DFMI_ENABLE_S3=OFF
+cmake -S . -B build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_S3=OFF
 cmake --build build --target Boost_Tests_run -j"$(nproc)"
 ```
 
@@ -1709,7 +1712,7 @@ Docs: `new_docs/control-plane.md`, `new_docs/epochs.md`, `new_docs/transparent-m
 ### Final verification recipe (to be expanded when C4 is written)
 
 ```bash
-cmake -S . -B build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON -DFMI_ENABLE_S3=OFF
+cmake -S . -B build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_S3=OFF
 cmake --build build --target Boost_Tests_run fmi_migration_counterexamples \
   fmi_migration_p2p_cut_counterexample -j"$(nproc)"
 redis-cli -h 127.0.0.1 -p 6379 ping

@@ -104,10 +104,13 @@ POSIX sockets/threads/`/proc`.
   - `CMakeLists.txt` and `tests/CMakeLists.txt` are appended to by all three plans (`FMI_SOURCES`
     near `CMakeLists.txt:42-51`, `FMI_TEST_SOURCES` at `tests/CMakeLists.txt:6`). Expect trivial
     textual conflicts; resolve by union, never by overwrite.
-- Both counterexample binaries only exist under `-DFMI_ENABLE_CRIU=ON`
-  (`tests/CMakeLists.txt`, two `if(FMI_ENABLE_CRIU)` blocks). Every verification recipe passes it.
+- Both counterexample binaries only existed under `-DFMI_ENABLE_CRIU=ON`
+  (`tests/CMakeLists.txt`, two `if(FMI_ENABLE_CRIU)` blocks), and every verification recipe
+  below passed it. **The option, those blocks and both binaries were removed together with the
+  epoch migration protocol**; the flag has been dropped from the recipes here, and the steps
+  that build or run a counterexample binary can no longer be re-run as written.
 - Build once per task with:
-  `cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON`
+  `cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON`
   then `cmake --build /home/luca/fmi/build -j"$(nproc)"`.
 - **`Boost_Tests_run` must be run with `cwd = build/tests`.** `tests/communicator.cpp:12` hardcodes
   `config_path = "../../config/fmi_test.json"`, which only resolves from
@@ -286,7 +289,7 @@ than a hang — `Boost_Tests_run` runs these peers as threads in one process, so
 whole binary down instead of failing it.
 
 ```bash
-cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON
+cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON
 cmake --build /home/luca/fmi/build --target Boost_Tests_run -j"$(nproc)"
 /home/luca/fmi/extern/TCPunch/server/build-fresh/tcpunchd 10000 &
 TCPUNCHD=$!; sleep 1
@@ -528,7 +531,7 @@ Expected today: compilation fails (`ensure_run_id`/`resolve_run_id` do not exist
 
 ```bash
 redis-cli -h 127.0.0.1 -p 6379 ping
-cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON
+cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON
 cmake --build /home/luca/fmi/build -j"$(nproc)"
 cd /home/luca/fmi/build/tests && ./Boost_Tests_run --run_test=ClientServerKeys
 /home/luca/fmi/extern/TCPunch/server/build-fresh/tcpunchd 10000 &
@@ -1180,7 +1183,7 @@ against the moved counter.
 - [ ] **Step 5: Verify (GREEN)**
 
 ```bash
-cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON
+cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON
 cmake --build /home/luca/fmi/build -j"$(nproc)"
 cd /home/luca/fmi/build/tests && ./Boost_Tests_run --run_test=OperationIdentity
 /home/luca/fmi/extern/TCPunch/server/build-fresh/tcpunchd 10000 &
@@ -1508,7 +1511,7 @@ counterexamples and `1` when it reports none (`run_explorer`,
 
 ```bash
 redis-cli -h 127.0.0.1 -p 6379 flushall
-cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON -DFMI_ENABLE_CRIU=ON
+cmake -S /home/luca/fmi -B /home/luca/fmi/build -DFMI_BUILD_TESTS=ON
 cmake --build /home/luca/fmi/build -j"$(nproc)"
 
 /home/luca/fmi/build/tests/fmi_migration_counterexamples --list

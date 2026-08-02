@@ -915,8 +915,9 @@ plan was wrong and is corrected here:
 - `tests/migration_cut_model.cpp` (623 LOC, plus `--explore`) needs an explicit disposition:
   after the fix its explorer can never be green — it either still reports counterexamples
   (exit 2) or reports none found (exit 1).
-- The verification recipe must pass `-DFMI_ENABLE_CRIU=ON`; without it neither counterexample
-  binary is built.
+- The verification recipe had to pass `-DFMI_ENABLE_CRIU=ON`; without it neither counterexample
+  binary was built. That option and both binaries were removed with the epoch migration
+  protocol, so this recipe is a historical record rather than a runnable one.
 - **ClientServer collective coverage is thin, but it is not absent.** The backends *matrix* is
   `Direct`-only: `tests/channels.cpp:68-71` has `S3` and `Redis` commented out of its `backends` map
   (`:69-70`), and `config/fmi_test.json` disables Redis (`:11`) and enables only `Direct` (`:18`), so

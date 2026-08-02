@@ -162,10 +162,14 @@ If a rank ever does stall, it says so: after three seconds of waiting it prints 
 it holds on every link — descriptor, bytes queued, whether the link still owes a handshake —
 which is how the last of the deadlocks here was found.
 
-This file's sweep is single host. The restored rank re-uses the listening socket and advertised
+`sweep.py` is single host. The restored rank re-uses the listening socket and advertised
 address the image captured, which is correct on the same machine and wrong on any other;
-cross-host restore needs the rank to re-publish its registry entry, which the migration runtime
-does and this sweep does not exercise.
+cross-host restore needs the rank to re-publish its registry entry under the address of the
+machine it actually woke up on. Nothing in the library does that any more — the
+`prepare_for_checkpoint` hook that dropped the listener, the cached advertised address and the
+registry client was removed together with the epoch migration runtime that called it.
+`multihost_sweep.py` below still offers `--restore next|random`; until that hook has a
+replacement, treat a cross-host restore as unbacked and keep `--restore same`.
 
 ## Multi-host
 
@@ -188,16 +192,14 @@ until the peers' own FINs. Multi-host evidence on the fixed transport: **all 8 s
 4, 7, 8 and 16 ranks across 4 EC2 nodes — 32/32 clean-run cells passed** (before the fix, 10+
 cells failed, up to 9 ranks cascading in one trial).
 
-`multihost_ft_migration.py` drives the migration-managed cross-host path over ssh (the plain-VM
-mirror of `runbooks/k8s-criu-node-evacuation`): `evacuate-local` on the source node,
-`restore-remote` on the destination, one `promote`, DirectTCP data plane throughout. Verified on
-the same 4-node cluster, 7 migrations, 7 passed — including on a TCPunch-free build
-(`-DFMI_ENABLE_TCPUNCH=OFF -DFMI_ENABLE_CRIU=ON`, where the same 32-cell clean-run matrix also
-passed 32/32): `baseline` at 4 ranks (one rank, node 2 → node 3); `baseline` at 7 ranks with
-ranks 1 and 5 evacuated in ONE cut, both restored on a node already hosting a third rank (twice);
-`variable_payloads` at 4 ranks, 2 MiB frames in flight (twice); `deep_rounds` at 4 ranks
-(pipelined drift); and `uneven_participation` at 4 ranks (compute skew). Every run finished with
-the exact clean-run checksums after the epoch promotion. The restored process keeps its dumped
-PID, so each node's `/proc/sys/kernel/ns_last_pid` must be seeded into a disjoint band, and
-`advertise_host` must be empty so the restored rank re-advertises the address of the machine it
-actually woke up on.
+Two environmental rules governed the cross-host path, and both bit before they were understood.
+The restored process keeps its dumped PID, so each node's `/proc/sys/kernel/ns_last_pid` must be
+seeded into a disjoint band or the restore fails with `File exists`. And `advertise_host` must
+be left empty rather than pinned, so that a rank resolves the address of the machine it is
+actually on — necessary, but on its own no longer sufficient: with the checkpoint hook gone a
+restored process never re-runs that resolution and keeps advertising the address it was dumped
+on. See the last paragraph of [Scope](#scope).
+
+`multihost_ft_migration.py` is left over from the deleted epoch migration protocol: it drives
+`fmi-rank-agent evacuate-local` / `restore-remote` / `promote`, none of which exist any more.
+It cannot run against this tree.

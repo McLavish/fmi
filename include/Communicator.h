@@ -196,7 +196,7 @@ namespace FMI {
          * epoch protocol that used to claim a lineage per process is gone, and nothing has
          * replaced it yet. The link layer's fence is therefore inert rather than absent — it
          * stays on the wire, so a decentralised coordinator can populate it without a protocol
-         * version bump. See ControlPlane::claim_incarnation for the source that fed it.
+         * version bump.
          */
         std::uint64_t incarnation = 0;
 

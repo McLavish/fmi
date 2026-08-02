@@ -9,8 +9,11 @@ serverless/distributed applications an MPI-like API for point-to-point and colle
 communication. Its distinguishing feature is **model-driven channel selection**: the same
 logical operation can run over different transport backends (direct TCP, S3, Redis), and a
 cost/performance model picks the backend per operation based on message size and an
-optimization hint (`fast` vs `cheap`). It also adds one Redis-coordinated transparent
-migration protocol on top of the base messaging layer.
+optimization hint (`fast` vs `cheap`). The TCP backends can additionally be configured to
+carry every message inside a **sequenced link** — frames are numbered, retained until the peer
+acknowledges them, and replayed after a connection is lost and rebuilt — so a rank can be
+`criu` checkpointed and restored mid-job by an external tool without the application taking
+part.
 
 The canonical working tree on this machine is `/home/luca/fmi`. Note that some checked-in
 runbooks (e.g. `runbooks/aws-python311-s3/README.md`) reference paths like
@@ -26,8 +29,8 @@ Always init submodules first — `extern/TCPunch` (the `Direct` backend depends 
 git submodule update --init --recursive
 ```
 
-`extern/TCPunch` points at the `McLavish/TCPunch` fork, which carries two fixes the FT
-runbooks rely on: `tcpunchd` ignores SIGPIPE instead of crashing, and the client resolves
+`extern/TCPunch` points at the `McLavish/TCPunch` fork, which carries two fixes upstream
+lacks: `tcpunchd` ignores SIGPIPE instead of crashing, and the client resolves
 the rendezvous host via `getaddrinfo` (upstream accepted only literal IPs, so K8s Service
 DNS names failed).
 
@@ -39,13 +42,13 @@ cmake --build build -j"$(nproc)"
 ```
 
 CMake options (defaults in `CMakeLists.txt`): `FMI_ENABLE_S3` (ON, pulls AWS SDK for C++),
-`FMI_ENABLE_REDIS` (ON, pulls hiredis), `FMI_ENABLE_CRIU` (OFF, experimental CRIU
-checkpoint/restore raw material), `FMI_ENABLE_TCPUNCH` (ON, builds the `Direct` backend and
-links the TCPunch submodule — turn it OFF on platforms with direct peer connectivity and the
-submodule is not needed at all), `FMI_USE_STATIC_BOOST` (ON), `FMI_BUILD_TESTS` (OFF),
-`FMI_BUILD_TOOLS` (ON when top-level, OFF when consumed via `add_subdirectory`). The library
-target is `FMI` (alias `FMI::FMI`), built STATIC, and publishes its public headers via
-`include/` (exported to a parent scope as `FMI_INCLUDE_DIRS`).
+`FMI_ENABLE_REDIS` (ON, pulls hiredis), `FMI_ENABLE_TCPUNCH` (ON, builds the `Direct` backend
+and links the TCPunch submodule — turn it OFF on platforms with direct peer connectivity and
+the submodule is not needed at all), `FMI_USE_STATIC_BOOST` (ON), `FMI_BUILD_TESTS` (OFF).
+The library target is `FMI` (alias `FMI::FMI`), built STATIC, and publishes its public headers
+via `include/` (exported to a parent scope as `FMI_INCLUDE_DIRS`). The transparent-checkpoint
+runbook's subject program is built as well whenever `FMI_ENABLE_REDIS` is ON and FMI is the
+top-level project; it is an ordinary FMI application, so it needs no option of its own.
 
 ### Local Direct-only debug build (no AWS/Redis)
 
@@ -84,74 +87,75 @@ parity, build inside the Docker image (`runbooks/aws-python311-s3/Dockerfile.pyt
 
 ## Testing
 
-Tests use the Boost.Test framework and only build with `-DFMI_BUILD_TESTS=ON`. The single
-test binary is `build/tests/Boost_Tests_run`.
+Tests use the Boost.Test framework and only build with `-DFMI_BUILD_TESTS=ON`. There is one
+test binary, `build/tests/Boost_Tests_run`, and **it must be run from its own build
+directory**: every suite that constructs a `Communicator` loads its config by the relative
+path `../../config/<name>.json`, so from anywhere else those cases fail at construction.
 
 ```bash
-./build/tests/Boost_Tests_run                              # all tests
-./build/tests/Boost_Tests_run --run_test=Communicator/reduce   # one case
-./build/tests/Boost_Tests_run --run_test=FaultTolerance    # one suite
-./build/tests/Boost_Tests_run --list_content               # list all suites/cases
+cd build/tests
+./Boost_Tests_run                                  # all tests
+./Boost_Tests_run --run_test=Communicator/reduce   # one case
+./Boost_Tests_run --run_test=LinkLayer             # one suite
+./Boost_Tests_run --list_content                   # list all suites/cases
 ```
 
-Suites (note the names differ from the file names): `Channels` (`channels.cpp`),
-`Communicator` (`communicator.cpp`), `FaultTolerance` (`fault_tolerance.cpp`), and, only
-with `FMI_ENABLE_CRIU=ON`, `CriuFaultTolerance` (`criu_fault_tolerance.cpp`). **Many tests
-need live infrastructure:** Redis-backed cases need a running Redis; `Direct` cases need a
-`tcpunchd` rendezvous server on port 10000
-(`./extern/TCPunch/server/build*/tcpunchd 10000`); S3 cases need AWS credentials + a bucket.
-`DirectTCP` cases need only a running Redis — no `tcpunchd`.
+Thirteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
+`Channels`, `Communicator`, `LinkLayer`, `LinkRecovery`, `LinkLiveness`, `LinkIncarnations`,
+`FramedTransport`, `TransportRecovery`, `OperationIdentity`, `ProtocolValidation`,
+`ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`. (`tests/client.cpp` is a
+standalone sample, not a suite, and is not compiled into the binary.)
+
+**Most tests need live infrastructure:** everything that talks `DirectTCP` needs a running
+Redis, which is its peer registry, and `config/fmi_identity_test.json` drives the `Redis`
+backend as an actual data plane; `Direct` cases need a `tcpunchd` rendezvous server on port
+10000 (`./extern/TCPunch/server/build*/tcpunchd 10000`). Note the `Channels` suite
+parameterises over the `backends` map at the top of `tests/channels.cpp`, in which `S3` and
+`Redis` are commented out — only `Direct` and `DirectTCP` run there today, and re-enabling
+`S3` means AWS credentials + a bucket.
 A `Direct` case that logs `ACTIVE` and then throws a `std::string` exception before pairing
 means the TCPunch client could not reach the rendezvous server. Note that bare `std::string`
 throw is uncaught inside the OpenMP two-thread cases and terminates the process, so a
 `Direct` failure there shows up as `terminate called` / `stack smashing`, not a test failure.
 
-The cheapest way to exercise the `Channels` suite is a `-DFMI_ENABLE_TCPUNCH=OFF` build: only
-`DirectTCP` is registered, so the suite runs against a single backend with no rendezvous
-server and none of TCPunch's flakiness (it has been green 5/5 that way, against `Direct`'s
-0–33 failures per run).
+The cheapest way to run the whole binary is a `-DFMI_ENABLE_TCPUNCH=OFF` build. Only
+`DirectTCP` is registered, so `Channels` runs against a single backend with no rendezvous
+server and none of TCPunch's flakiness (green 5/5 that way, against `Direct`'s 0–33 failures
+per run), and a `#if FMI_ENABLE_TCPUNCH` at the top of `tests/communicator.cpp` switches that
+suite from `config/fmi_test.json` — which enables `Direct` and nothing else, so it needs
+`tcpunchd` — to `config/fmi_directtcp_test.json`. Both then need only a running Redis.
 
-The CRIU tests are designed to run against a *mock* `criu` binary because real
-checkpoint/restore needs kernel capabilities usually unavailable in dev environments.
-
-The one standalone demo is the experimental `transparent_state_transfer_demo`, which ships with
-its runbook (`runbooks/local-criu-state-transfer/transparent_state_transfer_demo.cpp`, built via
-that directory's own `CMakeLists.txt`) rather than under `tests/`. It is built only as a
-top-level project with `FMI_ENABLE_CRIU=ON`, and is driven by that directory's
-`run-demo.sh` (one rank) or `run-demo-all.sh` (checkpoints all local ranks in parallel).
+The one standalone program outside `tests/` is the transparent-checkpoint subject
+(`runbooks/criu-transparent-checkpoint/`), built to
+`build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject` by any top-level
+Redis-enabled build. It is an ordinary FMI application with no checkpoint API in it; that
+directory's `sweep.py` (single host) and `multihost_sweep.py` (over ssh across nodes) freeze it
+with criu at random instants and compare every rank's final checksums against a clean run.
 
 ## Running things
 
 Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id` is in
-`[0, num_peers)`. The end-to-end `transparent_migration` flow is in
-`runbooks/localstack-python311-redis/` (heterogeneous LocalStack EC2 → Lambda ranks, Redis
-control + data plane), and the AWS Lambda + S3 flow is in `runbooks/aws-python311-s3/`; both
-READMEs are verified step-by-step runbooks. The same migration demo on real AWS
-infrastructure (EKS + Knative, ranks as K8s Jobs, replacement rank as a Knative Service)
-lives in `runbooks/localstack-python311-redis/knative-migration/` (`setup.md`, plus
-`setup-local.md` for a local-cluster variant). JSON config templates live in `config/`.
-
-The experimental CRIU rank agent CLI is built only with `FMI_ENABLE_CRIU=ON`:
-
-```text
-fmi-rank-agent {migrate|migrate-local|evacuate-local|restore-remote|promote|watch|cleanup} \
-    <comm_name> <num_peers> <config> [rank]
-```
+`[0, num_peers)`. Two verified step-by-step runbooks ship with the repo: the AWS Lambda + S3
+flow in `runbooks/aws-python311-s3/`, and `runbooks/criu-transparent-checkpoint/`, which
+checkpoints and restores one rank of an unmodified `DirectTCP` job with `criu` driven entirely
+from outside the process. JSON config templates live in `config/`.
 
 ## Architecture
 
-The dependency direction is: user API → channel policy → channel → transport backend, with
-fault tolerance layered around the user API.
+The dependency direction is: user API → channel policy → channel → transport backend.
 
 - **`FMI::Communicator`** (`include/Communicator.h`) is the user-facing MPI-like API:
   templated `send/recv/bcast/scatter/gather/reduce/allreduce/scan/barrier` over
   `FMI::Comm::Data<T>`. It owns a map of named channels plus one `ChannelPolicy`. For each
   call it asks the policy for a channel name, then dispatches to that channel. Every
-  operation is wrapped in an `OperationGuard` (RAII) that calls `enter_operation`/
-  `exit_operation` — this is the hook transparent migration uses to observe Redis
-  migration requests and reconfigure at operation
-  boundaries. Most of the real logic is header-only templates; `src/Communicator.cpp` is
-  thin (construction, channel creation, FT runtime wiring).
+  operation is wrapped in an `OperationScope` (RAII, `include/comm/OperationScope.h`) that
+  publishes the active operation's identity — lane, op kind, collective index, root,
+  reduction flags — in a thread-local for the duration of one logical call. Channels read it
+  to stamp frames, which is how a receiver detects a peer executing a *different* operation
+  without the `Channel` interface growing an argument. Scopes nest, and the outermost wins, so
+  the index counts user-visible collectives rather than the internal fragments a collective
+  decomposes into. Most of the real logic is header-only templates; `src/Communicator.cpp` is
+  thin (construction, channel creation).
 
 - **`FMI::Utils::ChannelPolicy`** (`include/utils/ChannelPolicy.h`) is the cost model — the
   paper's core idea. Given an operation descriptor `{op, size, left_to_right}`, the per-
@@ -186,14 +190,14 @@ fault tolerance layered around the user API.
   - On multi-homed hosts and in containers, set `advertise_host` explicitly (in K8s, the pod IP
     via the downward API — never a Service VIP, which load-balances to an arbitrary pod).
     Otherwise the rank advertises whichever local address routes to the registry.
-  - Registered as checkpoint-safe (`include/ft/experimental/CriuRequirements.h`), and for a
-    stronger reason than `Direct`: `prepare_for_checkpoint` drops the listener, the cached
-    advertised address and the registry client, so a restored rank re-binds, re-resolves the
-    address peers must dial on whichever host it woke up on, and re-publishes it.
-    (`prepare_for_checkpoint` runs only on the FT-managed path; `runbooks/criu-transparent-checkpoint/`
-    freezes an unmodified DirectTCP job raw — no hooks — and survives on the sequenced-link
-    recovery alone, which is why that runbook is single-host: a raw restore keeps the old
-    listener and advertised address.)
+  - `runbooks/criu-transparent-checkpoint/` freezes an unmodified DirectTCP job raw — no hooks
+    — and survives on the sequenced-link recovery alone. `advertised_ip` and the listener are
+    set once in `ensure_listener()` and only torn down by `close_transport_state()` at
+    finalize/destruction, so a restored process keeps the address and port its image captured.
+    Correct on the machine it was dumped on, wrong on any other, and there is no longer a
+    pre-checkpoint hook that drops them — `Channel::prepare_for_checkpoint` went with the epoch
+    migration runtime that was its only caller. **Treat cross-host restore as unbacked** until
+    something re-establishes it.
   - Note `ChannelPolicy` breaks ties by `std::map` order, so `Direct` beats `DirectTCP`
     alphabetically at equal modelled cost — `model.DirectTCP.overhead` is set below `Direct`'s
     to reflect its cheaper connection setup, which is also what makes the policy pick it.
@@ -206,46 +210,45 @@ fault tolerance layered around the user API.
   fixed left-to-right order).
 
 - **Configuration** (`include/utils/Configuration.h`, `src/utils/Configuration.cpp`): one
-  JSON file parses into `Config { channels, models, fault_tolerance }`. The `backends` block
-  enables/configures each channel; the `model` block holds cost-model parameters; the
-  `fault_tolerance` block maps to `FaultToleranceConfig`. If `fault_tolerance.enabled` is
-  true, `Communicator` uses transparent migration; there is no FT mode selector.
+  JSON file with two blocks. `backends` enables and configures each channel — every key under
+  an enabled backend is handed to that channel as an untyped `map<string,string>`, which is why
+  backend-specific options like `framed` or `advertise_host` need no parser change; `model`
+  holds the cost-model parameters `ChannelPolicy` reads, plus `FaaS.gib_second_price`.
+  `get_active_channels()` returns exactly the enabled ones, so a backend disabled in the config
+  is never constructed even if it was compiled in.
 
-- **Fault tolerance** (`include/ft/`, `src/ft/`, design in `PLANS.md`, usage in
-  `docs/fault-tolerance.md`): transparent migration is the single FT protocol. It uses Redis
-  as the control plane and `Direct`/TCP as the preferred data plane. `FMI::FT::ControlPlane`
-  tracks epochs, membership, placement, and migration state in Redis; migration is triggered
-  externally via `request_migration()`. `TransparentMigrationRuntime` checks for migration at
-  `OperationGuard` boundaries. The targeted rank marks itself `QUIESCED`, a replacement takes
-  over the same logical rank at epoch N+1, and surviving ranks rebuild channels under the new
-  epoch-qualified communicator name. **Application-state continuity** is selected by
-  `fault_tolerance.state_transfer` (a mechanism toggle within the one protocol, not a second
-  mode): `"none"` (default) — the rank exits and a fresh replacement recomputes; `"criu"`
-  (needs `FMI_ENABLE_CRIU=ON`) — the rank's process image is CRIU checkpointed/restored so
-  memory is preserved transparently. The CRIU path is driven by the host-local
-  `LocalRankAgent` (`fmi-rank-agent`), reuses the `prepare_channels_for_checkpoint` hook + the
-  survivor reconfigure path, and supports two shapes: **same-host in-place**
-  (`migrate`/`migrate-local`, verified in `runbooks/local-criu-state-transfer/`, rootless criu)
-  and **cross-host** (`evacuate-local` dumps a host's ranks in one cut and stages packed images
-  in Redis via `ControlPlane::criu_image_put`; `restore-remote` fetches + restores one rank on
-  another host; the orchestrator `promote`s once — verified in
-  `runbooks/k8s-criu-node-evacuation/`, node evacuation onto Knative).
-    Shared criu-invocation code lives in `ft/experimental/CriuExec`.
-  - **Epoch fencing invariant** (`PLANS.md`): under FT, every backend-visible name —
-    `Direct` pairing names, `Redis`/`S3` object names, per-instance operation counters — is
-    epoch-qualified, so stale messages/objects from an old epoch can never be consumed after
-    reconfiguration.
+- **Sequenced link layer** (`include/comm/LinkFrame.h`, `include/comm/SequencedLink.h`,
+  `src/comm/TcpChannelBase.cpp`; design in
+  `docs/superpowers/specs/2026-07-27-sequenced-incarnation-links-design.md`, machine-checked
+  models in `docs/tla/`): two independent opt-in flags on a TCP backend, both **off by
+  default**, so an unconfigured `Direct`/`DirectTCP` byte stream is exactly what it was before
+  this existed. `"framed": true` prefixes every message with a fixed-size `LinkFrame` header
+  carrying the `OperationScope` identity, and the receiver *rejects* a frame belonging to a
+  different logical operation instead of copying it into the application's buffer.
+  `"recover_links": true` (requires `framed`) adds `SequencedLink`: per-peer send/receive
+  sequence numbers, retention of every sent frame until the peer acknowledges it, and a
+  handshake that replays the unacknowledged suffix after a connection dies and is
+  re-established — so a completed `send()` stays a delivery obligation across the break. This
+  is what lets a rank be criu-frozen mid-operation and restored with its peers none the wiser.
+  Two rules the models and the runbook both turned out to depend on: the receive watermark may
+  only advance once a payload is in the application's buffer (not at header parse), and
+  retention must be released on links the peer never writes back to, or the sender's window
+  fills and a binomial tree deadlocks from three ranks up.
+  - `LinkFrame`/`SequencedLink` also carry an **incarnation**, a lineage fence distinguishing
+    "the same process, restored" from "a different process now serving this rank". It is
+    permanently `0` today: its producer was the deleted control plane and nothing has replaced
+    it, so the field is inert rather than absent — see the comment on
+    `Communicator::incarnation`.
 
-- **Python bindings** (`python/`): a Boost.Python module. `fmi_python.cpp` is the module
-  entry point; `PythonCommunicator.cpp` exposes `Communicator`; `PythonFT.cpp` exposes the
-  FT control-plane surface (`FTControlPlane`) plus the type/op helpers (`hints`, `func`, `op`,
-  `datatypes`, `types`). Because Python is dynamically typed, collective calls
-  take an explicit `fmi.types(...)` descriptor and return results directly rather than
-  filling a receive buffer.
+- **Python bindings** (`python/`): a Boost.Python module. `fmi_python.cpp` is the module entry
+  point — it registers the `Communicator` class and the type/op helpers (`hints`, `func`, `op`,
+  `datatypes`, `types`); `PythonCommunicator.cpp` implements the wrapper the class binds to.
+  Because Python is dynamically typed, collective calls take an explicit `fmi.types(...)`
+  descriptor and return results directly rather than filling a receive buffer.
 
-`include/fmi.h` is the umbrella header (Communicator + the FT types). The ICS'23 paper and
-the thesis linked from `README.md` are the authoritative design references; technical docs
-are generated with Doxygen (`docs/Doxyfile`, output gitignored).
+`include/fmi.h` is the umbrella header and includes `Communicator.h` and nothing else. The
+ICS'23 paper and the thesis linked from `README.md` are the authoritative design references;
+technical docs are generated with Doxygen (`docs/Doxyfile`, output gitignored).
 
 ## Git Commits
 

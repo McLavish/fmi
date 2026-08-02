@@ -1090,8 +1090,9 @@ void FMI::Comm::DirectTCP::close_transport_state() {
     listen_port = 0;
     listener_nonce = 0;
     // Clearing the listener is what forces a fresh bind and a fresh advertisement on next use.
-    // After a CRIU restore the process resumes on another host, so the port it used to hold is
-    // gone and the address it used to advertise is wrong.
+    // Only finalize() and the destructor reach this today, so "next use" means a channel
+    // rebuilt from scratch. It also leaves the rank correct if the process is ever resumed
+    // somewhere else, where the port it held is gone and the address it advertised is wrong.
     advertised_ip.clear();
     if (registry) {
         registry->disconnect();
