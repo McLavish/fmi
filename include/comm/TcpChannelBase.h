@@ -306,6 +306,11 @@ namespace FMI::Comm {
          */
         void reconcile_if_needed(Utils::peer_num partner_id);
 
+        //! reconcile_if_needed with the op-path error contract: a handshake/replay write
+        //! that dies is repaired (the debt survives and is paid on the replacement link)
+        //! instead of escaping to the application.
+        void reconcile_or_repair(Utils::peer_num partner_id);
+
         //! Record that the connection to @p partner_id was replaced, not merely established.
         /*!
          * Called by a subclass that drops a dead socket in favour of an incoming connection.

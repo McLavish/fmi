@@ -162,6 +162,26 @@ namespace FMI::Comm {
         std::uint64_t listener_nonce = 0;
         std::string advertised_ip;
 
+        //! The machine this process last (re)built its transport on, as the kernel's boot id.
+        //! A criu image restored on a DIFFERENT machine resumes with transport state that is
+        //! all subtly wrong at once — a listener criu re-bound but peers cannot be told about
+        //! mid-frozen-establishment, in-flight connect fds to addresses that meant something
+        //! on the old host, a registry context whose socket the restore dropped. Comparing
+        //! the boot id at establishment time detects the relocation and triggers the same
+        //! wholesale reset the FT-managed checkpoint hook used to perform, which is the
+        //! recovery shape the migration runbooks verified. Same-host restores keep the same
+        //! boot id and are deliberately left on their proven no-reset path.
+        std::string birth_boot_id;
+
+        //! Read /proc/sys/kernel/random/boot_id (empty on failure, which disables detection).
+        static std::string read_boot_id();
+
+        //! If the boot id changed since the transport was built, reset it (listener, pending
+        //! links, peer sockets, registry client, advertised address) and rearm. Returns true
+        //! when a relocation was detected and handled; the caller must abandon its current
+        //! establishment attempt and let its own caller retry on clean state.
+        bool reset_transport_if_relocated();
+
         //! Links built by the mesh pass but not yet handed to check_socket. Kept separate from
         //! the base's sockets vector, which check_socket alone owns.
         std::map<Utils::peer_num, int> pending_links;
