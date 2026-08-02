@@ -51,8 +51,6 @@ namespace FMI::Comm {
 
         void finalize() override;
 
-        void prepare_for_checkpoint() override;
-
         void set_incarnation(std::uint64_t value) override;
 
     protected:
@@ -77,7 +75,7 @@ namespace FMI::Comm {
         virtual std::string link_name(Utils::peer_num partner_id, bool outbound) const;
 
         //! Release subclass-owned transport state (listening sockets, registry connections).
-        //! Called by finalize() and prepare_for_checkpoint(), after the peer sockets are closed.
+        //! Called by finalize(), after the peer sockets are closed.
         virtual void close_transport_state() {}
 
         //! Do whatever the transport owes its peers right now, without blocking.
@@ -154,11 +152,11 @@ namespace FMI::Comm {
          * closed exactly as before this path existed — the residual RST risk shrinks from
          * "every job end" to "peer made no progress for a whole grace".
          *
-         * NOT called from prepare_for_checkpoint(): there the process resumes with its memory
-         * intact and unacked retention is precisely the recovery mechanism, proven by the
-         * checkpoint sweeps; draining would only stall the quiesce. NOT called from the
-         * reconfigure/repair paths: those replace links between live processes, where replay
-         * handles everything.
+         * Only from finalize(), i.e. the end of the job. NOT from reset_link or repair_link:
+         * those replace a link between live processes, where replay handles everything. And
+         * deliberately not from any checkpoint path — a process frozen by criu resumes with
+         * its memory intact, so unacked retention IS the recovery mechanism (the checkpoint
+         * sweeps prove it) and draining would only stall the freeze.
          */
         void drain_links_for_shutdown();
 

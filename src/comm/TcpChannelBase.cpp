@@ -1404,11 +1404,6 @@ void FMI::Comm::TcpChannelBase::finalize() {
     close_transport_state();
 }
 
-void FMI::Comm::TcpChannelBase::prepare_for_checkpoint() {
-    close_sockets();
-    close_transport_state();
-}
-
 
 void FMI::Comm::TcpChannelBase::reset_link(Utils::peer_num partner_id) {
     if (partner_id < sockets.size() && sockets[partner_id] >= 0) {

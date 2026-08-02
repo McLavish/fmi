@@ -124,9 +124,6 @@ namespace FMI::Comm {
          */
         virtual void finalize() {};
 
-        //! Called before a CRIU checkpoint is taken.
-        virtual void prepare_for_checkpoint() {};
-
         //! Create a new channel with the given config and model params
         /*!
          * This function is only used for the bundled channels, all other should be instantiated outside of the framework and added over the Communicator interface.

@@ -48,13 +48,6 @@ void FMI::Comm::Redis::ensure_connection() {
     }
 }
 
-void FMI::Comm::Redis::prepare_for_checkpoint() {
-    if (context != nullptr) {
-        redisFree(context);
-        context = nullptr;
-    }
-}
-
 void FMI::Comm::Redis::upload_object(channel_data buf, std::string name) {
     ensure_connection();
     std::string command = "SET " + name + " %b";

@@ -26,11 +26,6 @@ namespace FMI::Comm {
 
         double get_price(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;
 
-        //! Release the client connection before a criu dump. All object state lives server-side
-        //! and survives the checkpoint; only the connection must not be captured in the image.
-        //! The next operation reconnects lazily.
-        void prepare_for_checkpoint() override;
-
     private:
         //! (Re)connect when there is no healthy connection; no-op otherwise.
         void ensure_connection();
