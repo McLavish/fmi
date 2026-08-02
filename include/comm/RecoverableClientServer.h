@@ -22,6 +22,9 @@ namespace FMI::Comm {
     public:
         explicit RecoverableClientServer(std::map<std::string, std::string> params);
 
+        //! Under recover, wait for the N markers this communicator's ranks write, by name.
+        void barrier() override;
+
         //! Under recover, delete nothing and let the objects expire. See the definition.
         void finalize() override;
 

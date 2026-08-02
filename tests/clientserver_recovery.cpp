@@ -19,7 +19,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <new>
 #include <chrono>
 #include <csignal>
 #include <cstring>
@@ -930,6 +932,103 @@ BOOST_AUTO_TEST_CASE(uploads_carry_ttls_and_finalize_deletes_nothing) {
     BOOST_CHECK_EQUAL(key_ttl(plain_comm_name + "0_1_0"), -2);
 
     channel->delete_object(key);
+}
+
+//! Another communicator's markers are not arrivals, however their names end.
+/*!
+ * The inverse of flag_off_barrier_counts_foreign_suffixes above, which pins the same store state
+ * satisfying a barrier today: the suffix carries no communicator name and the whole keyspace is
+ * counted, so somebody else's markers finish this rank's wait. Under recover the barrier asks for
+ * the names its own ranks will write, so the only thing that can end it is its own peer arriving —
+ * and when the peer does not, it times out.
+ */
+BOOST_AUTO_TEST_CASE(foreign_markers_do_not_satisfy_a_recovered_barrier) {
+    const std::string suffix = "_barrier_0";
+    const std::string comm_name = unique_comm_name("ownbarrier");
+    const std::string foreign_comm_name = unique_comm_name("foreignbarrier");
+
+    // Markers of a communicator that has nothing to do with this one, spelled the way a recovered
+    // job spells them, so that only the name — not the shape — distinguishes them.
+    auto foreign = make_redis(foreign_comm_name, 0, 2);
+    char marker = '1';
+    const std::string foreign_keys[] = {foreign_comm_name + "|0" + suffix,
+                                        foreign_comm_name + "|1" + suffix};
+    for (const auto& foreign_key : foreign_keys) {
+        foreign->upload_object({&marker, sizeof(marker)}, foreign_key);
+    }
+
+    // Rank 0 of 2, and rank 1 never comes. A short budget: this barrier is meant to fail, and the
+    // case should not sit in it.
+    auto params = recover_params({{"timeout", "5"}, {"max_timeout", "50"}});
+    auto channel = make_redis(comm_name, 0, 2, params);
+    BOOST_CHECK_THROW(channel->barrier(), FMI::Utils::Timeout);
+
+    for (const auto& foreign_key : foreign_keys) {
+        foreign->delete_object(foreign_key);
+    }
+    purge(*foreign, comm_name);
+}
+
+//! And a barrier whose ranks do arrive completes, generation after generation.
+/*!
+ * The markers of a recovered job are never deleted, so every generation has to be told apart by
+ * its number alone: a second barrier must wait for the second generation's markers rather than
+ * finding the first generation's still in the store and returning at once.
+ */
+BOOST_AUTO_TEST_CASE(recovered_barrier_completes) {
+    constexpr int num_peers = 2;
+    const std::string comm_name = unique_comm_name("barrierpass");
+
+    constexpr int generations = 2;
+    int* ok = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE,
+                                     MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    BOOST_REQUIRE(ok != MAP_FAILED);
+    // Set by the late rank immediately before it enters each barrier, so the early rank can say
+    // whether it was actually held there.
+    auto* entered = static_cast<std::atomic<int>*>(mmap(nullptr, sizeof(std::atomic<int>) * generations,
+                                                        PROT_READ | PROT_WRITE,
+                                                        MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    BOOST_REQUIRE(entered != MAP_FAILED);
+    for (int i = 0; i < num_peers; i++) {
+        ok[i] = 0;
+    }
+    for (int g = 0; g < generations; g++) {
+        new (entered + g) std::atomic<int>(0);
+    }
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    auto params = recover_params({{"max_timeout", "30000"}});
+    try {
+        auto channel = make_redis(comm_name, peer_id, num_peers, params);
+        bool held = true;
+        for (int generation = 0; generation < generations; generation++) {
+            if (peer_id == 1) {
+                // Arrive late, and announce it only on the way in: a barrier that lets rank 0 out
+                // before this line has not waited for anything.
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                entered[generation].store(1, std::memory_order_release);
+            }
+            channel->barrier();
+            if (peer_id == 0) {
+                held = held && entered[generation].load(std::memory_order_acquire) == 1;
+            }
+        }
+        ok[peer_id] = held ? 1 : 0;
+    } catch (const std::exception& e) {
+        BOOST_TEST_MESSAGE("rank " << peer_id << " failed: " << e.what());
+    }
+
+    rank_guard.reap_ranks();
+    for (int i = 0; i < num_peers; i++) {
+        BOOST_TEST(ok[i] == 1, "rank " << i << " did not come through both barriers");
+    }
+    auto sweeper = make_redis(comm_name, 0, 1);
+    purge(*sweeper, comm_name);
+    munmap(ok, sizeof(int) * num_peers);
+    munmap(entered, sizeof(std::atomic<int>) * generations);
 }
 
 BOOST_AUTO_TEST_SUITE_END();

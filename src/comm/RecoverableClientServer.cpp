@@ -1,8 +1,11 @@
 #include "../../include/comm/RecoverableClientServer.h"
 
 #include <boost/log/trivial.hpp>
+#include <chrono>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -61,6 +64,69 @@ FMI::Comm::RecoverableClientServer::RecoverableClientServer(std::map<std::string
                                  + std::to_string(poll_interval) + "), got "
                                  + params.at("max_timeout"));
     }
+}
+
+//! Wait for the ranks of this communicator, and only those, by asking for their markers by name.
+/*!
+ * The base implementation lists the whole store and counts the names ending in "_barrier_<n>".
+ * That suffix carries no communicator name, so markers written by another communicator — or by an
+ * unrelated earlier run — are counted as arrivals of this one, and a barrier can be satisfied
+ * while half its ranks have not reached it. It is also the most expensive thing the family does:
+ * one whole-keyspace listing per rank per poll, at poll intervals of a millisecond, which is a
+ * KEYS * (O(keyspace), and single-threaded Redis serves nothing else while it runs) or an
+ * unpaginated S3 ListObjectsV2 that stops at a thousand objects.
+ *
+ * Asking for the N names this communicator's ranks will write replaces all of that with N GETs of
+ * one byte, none of which can be answered by anything but the rank it names. The markers are
+ * per-(rank, generation) and, under recover, never deleted, so a rank that arrives late still
+ * finds the ones written before it — which is exactly what the base implementation's listing could
+ * not promise once finalize started removing objects.
+ *
+ * Everything else is the base's: the counter is read once and advanced at entry, the marker goes
+ * out through upload(), and the poll budget is spent the same way, one timeout per pass.
+ */
+void FMI::Comm::RecoverableClientServer::barrier() {
+    if (!recover) {
+        ClientServer::barrier();
+        return;
+    }
+
+    const auto barrier_num = num_operations["barrier"];
+    num_operations["barrier"]++;
+    const std::string suffix = "_barrier_" + std::to_string(barrier_num);
+    // One byte, the same marker the base writes — and the size every probe below expects, since
+    // under recover a download of the wrong length is a collision rather than a marker.
+    char marker = '1';
+    upload({&marker, sizeof(marker)}, object_key_prefix() + std::to_string(peer_id) + suffix);
+
+    std::vector<bool> arrived(num_peers, false);
+    // Ours is written; nobody has to tell us about it.
+    arrived[peer_id] = true;
+    Utils::peer_num remaining = num_peers - 1;
+
+    unsigned int elapsed_time = 0;
+    while (elapsed_time < max_timeout) {
+        for (Utils::peer_num i = 0; i < num_peers; i++) {
+            if (arrived[i]) {
+                continue;
+            }
+            char probe = 0;
+            if (download_object({&probe, sizeof(probe)},
+                                object_key_prefix() + std::to_string(i) + suffix)) {
+                // Once seen, always seen: a rank does not un-arrive, and remembering it across
+                // passes is what keeps the cost of a barrier proportional to the ranks still
+                // missing rather than to num_peers every millisecond.
+                arrived[i] = true;
+                remaining--;
+            }
+        }
+        if (remaining == 0) {
+            return;
+        }
+        elapsed_time += timeout;
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
+    }
+    throw Utils::Timeout();
 }
 
 //! Shutdown, which under recover means leaving the store to it.
