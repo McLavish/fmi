@@ -13,11 +13,17 @@ trial rather than being absorbed.
 --shape selects which app shape the subject runs (default "baseline"); the subject's
 --list-shapes says which ones are compiled in. Baselines are taken with the same shape, so
 checksums are only ever compared within one shape and rank count.
+
+--config selects the FMI configuration, and with it the data plane under test: fmi.json runs
+the job over DirectTCP, fmi_redis.json over Redis. The config must enable exactly one backend
+(see data_plane), and the sweep cleans up whatever that backend leaves behind between trials.
 """
 import argparse
+import json
 import os
 import random
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -37,6 +43,79 @@ DONE_RE = re.compile(r"rank (\d+): DONE rounds=(\d+) checksum=(-?\d+)")
 PRINT_EVERY = 25
 PAYLOAD_INTS = 1
 SHAPE = "baseline"
+# (backend name, its config block); set from --config in main().
+PLANE = ("DirectTCP", {})
+# Every name this invocation puts into a store starts with this, so one pattern cleans a run.
+RUN_PREFIX = f"fmisw{os.getpid()}-"
+
+
+def data_plane(config_path):
+    """(backend name, config block) of the one backend the config enables.
+
+    Which store has to be cleaned between trials, and under which key names, follows from
+    which backend actually carries the messages -- so the sweep has to know. Requiring
+    *exactly one* is not just convenience: with several enabled, FMI's cost model chooses per
+    operation, and with DirectTCP and Redis both on it picks DirectTCP for every operation
+    this subject issues. A sweep against such a config would exercise no Redis code at all
+    and report green.
+    """
+    try:
+        with open(config_path) as f:
+            backends = json.load(f)["backends"]
+    except (OSError, ValueError, KeyError) as exc:
+        sys.exit(f"cannot read the backends block of {config_path}: {exc}")
+    # A backend with no "enabled" key is enabled, which is how Configuration reads it too
+    # (src/utils/Configuration.cpp: it skips a backend only when the key is present and not
+    # "true"). JSON true and the string "true" both occur in the shipped configs.
+    enabled = {name: params for name, params in backends.items()
+               if str(params.get("enabled", True)).lower() == "true"}
+    if len(enabled) != 1:
+        sys.exit(f"{config_path} enables {sorted(enabled) or ['no backend']}; the sweep needs "
+                 "exactly one, so that every operation is carried by the backend under test")
+    return next(iter(enabled.items()))
+
+
+def _redis_delete_pattern(host, port, pattern):
+    """DEL every key matching pattern, without KEYS: a live sweep's store is not small."""
+    cli = f"redis-cli -h {shlex.quote(str(host))} -p {shlex.quote(str(port))}"
+    subprocess.run(f"{cli} --scan --pattern {shlex.quote(pattern)} | xargs -r {cli} DEL",
+                   shell=True, capture_output=True)
+
+
+def clean_comm(comm):
+    """Remove what a job under this name left in the data plane. Safe to call before it runs."""
+    name, params = PLANE
+    if name == "DirectTCP":
+        # The peer registry hash, exactly as this sweep has always cleaned it.
+        subprocess.run(["redis-cli", "DEL", f"fmi:direct:{comm}"], capture_output=True)
+    elif name == "Redis":
+        host, port = params.get("host", "127.0.0.1"), params.get("port", 6379)
+        # The registry key first: a Redis-plane job writes none, but the same comm_name may
+        # have been used by a DirectTCP run against the same server, and a stale entry there
+        # is exactly the kind of thing that makes a later run hang on a dead address.
+        subprocess.run(["redis-cli", "-h", str(host), "-p", str(port), "DEL",
+                        f"fmi:direct:{comm}"], capture_output=True)
+        # Under "recover" the channel deletes nothing and lets the objects expire, so a trial
+        # leaves its whole message history behind for up to object_ttl_s. Removing it here
+        # keeps the store from growing across a long sweep -- and keeps a repeated comm_name
+        # from ever reading a previous trial's values as live data.
+        _redis_delete_pattern(host, port, f"{comm}*")
+    elif name == "S3":
+        # TODO: the S3 phase adds the cost/profile guard that has to sit in front of this --
+        # a sweep against a real bucket is real money and a real, possibly shared, bucket.
+        subprocess.run(["aws", "s3", "rm", f"s3://{params.get('bucket_name')}/{comm}",
+                        "--recursive", "--only-show-errors"], capture_output=True)
+
+
+def clean_run(prefix):
+    """Remove everything this invocation wrote, whatever became of the individual trials."""
+    name, params = PLANE
+    if name == "Redis":
+        _redis_delete_pattern(params.get("host", "127.0.0.1"), params.get("port", 6379),
+                              f"{prefix}*")
+    elif name == "S3":
+        subprocess.run(["aws", "s3", "rm", f"s3://{params.get('bucket_name')}/{prefix}",
+                        "--recursive", "--only-show-errors"], capture_output=True)
 
 
 def known_shapes():
@@ -154,10 +233,10 @@ def kill_all(comm):
 
 
 def baseline(npeers, rounds, ms, root):
-    comm = f"base{npeers}x{rounds}x{os.getpid()}"
+    comm = f"{RUN_PREFIX}base{npeers}x{rounds}"
     outdir = os.path.join(root, comm)
     os.makedirs(outdir, exist_ok=True)
-    subprocess.run(["redis-cli", "DEL", f"fmi:direct:{comm}"], capture_output=True)
+    clean_comm(comm)
     started = time.monotonic()
     procs = start_job(comm, npeers, rounds, ms, outdir)
     for p, log in procs:
@@ -170,52 +249,15 @@ def baseline(npeers, rounds, ms, root):
               file=sys.stderr)
         sys.exit(1)
     shutil.rmtree(outdir, ignore_errors=True)
+    # The checksums are out, so the baseline's objects are dead. On a store plane they would
+    # otherwise sit there for the whole sweep -- half a million keys before the first trial
+    # wrote one of its own -- and every later cleanup would scan past them.
+    clean_comm(comm)
     return sums, elapsed
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--trials", type=int, default=20)
-    ap.add_argument("--peers", type=int, nargs="+", default=[2])
-    ap.add_argument("--rounds", type=int, default=40000)
-    ap.add_argument("--ms", type=int, default=0)
-    ap.add_argument("--shape", default=os.environ.get("FMI_SHAPE", "baseline"),
-                    help="app shape the subject runs; see '<subject> --list-shapes'")
-    ap.add_argument("--print-every", type=int, default=25)
-    ap.add_argument("--payload-ints", type=int, default=1,
-                    help="size the vector collective; >1 makes single messages span segments, "
-                         "so a freeze can land part way through a payload")
-    ap.add_argument("--delay-range", type=float, nargs=2, default=[0.25, 1.2],
-                    help="seconds before each checkpoint; a low range catches ranks that are "
-                         "still establishing their mesh")
-    ap.add_argument("--max-checkpoints", type=int, default=1)
-    ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--keep", action="store_true")
-    args = ap.parse_args()
-
-    global PRINT_EVERY, PAYLOAD_INTS, SHAPE
-    PRINT_EVERY = args.print_every
-    PAYLOAD_INTS = args.payload_ints
-    SHAPE = args.shape
-
-    available = known_shapes()
-    if available is None:
-        print(f"cannot run the subject at {SUBJECT} -- build it first, or set "
-              f"FMI_CHECKPOINT_SUBJECT", file=sys.stderr)
-        return 2
-    if SHAPE not in available:
-        print(f"unknown shape {SHAPE!r}; the subject registered: {', '.join(available)}",
-              file=sys.stderr)
-        return 2
-
-    random.seed(args.seed)
-    # Per-invocation subdirectory, wiping only itself: a shared root cleared at startup
-    # destroys the previous run's kept failure specimens the moment any later sweep starts -
-    # measured three times in one day as diagnostic evidence lost to an unrelated run.
-    root = os.path.join(HERE, "sweep", f"run{os.getpid()}")
-    shutil.rmtree(root, ignore_errors=True)
-    os.makedirs(root)
-
+def run(args, root):
+    """Take the baselines, then run the trials. Returns the process exit status."""
     # The clean run's measured duration sizes the per-trial finish window: a checkpointed run
     # legitimately costs the freeze, the restore and a round of link repair on top, but a shape
     # whose clean run takes minutes must not be scored dead at a fixed 180 s - that timed out
@@ -232,10 +274,10 @@ def main():
     passed = failed = skipped = 0
     for trial in range(args.trials):
         npeers = random.choice(args.peers)
-        comm = f"sw{trial}p{npeers}x{os.getpid()}"
+        comm = f"{RUN_PREFIX}t{trial}p{npeers}"
         outdir = os.path.join(root, comm)
         os.makedirs(outdir, exist_ok=True)
-        subprocess.run(["redis-cli", "DEL", f"fmi:direct:{comm}"], capture_output=True)
+        clean_comm(comm)
         log = []
         procs = start_job(comm, npeers, args.rounds, args.ms, outdir)
 
@@ -266,6 +308,7 @@ def main():
 
         if not ok:
             kill_all(comm)
+            clean_comm(comm)
             # A criu failure is an environment limitation, not a protocol verdict.
             print(f"trial {trial}: SKIP (criu) {' | '.join(log)}")
             skipped += 1
@@ -279,6 +322,10 @@ def main():
                 failures.append(
                     f"rank {target} logged no round past {before} after its restore")
         kill_all(comm)
+        # Every verdict below is read out of the rank logs, which --keep preserves; what the
+        # trial left in the store is not evidence and would otherwise sit there for a whole
+        # object_ttl_s, so a long sweep would carry every earlier trial's message history.
+        clean_comm(comm)
 
         if void or not checkpoints:
             # No checkpoint landed. If the job nevertheless finished clean, the trial proves
@@ -316,6 +363,68 @@ def main():
 
     print(f"\n== {passed} passed, {failed} failed, {skipped} skipped (criu) ==")
     return 1 if failed else 0
+
+
+def main():
+    global PRINT_EVERY, PAYLOAD_INTS, SHAPE, CONFIG, PLANE
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--trials", type=int, default=20)
+    ap.add_argument("--peers", type=int, nargs="+", default=[2])
+    ap.add_argument("--rounds", type=int, default=40000)
+    ap.add_argument("--ms", type=int, default=0)
+    ap.add_argument("--config", default=CONFIG,
+                    help="FMI config the ranks run with, and with it the data plane under "
+                         "test; must enable exactly one backend. Default: "
+                         "$FMI_CHECKPOINT_CONFIG, else fmi.json beside this script")
+    ap.add_argument("--shape", default=os.environ.get("FMI_SHAPE", "baseline"),
+                    help="app shape the subject runs; see '<subject> --list-shapes'")
+    ap.add_argument("--print-every", type=int, default=25)
+    ap.add_argument("--payload-ints", type=int, default=1,
+                    help="size the vector collective; >1 makes single messages span segments, "
+                         "so a freeze can land part way through a payload")
+    ap.add_argument("--delay-range", type=float, nargs=2, default=[0.25, 1.2],
+                    help="seconds before each checkpoint; a low range catches ranks that are "
+                         "still establishing their mesh")
+    ap.add_argument("--max-checkpoints", type=int, default=1)
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--keep", action="store_true")
+    args = ap.parse_args()
+
+    PRINT_EVERY = args.print_every
+    PAYLOAD_INTS = args.payload_ints
+    SHAPE = args.shape
+    # Absolute, and resolved before the ranks see it: they are started with cwd=HERE, so a
+    # relative --config given from anywhere else would name one file to this script and a
+    # different one to the job it launches.
+    CONFIG = os.path.abspath(args.config) if os.path.exists(args.config) \
+        else os.path.join(HERE, args.config)
+    PLANE = data_plane(CONFIG)
+    print(f"data plane: {PLANE[0]} (from {CONFIG})")
+
+    available = known_shapes()
+    if available is None:
+        print(f"cannot run the subject at {SUBJECT} -- build it first, or set "
+              f"FMI_CHECKPOINT_SUBJECT", file=sys.stderr)
+        return 2
+    if SHAPE not in available:
+        print(f"unknown shape {SHAPE!r}; the subject registered: {', '.join(available)}",
+              file=sys.stderr)
+        return 2
+
+    random.seed(args.seed)
+    # Per-invocation subdirectory, wiping only itself: a shared root cleared at startup
+    # destroys the previous run's kept failure specimens the moment any later sweep starts -
+    # measured three times in one day as diagnostic evidence lost to an unrelated run.
+    root = os.path.join(HERE, "sweep", f"run{os.getpid()}")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+
+    try:
+        return run(args, root)
+    finally:
+        # However the run ended -- verdicts, a crash, Ctrl-C -- nothing of it stays in the
+        # store. Every name this invocation used starts with RUN_PREFIX for exactly this.
+        clean_run(RUN_PREFIX)
 
 
 if __name__ == "__main__":
