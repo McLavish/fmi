@@ -1,5 +1,0 @@
-# Runtime-generated artifacts from local-two-machines.sh / local-two-containers.sh
-.fmi-machine-*.json
-.fmi-serverless-*.json
-.last-rank*.log
-.restore-rank*.json
