@@ -53,15 +53,6 @@ namespace FMI::Comm {
 
         void prepare_for_checkpoint() override;
 
-        //! Selective re-pair: close only the links to migrated ranks and adopt the new
-        //! epoch-qualified name; surviving peer connections stay open. Safe because the
-        //! consensus cut guarantees every operation below the cut completed everywhere before
-        //! anyone reconfigures, so a kept stream is message-aligned with no epoch-N bytes in
-        //! flight; the re-established (moved) links are rebuilt under epoch-qualified names,
-        //! which preserves the fencing invariant for everything that is rebuilt.
-        bool reconfigure_for_epoch(const std::string& new_comm_name,
-                                   const std::vector<FMI::Utils::peer_num>& moved_ranks) override;
-
         void set_incarnation(std::uint64_t value) override;
 
     protected:

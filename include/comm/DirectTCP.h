@@ -79,13 +79,6 @@ namespace FMI::Comm {
 
         void close_transport_state() override;
 
-        //! Also drops the cached listener registration, so the rank re-publishes under the new
-        //! epoch's registry key. The base class only closes sockets and renames; for this
-        //! backend the registry key itself is derived from comm_name, so peers would otherwise
-        //! read an empty hash after a migration and time out.
-        bool reconfigure_for_epoch(const std::string& new_comm_name,
-                                   const std::vector<FMI::Utils::peer_num>& moved_ranks) override;
-
     private:
         class Registry;
 

@@ -64,21 +64,9 @@ void FMI::Comm::ClientServer::barrier() {
     throw Utils::Timeout();
 }
 
-bool FMI::Comm::ClientServer::reconfigure_for_epoch(const std::string& new_comm_name,
-                                                   const std::vector<FMI::Utils::peer_num>& moved_ranks) {
-    (void) moved_ranks;
-    // Adopt the new name for diagnostics only. num_operations and created_objects deliberately
-    // survive: keys come from data_comm_name, which never carries the epoch, so resetting the
-    // counters here would let an operation after the migration rebuild a key that an operation
-    // before it had already written.
-    comm_name = new_comm_name;
-    return true;
-}
-
 void FMI::Comm::ClientServer::finalize() {
-    // Reached only at communicator destruction now that reconfigure_for_epoch keeps the channel
-    // across an epoch change. Barrier and collective objects are therefore retained for the whole
-    // job rather than being dropped at each reconfiguration.
+    // Reached at communicator destruction, so every object this channel created is retained
+    // for the whole job and dropped in one pass here.
     for (const auto& object_name : created_objects) {
         delete_object(object_name);
     }

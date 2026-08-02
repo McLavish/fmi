@@ -135,12 +135,6 @@ MUTS = [
  ("replaced_link_keeps_the_old_byte_count","src/comm/TcpChannelBase.cpp",
   "        if (sockets[sender_id] != fd_at_entry || generation(sender_id) != gen_at_entry) {\n            throw LinkReplaced(transport_tag + \": link to peer \" + std::to_string(sender_id) +",
   "        if (false) {\n            throw LinkReplaced(transport_tag + \": link to peer \" + std::to_string(sender_id) +"),
- # --- epoch reconfigure: the moved rank's own chair ------------------------------------------
- ("moved_rank_keeps_links_to_survivors","src/comm/TcpChannelBase.cpp",
-  "    if (self_moved) {",
-  "    if (false && self_moved) {"),
- ("repair_forgets_to_reset_seq","src/comm/TcpChannelBase.cpp",
-  "        if (rank < links.size()) {\n            links[rank] = SequencedLink({link_window_frames, link_max_frame_bytes,\n                                         link_retention_limit_bytes});\n            links[rank].set_incarnation(local_incarnation);\n        }",""),
  ("dedup_disabled","src/comm/SequencedLink.cpp",
   "FMI::Comm::SequencedLink::classify(const FrameHeader& header) const {\n    if (header.transport_seq < next_recv) {",
   "FMI::Comm::SequencedLink::classify(const FrameHeader& header) const {\n    if (false) {"),

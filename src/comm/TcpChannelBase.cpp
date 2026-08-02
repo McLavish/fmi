@@ -1409,33 +1409,6 @@ void FMI::Comm::TcpChannelBase::prepare_for_checkpoint() {
     close_transport_state();
 }
 
-bool FMI::Comm::TcpChannelBase::reconfigure_for_epoch(const std::string& new_comm_name,
-                                                      const std::vector<Utils::peer_num>& moved_ranks) {
-    const bool self_moved =
-            std::find(moved_ranks.begin(), moved_ranks.end(), peer_id) != moved_ranks.end();
-    if (self_moved) {
-        // This rank IS the one that moved. Every survivor is about to reset its link to this
-        // rank to zero, so every link this side holds must reset too — resetting only
-        // links[self] (which the loop below would do) is meaningless, and keeping the others
-        // makes this rank's first framed send report a gap that never happened on the wire.
-        // A fresh replacement gets this for free (its links are zero by construction); the
-        // in-place and CRIU-restored shapes re-enter here with the old process's counters
-        // still in memory, which is exactly what must not survive the epoch.
-        close_sockets();
-        for (auto& link : links) {
-            link = SequencedLink({link_window_frames, link_max_frame_bytes,
-                                  link_retention_limit_bytes});
-            link.set_incarnation(local_incarnation);
-        }
-        set_comm_name(new_comm_name);
-        return true;
-    }
-    for (auto rank : moved_ranks) {
-        reset_link(rank);
-    }
-    set_comm_name(new_comm_name);
-    return true;
-}
 
 void FMI::Comm::TcpChannelBase::reset_link(Utils::peer_num partner_id) {
     if (partner_id < sockets.size() && sockets[partner_id] >= 0) {

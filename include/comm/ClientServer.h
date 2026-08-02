@@ -32,17 +32,6 @@ namespace FMI::Comm {
         //! All peers upload their data and download the needed files to apply the function. Left-to-right evaluation order is enforced for non-commutative / non-associative functions.
         void scan(channel_data sendbuf, channel_data recvbuf, raw_function f) override;
 
-        //! Adopt the epoch-qualified name for diagnostics only, and keep this channel object.
-        /*!
-         * Data-plane keys and the job-lifetime sequence counters are NOT reset: ClientServer keys
-         * are built from data_comm_name, which is never epoch-qualified. Returning true stops
-         * Communicator::reconfigure_to_epoch from finalizing and rebuilding the channel, which is
-         * what reset num_operations mid-job and let a post-migration operation rebuild a key an
-         * earlier one had already used.
-         */
-        bool reconfigure_for_epoch(const std::string& new_comm_name,
-                                   const std::vector<FMI::Utils::peer_num>& moved_ranks) override;
-
         //! Function to upload data with a given name / key to the server, needs to be implemented by the channels and should never be invoked directly (use upload instead).
         virtual void upload_object(channel_data buf, std::string name) = 0;
 

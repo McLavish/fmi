@@ -127,19 +127,6 @@ namespace FMI::Comm {
         //! Called before a CRIU checkpoint is taken.
         virtual void prepare_for_checkpoint() {};
 
-        //! Reconfigure this channel in place for a new epoch: adopt the epoch-qualified
-        //! communicator name and drop only the transport state that involves a migrated rank.
-        //! Returns true when the channel handled the reconfiguration and must be kept (Direct:
-        //! selective re-pair — surviving peer connections stay open); false (the default) makes
-        //! the caller finalize and rebuild the channel from scratch, which is required whenever
-        //! per-epoch names or counters cannot be carried over (the ClientServer backends).
-        virtual bool reconfigure_for_epoch(const std::string& new_comm_name,
-                                           const std::vector<FMI::Utils::peer_num>& moved_ranks) {
-            (void) new_comm_name;
-            (void) moved_ranks;
-            return false;
-        };
-
         //! Create a new channel with the given config and model params
         /*!
          * This function is only used for the bundled channels, all other should be instantiated outside of the framework and added over the Communicator interface.

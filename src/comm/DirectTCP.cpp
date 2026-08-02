@@ -1098,20 +1098,3 @@ void FMI::Comm::DirectTCP::close_transport_state() {
     }
 }
 
-bool FMI::Comm::DirectTCP::reconfigure_for_epoch(const std::string& new_comm_name,
-                                                 const std::vector<Utils::peer_num>& moved_ranks) {
-    for (auto rank : moved_ranks) {
-        auto it = pending_links.find(rank);
-        if (it != pending_links.end()) {
-            if (it->second >= 0) {
-                ::close(it->second);
-            }
-            pending_links.erase(it);
-        }
-    }
-    TcpChannelBase::reconfigure_for_epoch(new_comm_name, moved_ranks);
-    // The registry key is derived from comm_name, so the new epoch needs this rank advertised
-    // again under the new key. That happens on its own: every establishment re-publishes, and
-    // the listener is kept because its address has not changed.
-    return true;
-}
