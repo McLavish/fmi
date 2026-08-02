@@ -162,14 +162,17 @@ If a rank ever does stall, it says so: after three seconds of waiting it prints 
 it holds on every link — descriptor, bytes queued, whether the link still owes a handshake —
 which is how the last of the deadlocks here was found.
 
-`sweep.py` is single host. The restored rank re-uses the listening socket and advertised
-address the image captured, which is correct on the same machine and wrong on any other;
-cross-host restore needs the rank to re-publish its registry entry under the address of the
-machine it actually woke up on. Nothing in the library does that any more — the
-`prepare_for_checkpoint` hook that dropped the listener, the cached advertised address and the
-registry client was removed together with the epoch migration runtime that called it.
-`multihost_sweep.py` below still offers `--restore next|random`; until that hook has a
-replacement, treat a cross-host restore as unbacked and keep `--restore same`.
+`sweep.py` is single host. Cross-host restore needs more than the image: the rank must
+re-publish its registry entry under the address of the machine it actually woke up on, and
+the transport state the image carried — listener, in-flight connects, registry client — all
+referred to the machine it left. The library now detects the relocation itself: DirectTCP
+remembers the kernel boot id of the machine its transport was built on, and an establishment
+that finds a DIFFERENT boot id performs exactly the reset the deleted `prepare_for_checkpoint`
+hook used to perform (listener, pending links, peer sockets, registry client, cached
+advertised address — all dropped and rebuilt), plants a reconcile debt on every severed link
+so the re-formed connections replay, and republishes. Same-host restores see the same boot id
+and stay on the proven no-reset path. `--restore next|random` in `multihost_sweep.py` is
+backed by this; see the multi-host evidence below.
 
 ## Multi-host
 
@@ -196,9 +199,23 @@ Two environmental rules governed the cross-host path, and both bit before they w
 The restored process keeps its dumped PID, so each node's `/proc/sys/kernel/ns_last_pid` must be
 seeded into a disjoint band or the restore fails with `File exists`. And `advertise_host` must
 be left empty rather than pinned, so that a rank resolves the address of the machine it is
-actually on — necessary, but on its own no longer sufficient: with the checkpoint hook gone a
-restored process never re-runs that resolution and keeps advertising the address it was dumped
-on. See the last paragraph of [Scope](#scope).
+actually on. The resolution is re-run at every registry publish (never downgrading a working
+address to the loopback fallback), and the boot-id relocation reset re-triggers the whole
+listener/advertisement rebuild on a machine change — see the last paragraph of
+[Scope](#scope).
+
+`--evacuate` moves whole machines: each checkpoint event picks a node, dumps EVERY live rank
+it hosts, and restores all of them on the `--restore` destination. Cross-host evidence on
+this tree, all with `--restore next`: the traced reproducing schedule 6/6, then whole-node
+evacuations across six blocks — `baseline` at 4 ranks (4/4), at 8 ranks with two ranks moved
+per cut (6/6), double evacuations in one trial (4/4), `deep_rounds` (4/4),
+`variable_payloads` with 2 MiB frames mid-flight (4/4), `p2p_ring` (4/4) — **32/32, with the
+same-host sweep (12/12) and the clean-run matrix re-verified on the same build**. Getting
+there surfaced and fixed, in order: dialers parked in a SYN backlog nobody serviced, a
+publish-once latch a frozen establishment restored as already-published, orphaned links
+(dead fd with unpaid debts) invisible to the aged redialer, redial budgets shorter than a
+replaying listener's accept latency, and handshake deaths escaping to the application —
+each one traced, fixed, and re-verified against its own failing schedule.
 
 `multihost_ft_migration.py` is left over from the deleted epoch migration protocol: it drives
 `fmi-rank-agent evacuate-local` / `restore-remote` / `promote`, none of which exist any more.
