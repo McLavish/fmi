@@ -22,6 +22,12 @@ namespace FMI::Comm {
     public:
         explicit RecoverableClientServer(std::map<std::string, std::string> params);
 
+        //! Under recover, delete nothing and let the objects expire. See the definition.
+        void finalize() override;
+
+        //! Under recover, write the object without recording it for a deletion that never comes.
+        void upload(channel_data buf, std::string name) override;
+
     protected:
         //! comm_name, plus a separator once recovery semantics are on. See the definition.
         std::string object_key_prefix() const override;

@@ -167,6 +167,31 @@ namespace {
         }
     }
 
+    //! What the store says is left of a key's life: seconds, -1 for "no expiry", -2 for "gone".
+    /*!
+     * Read on a connection of the test's own, because the property under test is what the channel
+     * left in the store, not what the channel believes it left there.
+     */
+    long key_ttl(const std::string& key) {
+        redisContext* context = redisConnect("127.0.0.1", 6379);
+        if (context == nullptr || context->err) {
+            if (context != nullptr) {
+                redisFree(context);
+            }
+            return -3;
+        }
+        const char* argv[] = {"TTL", key.c_str()};
+        const std::size_t argvlen[] = {sizeof("TTL") - 1, key.size()};
+        auto* reply = static_cast<redisReply*>(redisCommandArgv(context, 2, argv, argvlen));
+        long ttl = -3;
+        if (reply != nullptr && reply->type == REDIS_REPLY_INTEGER) {
+            ttl = static_cast<long>(reply->integer);
+        }
+        freeReplyObject(reply);
+        redisFree(context);
+        return ttl;
+    }
+
     //! Count the objects whose name ends in suffix, the way ClientServer::barrier does.
     std::size_t count_with_suffix(const std::vector<std::string>& names, const std::string& suffix) {
         return static_cast<std::size_t>(std::count_if(names.begin(), names.end(),
@@ -746,6 +771,165 @@ BOOST_AUTO_TEST_CASE(timeout_leaves_every_counter_advanced_once) {
     BOOST_CHECK_EQUAL(channel.operations("bcast"), 1u);
     BOOST_CHECK_EQUAL(channel.operations("reduce"), 1u);
     BOOST_CHECK_EQUAL(channel.operations("scan"), 1u);
+}
+
+//! Ranks that finish at different moments do not take each other's messages with them.
+/*!
+ * This is the case tests/channels.cpp:836-840 documents and works around: it uses a shared-memory
+ * rendezvous before finalize because, without one, the rank that finishes first deletes the
+ * objects the ranks behind it are still polling for, and the run deadlocks about seven times in
+ * ten. A scan is the sharpest form of it — rank 0 folds only its own value and is done
+ * immediately, while rank 3 still needs what ranks 0 to 2 wrote.
+ *
+ * Here there is no rendezvous at all: every rank tears down the instant it has its own answer,
+ * which is what a real application does and what a rank that is killed or checkpointed and never
+ * restored does involuntarily. Under recover that is safe, because finalize deletes nothing.
+ */
+BOOST_AUTO_TEST_CASE(staggered_finalize_under_recover_loses_nothing) {
+    constexpr int num_peers = 4;
+    const std::string comm_name = unique_comm_name("staggered");
+
+    int* res = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE,
+                                      MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    BOOST_REQUIRE(res != MAP_FAILED);
+    int* done = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE,
+                                       MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    BOOST_REQUIRE(done != MAP_FAILED);
+    for (int i = 0; i < num_peers; i++) {
+        res[i] = 0;
+        done[i] = 0;
+    }
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    // Subtraction: neither commutative nor associative, so the fold order is pinned as well as the
+    // delivery. Values from 1 up, because 0 is subtraction's identity and would hide a wrong order.
+    auto subtract = [] (char* a, char* b) {
+        *reinterpret_cast<int*>(a) = *reinterpret_cast<int*>(a) - *reinterpret_cast<int*>(b);
+    };
+    auto params = recover_params({{"max_timeout", "30000"}});
+
+    try {
+        auto channel = make_redis(comm_name, peer_id, num_peers, params);
+        int value = peer_id + 1;
+        channel->scan({reinterpret_cast<char*>(&value), sizeof(int)},
+                      {reinterpret_cast<char*>(res + peer_id), sizeof(int)}, {subtract, false, false});
+        // No rendezvous of any kind between the scan and the teardown: this rank leaves the moment
+        // it is finished with the collective, peers or no peers.
+        channel->finalize();
+        done[peer_id] = 1;
+    } catch (const std::exception& e) {
+        BOOST_TEST_MESSAGE("rank " << peer_id << " failed: " << e.what());
+    }
+
+    rank_guard.reap_ranks();
+    int expected = 1;                       // v0
+    for (int i = 0; i < num_peers; i++) {
+        BOOST_TEST(done[i] == 1, "rank " << i << " did not finish its scan");
+        BOOST_CHECK_EQUAL(expected, res[i]);
+        expected = expected - (i + 2);      // ... - v(i+1)
+    }
+    auto sweeper = make_redis(comm_name, 0, 1);
+    purge(*sweeper, comm_name);
+    munmap(res, sizeof(int) * num_peers);
+    munmap(done, sizeof(int) * num_peers);
+}
+
+//! Nothing leaves finalize, whatever the state of the job or the store.
+/*!
+ * finalize runs from ~Communicator, which is noexcept: an exception that escapes it is not a
+ * failed shutdown, it is std::terminate. Two ways in. A peer that leaves mid-job — killed,
+ * evicted, checkpointed and never restored — must not turn the survivor's teardown into an abort;
+ * and a backend whose own cleanup fails must be contained rather than propagated.
+ *
+ * The teardown below is marked noexcept on purpose, so that a propagation aborts this binary
+ * exactly as it would abort a rank, loudly and at the right line, instead of being counted as a
+ * test failure and moved on from.
+ */
+BOOST_AUTO_TEST_CASE(finalize_never_propagates) {
+    constexpr int num_peers = 2;
+    const std::string comm_name = unique_comm_name("orphan");
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    auto params = recover_params();
+    if (peer_id != 0) {
+        // The peer that never comes back: it builds its channel, joins the job, and vanishes
+        // without finalizing anything.
+        auto abandoned = make_redis(comm_name, peer_id, num_peers, params);
+        int value = 1;
+        abandoned->send({reinterpret_cast<char*>(&value), sizeof(value)}, 0);
+        rank_guard.reap_ranks();
+        return;
+    }
+
+    auto survivor = make_redis(comm_name, 0, num_peers, params);
+    int value = 2;
+    survivor->send({reinterpret_cast<char*>(&value), sizeof(value)}, 1);
+    auto teardown = [&] () noexcept {
+        survivor->finalize();
+        survivor.reset();
+    };
+    teardown();
+    rank_guard.reap_ranks();
+
+    // And the same guarantee for a backend whose cleanup itself fails: with the flag off the base
+    // class deletes object by object, and one refusal from the store must not become an abort
+    // either.
+    struct ExplodingRedis : public FMI::Comm::Redis {
+        using FMI::Comm::Redis::Redis;
+        void delete_object(std::string) override { throw std::runtime_error("store said no"); }
+    };
+    ExplodingRedis flag_off(redis_test_params, redis_test_model_params);
+    flag_off.set_peer_id(0);
+    flag_off.set_num_peers(1);
+    flag_off.set_comm_name(comm_name);
+    int leftover = 3;
+    flag_off.upload({reinterpret_cast<char*>(&leftover), sizeof(leftover)}, comm_name + "leftover");
+    auto flag_off_teardown = [&] () noexcept { flag_off.finalize(); };
+    flag_off_teardown();
+
+    auto sweeper = make_redis(comm_name, 0, 1);
+    purge(*sweeper, comm_name);
+}
+
+//! Under recover the store owns the cleanup: every object gets an expiry and finalize keeps its hands off.
+/*!
+ * The two halves are one decision. Nothing is deleted on the way out because a departing rank
+ * cannot know what its peers still need, so something else has to reclaim the objects, and the
+ * only thing that still works when a rank never reaches finalize at all is the store's own expiry.
+ */
+BOOST_AUTO_TEST_CASE(uploads_carry_ttls_and_finalize_deletes_nothing) {
+    const std::string comm_name = unique_comm_name("ttl");
+    auto channel = make_redis(comm_name, 0, 2, recover_params());
+
+    int value = 42;
+    channel->send({reinterpret_cast<char*>(&value), sizeof(value)}, 1);
+    const std::string key = comm_name + "|0_1_0";
+
+    const long ttl = key_ttl(key);
+    BOOST_CHECK_MESSAGE(ttl > 0 && ttl <= 60, "expected an expiry of at most 60 s, TTL says " << ttl);
+
+    channel->finalize();
+    int seen = 0;
+    BOOST_CHECK_MESSAGE(channel->download_object({reinterpret_cast<char*>(&seen), sizeof(seen)}, key),
+                        "finalize deleted an object a peer might still be waiting for");
+    BOOST_CHECK_EQUAL(seen, value);
+
+    // With the flag off the object has no expiry at all — the deletion in finalize is the whole
+    // cleanup story, which is why it has to happen there.
+    const std::string plain_comm_name = unique_comm_name("nottl");
+    auto plain = make_redis(plain_comm_name, 0, 2);
+    plain->send({reinterpret_cast<char*>(&value), sizeof(value)}, 1);
+    BOOST_CHECK_EQUAL(key_ttl(plain_comm_name + "0_1_0"), -1);
+    plain->finalize();
+    BOOST_CHECK_EQUAL(key_ttl(plain_comm_name + "0_1_0"), -2);
+
+    channel->delete_object(key);
 }
 
 BOOST_AUTO_TEST_SUITE_END();

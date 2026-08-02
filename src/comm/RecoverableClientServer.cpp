@@ -1,5 +1,6 @@
 #include "../../include/comm/RecoverableClientServer.h"
 
+#include <boost/log/trivial.hpp>
 #include <stdexcept>
 #include <string>
 
@@ -60,6 +61,60 @@ FMI::Comm::RecoverableClientServer::RecoverableClientServer(std::map<std::string
                                  + std::to_string(poll_interval) + "), got "
                                  + params.at("max_timeout"));
     }
+}
+
+//! Shutdown, which under recover means leaving the store to it.
+/*!
+ * A rank that has finished cannot know whether its peers still need what it wrote. Deleting on
+ * the way out is what makes a staggered shutdown lose messages today: the first rank out of a
+ * collective takes its objects with it, and the ranks still polling wait for something that no
+ * longer exists — the deadlock tests/channels.cpp:836-840 works around with a shared-memory
+ * rendezvous, about seven runs in ten. So under recover nothing is deleted here. Every object was
+ * written with a store-side expiry (Redis SET ... EX; an S3 lifecycle rule) and goes away on its
+ * own, which is also the only cleanup that still works when a rank never reaches finalize at all —
+ * killed, evicted, or checkpointed and not restored.
+ *
+ * The obvious alternative, a done-marker barrier before deleting, fails twice over. Its wait can
+ * end in Utils::Timeout, and finalize runs from ~Communicator, which is noexcept — a timeout on
+ * the way out would be std::terminate. And the marker set is unsound whichever way it is cleaned
+ * up: left behind, a later run reusing the communicator name passes the gate instantly and re-arms
+ * exactly the deadlock it was meant to close; deleted, a peer still polling strands for its whole
+ * budget.
+ *
+ * The precondition this leans on is that a communicator name is unique per job run — which
+ * everything in the tree already assumes and provides (the sweep, the runbook, these tests all
+ * build pid- or clock-stamped names). Two runs sharing a name inside the expiry window would read
+ * each other's objects; that hazard predates this flag and is not made better or worse by it.
+ *
+ * The catch-all is not defensive decoration. This is called from a destructor, and an exception
+ * that leaves it does not fail an operation, it ends the process.
+ */
+void FMI::Comm::RecoverableClientServer::finalize() {
+    try {
+        if (!recover) {
+            ClientServer::finalize();
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "ClientServer: finalize failed, objects may be left behind: "
+                                 << e.what();
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(error) << "ClientServer: finalize failed, objects may be left behind";
+    }
+}
+
+//! Write an object, recording it for deletion only when something will ever delete it.
+/*!
+ * The base class remembers every name it writes so that finalize can remove them. Under recover
+ * finalize removes nothing, so the list would only grow: one entry per message for the whole run,
+ * in a process whose memory is about to be written to a checkpoint image. Skipping it keeps the
+ * image proportional to what the rank is doing rather than to how long it has been doing it.
+ */
+void FMI::Comm::RecoverableClientServer::upload(channel_data buf, std::string name) {
+    if (!recover) {
+        ClientServer::upload(buf, name);
+        return;
+    }
+    upload_object(buf, name);
 }
 
 std::string FMI::Comm::RecoverableClientServer::object_key_prefix() const {
