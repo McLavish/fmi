@@ -1,7 +1,7 @@
 #ifndef FMI_S3_H
 #define FMI_S3_H
 
-#include "ClientServer.h"
+#include "RecoverableClientServer.h"
 #include <map>
 #include <string>
 #include <aws/s3/S3Client.h>
@@ -10,7 +10,7 @@
 
 namespace FMI::Comm {
     //! Channel that uses AWS S3 as backend and uses the AWS SDK for C++ to access S3.
-    class S3 : public ClientServer {
+    class S3 : public RecoverableClientServer {
     public:
         explicit S3(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params);
 

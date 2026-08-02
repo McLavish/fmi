@@ -212,6 +212,93 @@ BOOST_AUTO_TEST_CASE(flag_off_barrier_counts_foreign_suffixes) {
     }
 }
 
+//! Asking for recovery means asking for a poll budget that can expire.
+/*!
+ * The ClientServer poll loops advance elapsed_time by timeout and sleep for timeout, so a
+ * configured 0 neither waits nor gets any closer to max_timeout: the loop spins on the store at
+ * full speed and never gives up. A channel that offers to survive a lost connection has to be able
+ * to notice one, so that configuration is refused at construction — but only under the flag,
+ * because it is a configuration the family accepts today.
+ */
+BOOST_AUTO_TEST_CASE(degenerate_recover_config_is_rejected) {
+    const std::string comm_name = unique_comm_name("degenerate");
+
+    std::map<std::string, std::string> spinning = redis_test_params;
+    spinning["recover"] = "true";
+    spinning["timeout"] = "0";
+    BOOST_CHECK_EXCEPTION(make_redis(comm_name, 0, 1, spinning), std::runtime_error,
+                          [] (const std::runtime_error& e) {
+                              const std::string what = e.what();
+                              return what.find("timeout") != std::string::npos &&
+                                     what.find("0") != std::string::npos;
+                          });
+
+    // A budget shorter than one poll interval is the same complaint from the other side.
+    std::map<std::string, std::string> upside_down = redis_test_params;
+    upside_down["recover"] = "true";
+    upside_down["timeout"] = "50";
+    upside_down["max_timeout"] = "10";
+    BOOST_CHECK_EXCEPTION(make_redis(comm_name, 0, 1, upside_down), std::runtime_error,
+                          [] (const std::runtime_error& e) {
+                              return std::string(e.what()).find("max_timeout") != std::string::npos;
+                          });
+
+    std::map<std::string, std::string> sound = redis_test_params;
+    sound["recover"] = "true";
+    BOOST_CHECK_NO_THROW(make_redis(comm_name, 0, 1, sound));
+
+    // Same degenerate budget, flag absent: constructed exactly as before, no opinion offered.
+    // Nothing is invoked on it — an operation with this budget is the infinite spin above.
+    std::map<std::string, std::string> unflagged = redis_test_params;
+    unflagged["timeout"] = "0";
+    BOOST_CHECK_NO_THROW(make_redis(comm_name, 0, 1, unflagged));
+}
+
+//! Under recover, the communicator name and the rank number stop running together.
+/*!
+ * Object names are the communicator name with a rank number appended, so communicator "job" rank
+ * 11 and communicator "job1" rank 1 both write "job11_2_0" — two unrelated jobs quietly reading
+ * each other's messages whenever the names line up. Recovered jobs get a separator between the
+ * two; flag-off names stay exactly what they were, which is what the second half pins.
+ */
+BOOST_AUTO_TEST_CASE(recover_keys_carry_a_separator) {
+    const std::string comm_name = unique_comm_name("separator");
+
+    // A plain channel to read raw keys with: download_object takes the name verbatim, so this one
+    // can look for either spelling without being subject to the naming rule under test.
+    auto probe = make_redis(comm_name, 0, 2);
+
+    std::map<std::string, std::string> params = redis_test_params;
+    params["recover"] = "true";
+    auto recovering = make_redis(comm_name, 0, 2, params);
+
+    int value = 42;
+    recovering->send({reinterpret_cast<char*>(&value), sizeof(value)}, 1);
+
+    const std::string separated = comm_name + "|0_1_0";
+    const std::string concatenated = comm_name + "0_1_0";
+
+    int seen = 0;
+    BOOST_CHECK(probe->download_object({reinterpret_cast<char*>(&seen), sizeof(seen)}, separated));
+    BOOST_CHECK_EQUAL(seen, value);
+    BOOST_CHECK(!probe->download_object({reinterpret_cast<char*>(&seen), sizeof(seen)}, concatenated));
+
+    // And the same send from a channel without the flag lands under the old name.
+    const std::string plain_comm_name = unique_comm_name("noseparator");
+    auto plain = make_redis(plain_comm_name, 0, 2);
+    plain->send({reinterpret_cast<char*>(&value), sizeof(value)}, 1);
+
+    const std::string plain_key = plain_comm_name + "0_1_0";
+    seen = 0;
+    BOOST_CHECK(probe->download_object({reinterpret_cast<char*>(&seen), sizeof(seen)}, plain_key));
+    BOOST_CHECK_EQUAL(seen, value);
+    BOOST_CHECK(!probe->download_object({reinterpret_cast<char*>(&seen), sizeof(seen)},
+                                        plain_comm_name + "|0_1_0"));
+
+    probe->delete_object(separated);
+    probe->delete_object(plain_key);
+}
+
 BOOST_AUTO_TEST_SUITE_END();
 
 #endif // FMI_ENABLE_REDIS

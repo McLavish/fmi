@@ -5,7 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 
-FMI::Comm::Redis::Redis(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params) : ClientServer(params) {
+FMI::Comm::Redis::Redis(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params) : RecoverableClientServer(params) {
     hostname = params["host"];
     port = std::stoi(params["port"]);
     bandwidth_single = std::stod(model_params["bandwidth_single"]);

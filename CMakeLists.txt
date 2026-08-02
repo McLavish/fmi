@@ -39,6 +39,7 @@ set(FMI_SOURCES
     src/utils/Signals.cpp
     src/comm/Channel.cpp
     src/comm/ClientServer.cpp
+    src/comm/RecoverableClientServer.cpp
     src/utils/ChannelPolicy.cpp
     src/comm/PeerToPeer.cpp
     src/comm/OperationScope.cpp

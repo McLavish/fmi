@@ -58,6 +58,18 @@ namespace FMI::Comm {
         double get_operation_price(Utils::OperationInfo op_info) override;
 
     protected:
+        //! The string every object name this channel builds starts with.
+        /*!
+         * Defaults to the communicator name, which is exactly what the key construction sites
+         * below used inline before this hook existed, so a channel that does not override it
+         * names its objects as it always has. A derived class may extend it —
+         * RecoverableClientServer appends a separator so that a communicator name and a rank
+         * number cannot run together into another pair's key — but every peer of one
+         * communicator has to return the same string: the name a rank builds to download is the
+         * one another rank built to upload.
+         */
+        virtual std::string object_key_prefix() const { return comm_name; }
+
         //! Ensures that there are no file / key name conflicts when a collective operation is used multiple times, values are integrated into the file / key name for these operations.
         std::map<std::string, unsigned int> num_operations = {
                 {"bcast", 0},

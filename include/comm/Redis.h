@@ -1,7 +1,7 @@
 #ifndef FMI_REDIS_H
 #define FMI_REDIS_H
 
-#include "ClientServer.h"
+#include "RecoverableClientServer.h"
 #include <map>
 #include <memory>
 #include <string>
@@ -9,7 +9,7 @@
 
 namespace FMI::Comm {
     //! Channel that uses Redis with the Hiredis client library as storage backend.
-    class Redis : public ClientServer {
+    class Redis : public RecoverableClientServer {
     public:
         explicit Redis(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params);
 
