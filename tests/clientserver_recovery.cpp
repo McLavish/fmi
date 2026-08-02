@@ -14,6 +14,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -82,6 +83,32 @@ namespace {
                 }));
     }
 
+}
+
+//! A store that cannot be reached is reported by name, not by segfault.
+/*!
+ * Every command used to be issued on whatever context existed and its reply dereferenced without
+ * a look: against a dead endpoint hiredis answers NULL and the process died on the spot, with no
+ * clue as to which channel or which key was involved. Construction still only logs — a channel
+ * whose store is down must be constructible, or a rank frozen inside its constructor could not be
+ * restored — and the failure surfaces at the first command.
+ */
+BOOST_AUTO_TEST_CASE(dead_endpoint_is_reported_not_dereferenced) {
+    std::map<std::string, std::string> params = redis_test_params;
+    params["port"] = "1";   // nothing listens there, and connecting is refused immediately
+
+    const std::string comm_name = unique_comm_name("dead");
+    const std::string key = comm_name + "0_payload";
+
+    std::shared_ptr<FMI::Comm::ClientServer> channel;
+    BOOST_REQUIRE_NO_THROW(channel = make_redis(comm_name, 0, 1, params));
+
+    int value = 42;
+    BOOST_CHECK_EXCEPTION(channel->upload_object({reinterpret_cast<char*>(&value), sizeof(value)}, key),
+                          std::runtime_error,
+                          [&key] (const std::runtime_error& e) {
+                              return std::string(e.what()).find(key) != std::string::npos;
+                          });
 }
 
 //! finalize() deletes this channel's objects there and then, peers still reading or not.
