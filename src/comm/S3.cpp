@@ -6,10 +6,29 @@
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/ListObjectsRequest.h>
 #include <cmath>
+#include <stdexcept>
 
 char TAG[] = "S3Client";
 
 FMI::Comm::S3::S3(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params) : RecoverableClientServer(params) {
+    // The recovery contract is split between this class and the family above it, and only the
+    // family's half exists here so far. Accepting the flag would turn on exactly the halves that
+    // are dangerous without the other: finalize would stop deleting and upload would stop
+    // recording what it wrote, while this backend still writes plain PutObjects with no expiry —
+    // FMI configures no bucket lifecycle rule — so every object of every run would stay in the
+    // bucket, and be billed for, forever. It would also promise what upload_object below does not
+    // do (a failed write is logged and dropped, under a flag whose whole point is that a write is
+    // a delivery obligation) and what download_object does not check (a short object is copied and
+    // reported as a complete read).
+    //
+    // Refused rather than ignored: an operator who wrote it down asked for those guarantees, and a
+    // channel that quietly gives them a different set is worse than one that says no. Remove this
+    // when the S3 half lands — the TTL by lifecycle rule, the upload escalation, the length check.
+    if (recover) {
+        throw std::runtime_error("S3: \"recover\" is not implemented by this backend "
+                                 "(no object expiry, no upload escalation, no length check); "
+                                 "remove it from the S3 configuration block");
+    }
     if (instances == 0) {
         // Only one call allowed (https://github.com/aws/aws-sdk-cpp/issues/456), give possible multiple clients control over initialization
         Aws::InitAPI(options);
