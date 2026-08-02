@@ -5,7 +5,6 @@
 #include <string>
 #include <map>
 #include <boost/property_tree/ptree.hpp>
-#include "../ft/Common.h"
 
 namespace FMI::Utils {
     struct FaultToleranceConfig {
