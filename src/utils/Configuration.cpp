@@ -41,27 +41,4 @@ namespace FMI::Utils {
         return root.get_child("model").get_child("FaaS").get<double>("gib_second_price");
     }
 
-    FaultToleranceConfig Configuration::get_fault_tolerance_config() {
-        FaultToleranceConfig config;
-        if (!root.count("fault_tolerance")) {
-            return config;
-        }
-
-        auto ft_tree = root.get_child("fault_tolerance");
-        config.enabled = ft_tree.get("enabled", false);
-        config.control_backend = ft_tree.get("control_backend", config.control_backend);
-        config.control_host = ft_tree.get("control_host", config.control_host);
-        config.control_port = ft_tree.get("control_port", config.control_port);
-        config.poll_interval_ms = ft_tree.get("poll_interval_ms", config.poll_interval_ms);
-        config.preferred_data_backend = ft_tree.get("preferred_data_backend", config.preferred_data_backend);
-        config.state_transfer = ft_tree.get("state_transfer", config.state_transfer);
-        // CRIU-mechanism knobs live under a nested "criu" object. Absent (non-criu configs) -> defaults.
-        if (auto criu_tree = ft_tree.get_child_optional("criu")) {
-            config.criu.images_dir = criu_tree->get("images_dir", config.criu.images_dir);
-            config.criu.poll_ms = criu_tree->get("poll_ms", config.criu.poll_ms);
-            config.criu.quiesce_timeout_ms = criu_tree->get("quiesce_timeout_ms", config.criu.quiesce_timeout_ms);
-            config.criu.host_id = criu_tree->get("host_id", config.criu.host_id);
-        }
-        return config;
-    }
 }
