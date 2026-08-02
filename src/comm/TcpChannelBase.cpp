@@ -1431,26 +1431,28 @@ bool FMI::Comm::TcpChannelBase::reconfigure_for_epoch(const std::string& new_com
         return true;
     }
     for (auto rank : moved_ranks) {
-        if (rank < sockets.size() && sockets[rank] >= 0) {
-            close(sockets[rank]);
-            sockets[rank] = -1;
-        }
-        if (rank < inbound_stage.size()) {
-            inbound_stage[rank] = InboundStage{};
-        }
-        // The transport sequence is scoped to a link, and re-pairing to a migrated rank
-        // creates a new one: the replacement's counters start at zero whether it is a fresh
-        // process or the migrated rank re-entering under the branch above. Carrying the old
-        // link's counters over would make the survivor's first framed exchange with the
-        // replacement report a gap that never happened.
-        if (rank < links.size()) {
-            links[rank] = SequencedLink({link_window_frames, link_max_frame_bytes,
-                                         link_retention_limit_bytes});
-            links[rank].set_incarnation(local_incarnation);
-        }
+        reset_link(rank);
     }
     set_comm_name(new_comm_name);
     return true;
+}
+
+void FMI::Comm::TcpChannelBase::reset_link(Utils::peer_num partner_id) {
+    if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
+        close(sockets[partner_id]);
+        sockets[partner_id] = -1;
+    }
+    if (partner_id < inbound_stage.size()) {
+        inbound_stage[partner_id] = InboundStage{};
+    }
+    // The transport sequence is scoped to a link, and a peer served by a new process starts
+    // its own counters at zero. Carrying the old link's counters over would make the first
+    // framed exchange with that process report a gap that never happened on the wire.
+    if (partner_id < links.size()) {
+        links[partner_id] = SequencedLink({link_window_frames, link_max_frame_bytes,
+                                           link_retention_limit_bytes});
+        links[partner_id].set_incarnation(local_incarnation);
+    }
 }
 
 void FMI::Comm::TcpChannelBase::drain_links_for_shutdown() {

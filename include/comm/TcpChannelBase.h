@@ -238,6 +238,20 @@ namespace FMI::Comm {
         //! Grow the per-peer link state to num_peers on first use.
         void ensure_link_state();
 
+        //! Forget everything about one peer's link: drop the socket, discard any half-read
+        //! frame, and start its sequence state over from zero.
+        /*!
+         * The primitive behind "that peer is not the process I was talking to any more". A
+         * transport sequence is scoped to a link, so a peer served by a new process starts at
+         * zero; carrying the old counters over would make the next framed exchange report a
+         * gap that never happened on the wire.
+         *
+         * Distinct from repair_link, which re-establishes to the SAME process and replays what
+         * it has not acknowledged. This one discharges the obligation instead of preserving it,
+         * so it is only correct when the peer really has been replaced.
+         */
+        void reset_link(Utils::peer_num partner_id);
+
         //! Re-establish a dead link and retransmit whatever the peer has not acknowledged.
         void repair_link(Utils::peer_num partner_id);
 
