@@ -92,6 +92,12 @@ void FMI::Comm::ClientServer::upload(channel_data buf, std::string name) {
 }
 
 void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf, FMI::Utils::peer_num root, raw_function f) {
+    // Capture and advance once, at entry, as barrier() does: the counter names this operation's
+    // objects, so it must be read once and be the same on every path out. Advancing it after the
+    // poll loop left it untouched whenever that loop ended in a Timeout, so a root that gave up
+    // and a peer that uploaded disagreed about the generation from then on.
+    auto operation_num = num_operations["reduce"];
+    num_operations["reduce"]++;
     if (peer_id == root) {
         bool left_to_right = !(f.commutative && f.associative);
         std::vector<bool> received(num_peers, false);
@@ -108,7 +114,7 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
                 if (received[i]) {
                     continue;
                 }
-                std::string file_name = comm_name + std::to_string(i) + "_reduce_" + std::to_string(num_operations["reduce"]);
+                std::string file_name = comm_name + std::to_string(i) + "_reduce_" + std::to_string(operation_num);
                 if (download_object({data.data() + i * buffer_length, buffer_length}, file_name)) {
                     received[i] = true;
                 }
@@ -127,20 +133,23 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
             elapsed_time += timeout;
             std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
         }
-        num_operations["reduce"]++;
         if (std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; })) {
             throw Utils::Timeout();
         }
     } else {
-        std::string file_name = comm_name + std::to_string(peer_id) + "_reduce_" + std::to_string(num_operations["reduce"]);
-        num_operations["reduce"]++;
+        std::string file_name = comm_name + std::to_string(peer_id) + "_reduce_" + std::to_string(operation_num);
         upload(sendbuf, file_name);
     }
 }
 
 void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, raw_function f) {
+    // As in reduce(): one read, one advance, at entry. The upload below and the downloads in the
+    // poll loop must name the same generation, and the counter must land in the same place whether
+    // this call returns or throws.
+    auto operation_num = num_operations["scan"];
+    num_operations["scan"]++;
     if (peer_id != num_peers - 1) {
-        std::string file_name = comm_name + std::to_string(peer_id) + "_scan_" + std::to_string(num_operations["scan"]);
+        std::string file_name = comm_name + std::to_string(peer_id) + "_scan_" + std::to_string(operation_num);
         upload(sendbuf, file_name);
     }
     bool left_to_right = !(f.commutative && f.associative);
@@ -204,7 +213,7 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
             if (received[i]) {
                 continue;
             }
-            std::string file_name = comm_name + std::to_string(i) + "_scan_" + std::to_string(num_operations["scan"]);
+            std::string file_name = comm_name + std::to_string(i) + "_scan_" + std::to_string(operation_num);
             if (download_object({data.data() + static_cast<std::size_t>(i) * buffer_length, buffer_length}, file_name)) {
                 received[i] = true;
             }
@@ -217,7 +226,6 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
     if (std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; })) {
         throw Utils::Timeout();
     }
-    num_operations["scan"]++;
 }
 
 FMI::Comm::ClientServer::ClientServer(std::map<std::string, std::string> params) {
