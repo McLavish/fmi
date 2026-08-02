@@ -5,22 +5,14 @@
 #include <utility>
 
 FMI::Utils::ChannelPolicy::ChannelPolicy(std::map<std::string, std::shared_ptr<FMI::Comm::Channel>>& channels,
-                                         double faas_price, Hint hint, std::string preferred_backend) :
+                                         double faas_price, Hint hint) :
         channels(channels),
         faas_price(faas_price),
-        hint(hint),
-        preferred_backend(std::move(preferred_backend)) {}
+        hint(hint) {}
 
 std::string FMI::Utils::ChannelPolicy::get_channel(const OperationInfo& op_info) {
     if (channels.empty()) {
         throw std::runtime_error("No channels are registered in the communicator");
-    }
-    if (!preferred_backend.empty()) {
-        auto preferred = channels.find(preferred_backend);
-        if (preferred == channels.end()) {
-            throw std::runtime_error("Preferred backend is not registered in the communicator");
-        }
-        return preferred->first;
     }
 
     // Pick the channel minimizing the metric the hint cares about. For "fast" that is latency
