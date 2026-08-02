@@ -36,13 +36,33 @@ FMI::Comm::RecoverableClientServer::RecoverableClientServer(std::map<std::string
     // — leaves the flag off, in both places, rather than each backend inventing its own spelling.
     recover = params.count("recover") > 0 && params.at("recover") == "true";
     if (params.count("object_ttl_s") > 0 && !params.at("object_ttl_s").empty()) {
-        object_ttl_s = static_cast<unsigned int>(std::stoul(params.at("object_ttl_s")));
+        try {
+            object_ttl_s = static_cast<unsigned int>(std::stoul(params.at("object_ttl_s")));
+        } catch (const std::exception&) {
+            // std::stoul's own complaint names neither the key nor the value; configuration
+            // arrives as untyped strings and this is the only place that knows which one it was.
+            throw std::runtime_error("ClientServer: object_ttl_s must be a number of seconds, got \""
+                                     + params.at("object_ttl_s") + "\"");
+        }
     }
 
     if (!recover) {
         // Flag off: this class is transparent, and that includes not rejecting a configuration
         // the family accepts today.
         return;
+    }
+
+    if (object_ttl_s == 0) {
+        // Not refused — "no expiry" is a legitimate thing to ask a store for, and a job whose
+        // objects are cleaned up by something else entirely may well want it. But under recover it
+        // is also the one setting under which nothing at all reclaims them: finalize deletes
+        // nothing by design, so every object of every run stays in the store until somebody
+        // notices. Said once, at construction, where the operator can still connect it to what
+        // they wrote.
+        BOOST_LOG_TRIVIAL(warning) << "ClientServer recover: object_ttl_s is 0, so nothing this "
+                                      "channel writes will ever expire — and a recovered job "
+                                      "deletes nothing on the way out, so its objects are kept "
+                                      "until something outside the job removes them";
     }
 
     // The poll budget is the failure detector under recover, so it has to be a budget at all.
@@ -153,7 +173,9 @@ void FMI::Comm::RecoverableClientServer::barrier() {
  * each other's objects; that hazard predates this flag and is not made better or worse by it.
  *
  * The catch-all is not defensive decoration. This is called from a destructor, and an exception
- * that leaves it does not fail an operation, it ends the process.
+ * that leaves it does not fail an operation, it ends the process. Which is also why the reporting
+ * is wrapped in turn: BOOST_LOG_TRIVIAL formats and allocates, so a handler that only logs is
+ * still a handler that can throw, and it would throw from inside the one place that must not.
  */
 void FMI::Comm::RecoverableClientServer::finalize() {
     try {
@@ -161,10 +183,17 @@ void FMI::Comm::RecoverableClientServer::finalize() {
             ClientServer::finalize();
         }
     } catch (const std::exception& e) {
-        BOOST_LOG_TRIVIAL(error) << "ClientServer: finalize failed, objects may be left behind: "
-                                 << e.what();
+        try {
+            BOOST_LOG_TRIVIAL(error) << "ClientServer: finalize failed, objects may be left behind: "
+                                     << e.what();
+        } catch (...) {
+            // Nothing left to say it with. Leaving quietly beats ending the process.
+        }
     } catch (...) {
-        BOOST_LOG_TRIVIAL(error) << "ClientServer: finalize failed, objects may be left behind";
+        try {
+            BOOST_LOG_TRIVIAL(error) << "ClientServer: finalize failed, objects may be left behind";
+        } catch (...) {
+        }
     }
 }
 

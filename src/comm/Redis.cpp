@@ -18,7 +18,17 @@ namespace {
         if (it == params.end() || it->second.empty()) {
             return fallback;
         }
-        return std::min(high, std::max(low, std::stol(it->second)));
+        long value = 0;
+        try {
+            value = std::stol(it->second);
+        } catch (const std::exception&) {
+            // std::stol's own complaint is "stoi" and nothing else — no key, no backend, no value.
+            // Configuration reaches a channel as untyped strings, so this is the only place that
+            // knows which of them was not a number.
+            throw std::runtime_error("Redis: " + key + " must be a number of milliseconds, got \"" +
+                                     it->second + "\"");
+        }
+        return std::min(high, std::max(low, value));
     }
 
 }
@@ -62,7 +72,14 @@ FMI::Comm::Redis::Redis(std::map<std::string, std::string> params, std::map<std:
 }
 
 FMI::Comm::Redis::~Redis() {
-    drop_connection();
+    // drop_connection copies the context's error text into a std::string, which allocates, and a
+    // destructor is implicitly noexcept: an allocation failure escaping here would not be a failed
+    // teardown, it would be std::terminate. There is nothing left to do about it at this point but
+    // let the connection go.
+    try {
+        drop_connection();
+    } catch (...) {
+    }
 }
 
 void FMI::Comm::Redis::connect() {
@@ -240,8 +257,9 @@ void FMI::Comm::Redis::upload_object(channel_data buf, std::string name) {
 
     // SET ... EX: recovered jobs never delete what they wrote (see
     // RecoverableClientServer::finalize), so the store is what eventually reclaims it. A ttl of 0
-    // means "keep it", which is also the only spelling Redis rejects outright, so it drops the
-    // two extra arguments instead.
+    // is also the only spelling Redis rejects outright, so it drops the two extra arguments and
+    // the object is kept forever — which, with nothing deleting, means leaked forever. The
+    // constructor says so out loud when a recovered channel is configured that way.
     const std::string ttl = std::to_string(object_ttl_s);
     const char* argv[] = {"SET", name.c_str(), buf.buf, "EX", ttl.c_str()};
     const std::size_t argvlen[] = {sizeof("SET") - 1, name.size(), buf.len, sizeof("EX") - 1, ttl.size()};

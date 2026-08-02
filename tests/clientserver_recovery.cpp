@@ -976,10 +976,13 @@ BOOST_AUTO_TEST_CASE(unreachable_store_gives_up_within_its_poll_budget) {
 //! However an operation ends, its counter has advanced exactly once.
 /*!
  * The counters name the objects of the next operation of the same kind, so a rank that gave up and
- * a rank that did not must still agree on which generation comes next. reduce and scan used to
- * advance theirs after their poll loop, which the Timeout path never reaches — so a timed-out root
- * went on to reuse the name of the reduce it had just abandoned. Timeout remains terminal for the
- * communicator; this is about the counter being in one place rather than two.
+ * a rank that did not must still agree on which generation comes next. scan advanced its own after
+ * the Timeout check, which the giving-up path never reaches, so a timed-out rank went on to rewrite
+ * the generation it had just abandoned; reduce's sat between the poll loop and that check, where
+ * any exception out of a download stepped over it instead. Both are now where barrier's always was,
+ * and this case holds all three of them to the same rule rather than to the route each took to
+ * break it. Timeout remains terminal for the communicator; this is about the counter being in one
+ * place rather than two.
  */
 BOOST_AUTO_TEST_CASE(timeout_leaves_every_counter_advanced_once) {
     const std::string comm_name = unique_comm_name("counters");

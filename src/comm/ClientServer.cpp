@@ -93,9 +93,11 @@ void FMI::Comm::ClientServer::upload(channel_data buf, std::string name) {
 
 void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf, FMI::Utils::peer_num root, raw_function f) {
     // Capture and advance once, at entry, as barrier() does: the counter names this operation's
-    // objects, so it must be read once and be the same on every path out. Advancing it after the
-    // poll loop left it untouched whenever that loop ended in a Timeout, so a root that gave up
-    // and a peer that uploaded disagreed about the generation from then on.
+    // objects, so it must be read once and land in the same place whatever way this call ends.
+    // The root advanced it after the poll loop, which an exception out of download_object skips
+    // over — a lost connection with the flag off is exactly that — leaving the next reduce to
+    // write the generation this one had already published. (A Timeout alone did advance it here:
+    // the increment sat before that check. scan's sat after it; see there.)
     auto operation_num = num_operations["reduce"];
     num_operations["reduce"]++;
     if (peer_id == root) {
@@ -145,7 +147,8 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
 void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, raw_function f) {
     // As in reduce(): one read, one advance, at entry. The upload below and the downloads in the
     // poll loop must name the same generation, and the counter must land in the same place whether
-    // this call returns or throws.
+    // this call returns or throws. This one advanced after the Timeout check, so a scan that gave
+    // up left the counter where it was and the next one rewrote the generation it had abandoned.
     auto operation_num = num_operations["scan"];
     num_operations["scan"]++;
     if (peer_id != num_peers - 1) {
