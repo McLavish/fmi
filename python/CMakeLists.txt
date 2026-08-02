@@ -24,7 +24,7 @@ endif()
 set(CMAKE_SHARED_MODULE_PREFIX "")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-add_library(fmi MODULE fmi_python.cpp PythonCommunicator.cpp PythonFT.cpp)
+add_library(fmi MODULE fmi_python.cpp PythonCommunicator.cpp)
 
 target_include_directories(fmi PRIVATE ${Python3_INCLUDE_DIRS} ${FMI_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
 

@@ -1,5 +1,0 @@
-if(FMI_ENABLE_CRIU)
-    add_executable(fmi_rank_agent rank_agent.cpp)
-    set_target_properties(fmi_rank_agent PROPERTIES OUTPUT_NAME "fmi-rank-agent")
-    target_link_libraries(fmi_rank_agent FMI)
-endif()

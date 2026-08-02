@@ -4,7 +4,6 @@
 #include <Communicator.h>
 #include <comm/Data.h>
 #include "PythonCommunicator.h"
-#include "PythonFT.h"
 
 using namespace boost::python;
 
@@ -23,22 +22,6 @@ BOOST_PYTHON_MODULE(fmi)
         .def("allreduce", &FMI::Utils::PythonCommunicator::allreduce)
         .def("scan", &FMI::Utils::PythonCommunicator::scan)
         .def("hint", &FMI::Utils::PythonCommunicator::hint)
-    ;
-
-    class_<FMI::Utils::PythonRankDirectoryEntry>("RankDirectoryEntry")
-        .def_readonly("rank", &FMI::Utils::PythonRankDirectoryEntry::rank)
-        .def_readonly("worker_id", &FMI::Utils::PythonRankDirectoryEntry::worker_id)
-        .def_readonly("placement", &FMI::Utils::PythonRankDirectoryEntry::placement)
-        .def_readonly("state", &FMI::Utils::PythonRankDirectoryEntry::state)
-    ;
-
-    class_<FMI::Utils::PythonFTControlPlane>("FTControlPlane", init<std::string, std::string, FMI::Utils::peer_num>())
-        .def("request_migration", &FMI::Utils::PythonFTControlPlane::request_migration)
-        .def("promote_epoch", &FMI::Utils::PythonFTControlPlane::promote_epoch)
-        .def("clear_job_state", &FMI::Utils::PythonFTControlPlane::clear_job_state)
-        .def("epoch", &FMI::Utils::PythonFTControlPlane::epoch)
-        .def("placement_for_rank", &FMI::Utils::PythonFTControlPlane::placement_for_rank)
-        .def("directory_snapshot", &FMI::Utils::PythonFTControlPlane::directory_snapshot)
     ;
 
     enum_<FMI::Utils::PythonType>("datatypes")
