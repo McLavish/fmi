@@ -24,7 +24,6 @@ if (hasParent)
 endif()
 
 find_package(Boost COMPONENTS log REQUIRED)
-find_package(ZLIB REQUIRED)
 
 if(NOT FMI_USE_STATIC_BOOST)
     add_compile_definitions(BOOST_LOG_DYN_LINK BOOST_ALL_DYN_LINK)
