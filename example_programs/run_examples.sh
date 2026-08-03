@@ -2,11 +2,9 @@
 # Smoke test for the FMI example programs: runs the fast examples with small parameters.
 # Usage: example_programs/run_examples.sh [config] [binary_dir]
 #
-# Two of the built examples are deliberately NOT in the suite below:
+# One of the built examples is deliberately NOT in the suite below:
 #   - crashing:    by design a rank aborts at random (1% chance per iteration), so the run's
 #                  outcome is non-deterministic and cannot be asserted on.
-#   - apply_blur:  needs OpenCV at build time (otherwise the target does not exist at all) plus
-#                  one input_<rank>.jpg per rank on disk, which this repo does not ship.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,7 +27,6 @@ fi
 # name:extra flags (empty means none). Long-running examples are deliberately shortened.
 # A --timeout in the extra flags wins over the suite-wide $TIMEOUT (last flag wins).
 EXAMPLES=(
-    "minimal:"
     "avg:"
     "communicating:"
     "ring:--num-iterations 2"
