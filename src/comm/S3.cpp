@@ -56,6 +56,61 @@ namespace {
         });
     }
 
+    //! What a failed S3 request means to a caller that can only ask again or give up.
+    enum class Failure {
+        absent,     //!< No such object. To a poll loop that is "not yet", and it is the hot path.
+        no_bucket,  //!< The container itself is not there.
+        refused,    //!< Rejected for who is asking, not for what was asked.
+        transient   //!< 5xx, throttling, a broken connection: the same request may work later.
+    };
+
+    //! Classify by HTTP status and exception name, never by the SDK's error enum alone.
+    /*!
+     * Measured against aws-sdk-cpp 1.11.861: an expired session token arrives as error type 100
+     * (CoreErrors::UNKNOWN) with HTTP 400 and the message "Unable to parse ExceptionName:
+     * ExpiredToken". The SDK has no enumerator for it, so a switch over GetErrorType() would file
+     * one of the likeliest failures a checkpointed rank meets — a session token that expired while
+     * the process was frozen — under "unknown, worth retrying", and the job would poll until its
+     * budget ran out and then report a timeout. What the service actually said survives in the
+     * exception name (AWSErrorMarshaller.cpp:247 keeps it even when it cannot map it) and in the
+     * status code, and those do not move between SDK versions.
+     *
+     * THE 403-VS-404 TRAP: S3 answers a GET for a key that does not exist with 403 AccessDenied,
+     * not 404 NoSuchKey, when the caller has no s3:ListBucket permission on the bucket — the point
+     * of that behaviour being not to leak whether the key exists, so there is nothing in the
+     * response to tell the two apart. A job whose role grants only GetObject and PutObject
+     * therefore sees every not-yet-written object as a refusal, which under recover is a throw on
+     * the first poll of the first collective rather than a wait. Grant s3:ListBucket on the bucket
+     * to the role the ranks run as.
+     */
+    Failure classify(const Aws::S3::S3Error& error) {
+        const int status = static_cast<int>(error.GetResponseCode());
+        const Aws::String& exception = error.GetExceptionName();
+        if (exception == "NoSuchBucket") {
+            // Also a 404, so it has to be recognised before absence is.
+            return Failure::no_bucket;
+        }
+        if (status == 404 || exception == "NoSuchKey") {
+            return Failure::absent;
+        }
+        if (status == 401 || status == 403) {
+            return Failure::refused;
+        }
+        if (status == 400) {
+            // 400 is otherwise the SDK's catch-all for a request the service would not take, so
+            // only these names promote it to a refusal. ExpiredToken is the one that matters after
+            // a long freeze; the rest are the same class of "this rank cannot authenticate".
+            for (const char* refusal : {"AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch",
+                                        "ExpiredToken", "InvalidToken", "TokenRefreshRequired",
+                                        "RequestTimeTooSkewed"}) {
+                if (exception == refusal) {
+                    return Failure::refused;
+                }
+            }
+        }
+        return Failure::transient;
+    }
+
     //! A required configuration value, or an error naming the key.
     std::string required(const std::map<std::string, std::string>& params, const std::string& key) {
         auto it = params.find(key);
@@ -151,6 +206,8 @@ FMI::Comm::S3::S3(std::map<std::string, std::string> params, std::map<std::strin
     // attempt dials a fresh TCP and TLS session by itself.
     const long max_attempts = numeric_param(params, "max_attempts", 4, 1, 100);
     config.retryStrategy = Aws::MakeShared<Aws::Client::StandardRetryStrategy>(TAG, max_attempts);
+    transient_failure_limit = static_cast<unsigned int>(
+            numeric_param(params, "transient_failure_limit", 200, 1, 1000000));
 
     // LocalStack, MinIO and any other S3-compatible endpoint. The scheme has to be set alongside
     // the override because the configuration carries it separately and defaults to HTTPS, which a
@@ -202,19 +259,125 @@ FMI::Comm::S3::S3(std::map<std::string, std::string> params, std::map<std::strin
 //! Drops this channel's client. The SDK itself stays up; see initialise_sdk_once.
 FMI::Comm::S3::~S3() = default;
 
+std::string FMI::Comm::S3::describe(const Aws::S3::S3Error& error, const std::string& name) const {
+    const Aws::String& exception = error.GetExceptionName();
+    return "bucket " + bucket_name + ", key " + name + ", HTTP " +
+           std::to_string(static_cast<int>(error.GetResponseCode())) + ", " +
+           (exception.empty() ? std::string("no exception name") : std::string(exception.c_str())) +
+           ": " + std::string(error.GetMessage().c_str());
+}
+
+//! Say what a failed download was, and decide whether the caller may keep waiting for it.
+/*!
+ * The whole point of the classification is that "the object is not there yet" and "this rank
+ * cannot talk to S3" arrive here identically today — both as a false, both indistinguishable from
+ * a peer being slow — and the caller's only reaction to a false is to poll again until its budget
+ * runs out. So a job with expired credentials spends its entire max_timeout before reporting a
+ * timeout on the wrong rank, and one pointed at a bucket that does not exist does the same.
+ *
+ * A refusal is therefore raised under recover, where the flag promises that a failure the store
+ * has already given a reason for is not waited out. With the flag off nothing may change shape —
+ * the callers have no handler — so it stays a false, plus a log line the first time.
+ */
+bool FMI::Comm::S3::report_download_failure(const Aws::S3::S3Error& error, const std::string& name) {
+    switch (classify(error)) {
+        case Failure::absent:
+            // The hot path: one of these per rank per poll interval for as long as a peer is late.
+            // Nothing is built and nothing is logged. The store answering at all is also what says
+            // the connection is fine, so the transient count starts over.
+            consecutive_transient_failures = 0;
+            transient_warned = false;
+            refusal_warned = false;
+            return false;
+        case Failure::no_bucket: {
+            const std::string what = "S3: no such bucket (" + describe(error, name) + ")";
+            if (recover) {
+                throw Utils::BackendFailure(what);
+            }
+            if (!refusal_warned) {
+                refusal_warned = true;
+                BOOST_LOG_TRIVIAL(error) << what << " (waiting out the poll budget)";
+            }
+            return false;
+        }
+        case Failure::refused: {
+            const std::string what = "S3: request refused (" + describe(error, name) +
+                                     "); credentials or bucket policy — and note that without "
+                                     "s3:ListBucket a missing key is answered 403, not 404";
+            if (recover) {
+                throw Utils::BackendFailure(what);
+            }
+            if (!refusal_warned) {
+                refusal_warned = true;
+                BOOST_LOG_TRIVIAL(error) << what << " (waiting out the poll budget)";
+            }
+            return false;
+        }
+        case Failure::transient:
+            consecutive_transient_failures++;
+            if (recover && consecutive_transient_failures > transient_failure_limit) {
+                // Deliberately far above what any poll budget spends: each of these is a request
+                // the SDK has already retried and backed off on, so reaching the limit means
+                // minutes of a store that is reachable and not working. Redis's download never
+                // throws for a connection reason because a poll there costs a millisecond and the
+                // budget is a fine failure detector; here a poll costs a request, a round trip and
+                // money, and a budget wide enough to survive a checkpoint is wide enough to spend
+                // an hour on a bucket that will not answer.
+                throw Utils::BackendFailure("S3: " + std::to_string(consecutive_transient_failures) +
+                                            " failed requests in a row (" + describe(error, name) + ")");
+            }
+            if (!transient_warned) {
+                transient_warned = true;
+                BOOST_LOG_TRIVIAL(warning) << "S3: request failed (" << describe(error, name)
+                                           << "), retrying while the poll budget lasts";
+            }
+            return false;
+    }
+    return false;
+}
+
 bool FMI::Comm::S3::download_object(channel_data buf, std::string name) {
     Aws::S3::Model::GetObjectRequest request;
     request.WithBucket(bucket_name).WithKey(name);
     auto outcome = client->GetObject(request);
-    if (outcome.IsSuccess()) {
-        auto& s = outcome.GetResult().GetBody();
-        s.read(buf.buf, buf.len);
-        return true;
-    } else {
-        return false;
+    if (!outcome.IsSuccess()) {
+        return report_download_failure(outcome.GetError(), name);
     }
+    consecutive_transient_failures = 0;
+    transient_warned = false;
+    refusal_warned = false;
+
+    auto& body = outcome.GetResult().GetBody();
+    body.read(buf.buf, buf.len);
+    if (recover) {
+        // A PutObject is atomic — an object exists whole or not at all — so a body that is not the
+        // length the reader expects is never a half-written value. It is two ranks disagreeing
+        // about the message size, or two jobs sharing a key, and the flag-off behaviour (copy what
+        // there is, report a complete read) leaves the rest of the buffer as whatever it was and
+        // tells nobody. Both directions are checked: a short object shows up in gcount, a longer
+        // one only in the length the service reported, because the read stops at the buffer.
+        const std::streamsize got = body.gcount();
+        const long long stored = outcome.GetResult().GetContentLength();
+        if (got != static_cast<std::streamsize>(buf.len) ||
+            (stored > 0 && stored != static_cast<long long>(buf.len))) {
+            throw Utils::BackendFailure("S3: object is " + std::to_string(stored) + " bytes (" +
+                                        std::to_string(got) + " read), expected " +
+                                        std::to_string(buf.len) + " — bucket " + bucket_name +
+                                        ", key " + name);
+        }
+    }
+    return true;
 }
 
+//! Write one object. Under recover this call carries a delivery obligation.
+/*!
+ * The peer that will read this object has no other way of learning that it was written, and its
+ * only reaction to an absent object is to poll until its budget runs out. Logging the failure and
+ * returning — which is what happens with the flag off, and what the S3 channel has always done —
+ * therefore surfaces as an unexplained Timeout, on a different rank, a minute later. Under recover
+ * the failure is raised here, where the reason is known, after the SDK has already spent its
+ * retries on it.
+ */
 void FMI::Comm::S3::upload_object(channel_data buf, std::string name) {
     Aws::S3::Model::PutObjectRequest request;
     request.WithBucket(bucket_name).WithKey(name);
@@ -223,9 +386,17 @@ void FMI::Comm::S3::upload_object(channel_data buf, std::string name) {
 
     request.SetBody(data);
     auto outcome = client->PutObject(request);
-    if (!outcome.IsSuccess()) {
-        BOOST_LOG_TRIVIAL(error) << "Error when uploading to S3: " << outcome.GetError();
+    if (outcome.IsSuccess()) {
+        consecutive_transient_failures = 0;
+        transient_warned = false;
+        refusal_warned = false;
+        return;
     }
+    if (!recover) {
+        BOOST_LOG_TRIVIAL(error) << "Error when uploading to S3: " << outcome.GetError();
+        return;
+    }
+    throw Utils::BackendFailure("S3: could not write object (" + describe(outcome.GetError(), name) + ")");
 }
 
 void FMI::Comm::S3::delete_object(std::string name) {
