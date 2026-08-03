@@ -84,6 +84,56 @@ def _redis_delete_pattern(host, port, pattern):
                    shell=True, capture_output=True)
 
 
+def _s3_keys(base, bucket, prefix):
+    """Every key under prefix, or [] if the store could not be asked."""
+    listing = subprocess.run(
+        base + ["s3api", "list-objects-v2", "--bucket", str(bucket), "--prefix", prefix,
+                "--output", "json", "--query", "Contents[].Key"],
+        capture_output=True, text=True)
+    if listing.returncode != 0:
+        return []
+    try:
+        return json.loads(listing.stdout or "null") or []
+    except ValueError:
+        return []
+
+
+def _s3_command(params):
+    """The aws invocation prefix for this plane, endpoint override included."""
+    base = ["aws"]
+    endpoint = params.get("endpoint_url")
+    if endpoint:
+        base += ["--endpoint-url", str(endpoint)]
+    return base
+
+
+def _s3_remove(params, prefix):
+    """Delete every object whose key starts with prefix, in batches, at the configured endpoint.
+
+    Not `aws s3 rm --recursive`, which is what this used to be and which deleted NOTHING:
+    those commands treat the path as a directory and only match keys below it, so a prefix
+    that is not a path segment -- and these keys have no slash in them at all -- matches
+    nothing at all. Measured: a six-trial sweep left 36528 objects behind while reporting a
+    clean run. s3api works on keys, which is what the channel writes.
+
+    --endpoint-url matters more than it looks: without it every cleanup goes to real AWS even
+    when the ranks were talking to MinIO or LocalStack, which is a request to the wrong store
+    with the wrong credentials, and on a machine with a live AWS session a deletion in a bucket
+    that has nothing to do with this run.
+    """
+    bucket = params.get("bucket_name")
+    if not bucket:
+        return
+    base = _s3_command(params)
+    keys = _s3_keys(base, bucket, prefix)
+    # A thousand per request is the DeleteObjects limit, and the same batch size the channel
+    # itself uses at finalize.
+    for start in range(0, len(keys), 1000):
+        payload = {"Objects": [{"Key": k} for k in keys[start:start + 1000]], "Quiet": True}
+        subprocess.run(base + ["s3api", "delete-objects", "--bucket", str(bucket),
+                               "--delete", json.dumps(payload)], capture_output=True)
+
+
 def clean_comm(comm):
     """Remove what a job under this name left in the data plane. Safe to call before it runs."""
     name, params = PLANE
@@ -107,8 +157,7 @@ def clean_comm(comm):
         # trial's whole message history stays in the bucket until the lifecycle rule or this
         # line removes it. The cost guard in main() is what stands in front of a sweep large
         # enough for that to matter.
-        subprocess.run(["aws", "s3", "rm", f"s3://{params.get('bucket_name')}/{comm}",
-                        "--recursive", "--only-show-errors"], capture_output=True)
+        _s3_remove(params, comm)
 
 
 def clean_run(prefix):
@@ -118,8 +167,16 @@ def clean_run(prefix):
         _redis_delete_pattern(params.get("host", "127.0.0.1"), params.get("port", 6379),
                               f"{prefix}*")
     elif name == "S3":
-        subprocess.run(["aws", "s3", "rm", f"s3://{params.get('bucket_name')}/{prefix}",
-                        "--recursive", "--only-show-errors"], capture_output=True)
+        _s3_remove(params, prefix)
+        # Say so when the bucket is not empty of this run afterwards. Under recover nothing a
+        # rank writes is ever deleted by the job itself, so whatever is left here is billed
+        # until the lifecycle rule reaches it -- and a cleanup that silently removes nothing is
+        # exactly the bug this line was added for.
+        left = _s3_keys(_s3_command(params), params.get("bucket_name"), prefix)
+        if left:
+            print(f"warning: {len(left)} objects under {prefix} are still in "
+                  f"s3://{params.get('bucket_name')}; the bucket lifecycle rule is what "
+                  f"removes them now", file=sys.stderr)
 
 
 def s3_cost_guard(args, confirmed):
