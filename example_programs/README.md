@@ -1,14 +1,15 @@
 # FMI example programs
 
-Standalone, locally runnable ports of the FMI example applications that live in GapRunner
-(`/home/luca/GapRunner/functions/cpp`) as rFaaS functions. GapRunner runs each function on a
-remote rFaaS executor and validates the results in a central driver; here the same functions
-run as forked local processes, one per rank, driven by a small shared harness
-(`common/harness.hpp`) that keeps the GapRunner hook contract
-(`get_context` / `free_context` / `initialize_input` / `check_output`) intact.
+Standalone, locally runnable FMI applications. Each example is one self-contained `.cpp` file
+that builds into its own executable, links directly against FMI, and does exactly what an
+ordinary FMI program does: `main()` parses its command line, constructs an `FMI::Communicator`
+for one rank, runs an algorithm, checks its own result and exits.
 
-Each example is a single self-contained executable: no rFaaS, no cereal, no gRPC — just the
-FMI library plus the harness.
+The kernels are ports of the FMI example applications that live in GapRunner
+(`/home/luca/GapRunner/functions/cpp`) as rFaaS functions, but nothing of that execution model
+survives here: no rFaaS, no cereal, no gRPC, no hook contract and no central driver — just FMI
+plus a small shared header (`common/launcher.hpp`) for flag parsing, local multi-rank launching
+and the teardown handshake.
 
 ## Prerequisites
 
@@ -22,9 +23,6 @@ FMI library plus the harness.
   ./extern/TCPunch/server/build/tcpunchd 10000
   ```
 
-- **OpenCV** (`core`, `imgproc`, `imgcodecs`) only for `apply_blur`; without it that target is
-  silently skipped.
-
 ## Building
 
 ```bash
@@ -37,6 +35,53 @@ cmake --build build-examples -j"$(nproc)"
 Binaries land in `build-examples/example_programs/<name>` (CMake target
 `fmi_example_<name>`). Run them from the repository root so the default config path resolves.
 
+## Program structure
+
+Every example follows the same shape. Abridged from `ring.cpp`:
+
+```cpp
+int main(int argc, char **argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);      // line-buffered, so rank output interleaves readably
+
+    fmi_examples::Flags flags;                     // declare the example-specific flags first
+    flags.add_int("num-iterations", 1, "Number of ring iterations");
+
+    fmi_examples::Options opts;
+    int exit_code = 0;
+    if (!fmi_examples::parse_cli(argc, argv, "ring", flags, opts, exit_code)) {
+        return exit_code;                          // --help prints usage (0), a usage error exits 2
+    }
+
+    if (opts.ranks < 2) {                          // example-specific guards, before anything forks
+        std::cerr << "ring requires at least 2 ranks (rank 0 sends to peer 1)" << std::endl;
+        return 2;
+    }
+
+    if (!opts.single_rank()) {                     // no --rank given: be the launcher, not a rank
+        return fmi_examples::spawn_local(argc, argv, opts);
+    }
+
+    bool ok = true;                                // from here on this process is exactly one rank
+    try {
+        FMI::Communicator comm(opts.rank, opts.ranks, fmi_examples::config_path(),
+                               fmi_examples::comm_name(), fmi_examples::faas_memory());
+        /* ... the algorithm ... */
+        ok = compare(opts.rank, "last_recvd", expected, got);   // in-rank self-check
+        fmi_examples::teardown_sync(comm, opts);   // barrier + grace, Communicator still alive
+    } catch (const std::exception &e) { /* rank R crashed: ... */ ok = false; }
+      catch (const std::string &s)    { /* TCPunch throws bare strings */ ok = false; }
+      catch (...)                     { ok = false; }
+
+    std::cout << "rank " << opts.rank << ": " << (ok ? "PASS" : "FAIL") << std::endl;
+    return ok ? 0 : 1;
+}
+```
+
+The order matters and is the same everywhere: parse, then guards, then either launch or run,
+and the rank body always ends with `teardown_sync` inside the `Communicator`'s scope. Result
+checking is in-rank, using `compare(...)` from `common/util.hpp` (`ok &= compare(...)` when an
+example checks several fields).
+
 ## Examples
 
 Extra flags are example-specific; the defaults below are the ones GapRunner used. All
@@ -44,8 +89,7 @@ examples additionally accept the common flags listed further down.
 
 | Example | What it demonstrates | Extra flags (defaults) |
 | --- | --- | --- |
-| `minimal` | Pure compute, no FMI calls — proves the harness itself | – |
-| `avg` | `scatter` + `reduce` of random numbers, global average | – (seed 42, 1000 elements per rank) |
+| `avg` | `scatter` + `gather` of random numbers, global average | – (seed 42, 1000 elements per rank) |
 | `communicating` | Full collective sweep: ring `send`/`recv`, `bcast`, `gather`, `scatter`, `reduce`, `allreduce`, `scan` | – |
 | `crashing` | Random rank failure (1% per iteration) during repeated `allreduce` | `--num-iterations` (1000) |
 | `ring` | Repeated ring `send`/`recv` around all ranks | `--num-iterations` (1) |
@@ -57,21 +101,26 @@ examples additionally accept the common flags listed further down.
 | `long_communicating_checkpoint` | Long `allreduce` loop that validates every iteration | `--num-iterations` (1000) |
 | `fixed_size_ckpt_comm` | Fixed-size resident payload plus a long `allreduce` loop | `--size-mb` (0), `--num-all-reduces` (1000000) |
 | `fixed_size_ckpt_sleep` | Fixed-size resident payload plus a long sleep | `--size-mb` (0), `--sleep-minutes` (10) |
-| `apply_blur` | OpenCV Gaussian blur per rank (needs OpenCV + per-rank input JPGs) | `--input-dir` (`example_programs/apply_blur_inputs`), `--output-dir` (`example_programs/apply_blur_outputs`) |
 
 ### Rank-count restrictions
 
-Examples that cannot run at an arbitrary `--ranks` reject the value up front, before any rank is
-forked, with a message naming the constraint:
+Examples that cannot run at an arbitrary `--ranks` reject the value up front — after parsing but
+before any rank is launched — with a message naming the constraint and exit code `2`. The same
+guard also rejects an explicit `--rank` process, so a cross-machine run cannot slip past it.
 
-- `jacobi` only accepts rank counts that tile the 200x200 grid into tiles of at most 10000
-  doubles: 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 64. Other counts (including 1, 2 and 3) abort
-  with a message listing the supported values.
+- `jacobi` needs a rank count that factorises into `h * w` with both factors dividing the 200x200
+  grid: 1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 64. Other counts (3, 6, 7, …) abort with the
+  supported list. Tiles are heap vectors, so 1 and 2 ranks are supported.
 - `communicating` and `ring` need at least 2 ranks: their ring phase sends to a hardcoded peer 1,
-  which does not exist in a single-rank communicator.
+  which does not exist in a single-rank communicator. Neither has an upper bound beyond the
+  launcher's `--ranks` cap of 64.
 - `mixed_workload` needs an **even** rank count of at least 2: it pairs rank `i` with rank
-  `comm_size-1-i`, so an odd count would make the middle rank its own peer.
-- `communicating` also caps out at 50 ranks (its output buffer holds `2 * ranks` ints).
+  `comm_size-1-i`, so an odd count would make the middle rank its own peer. It also requires
+  `0 <= --sleep-min <= --sleep-max`.
+- `mantevo_hpccg` requires `--nx`, `--ny`, `--nz` and `--max-iter` to be at least 1, and rejects
+  sizes whose row or nonzero counts would overflow an `int`.
+- `avg`, `crashing`, `checkpoint_workload`, `long_communicating_checkpoint` and the
+  `fixed_size_ckpt_*` pair run at any rank count from 1 up.
 
 `npb_ep` requires `--m` greater than 16 (`MK`) and rejects smaller values up front; reference sums
 exist only for 24, 25, 28, 30, 32, 36 and 40, so `--m 24` is the cheapest value that still
@@ -88,17 +137,19 @@ their GapRunner defaults — always pass smaller values (and `--timeout`) for a 
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--ranks N` | 4 | Number of ranks to fork (hard cap 64) |
-| `--rank I` | – | Run only rank `I` in this process, no fork (cross-machine mode) |
+| `--ranks N` | 4 | Number of ranks to launch (hard cap 64) |
+| `--rank I` | – | Run only rank `I` in this process, no launcher (cross-machine mode) |
 | `--config PATH` | `example_programs/config/fmi_examples.json` | FMI JSON config |
 | `--comm-name NAME` | `<example>-<hex>` | FMI communicator name, must agree across ranks |
-| `--timeout SECONDS` | 180 | Wall-clock limit for the rank processes |
+| `--timeout SECONDS` | 180 | Wall-clock limit the launcher gives the rank processes |
 | `--memory MIB` | 128 | `faas_memory` hint, passed to every example's `Communicator`; it scales the cost model's price-per-latency term and can flip which backend an operation uses |
-| `--teardown-grace MS` | 1000 | In `--rank` mode only: hold channels open this long before teardown (see below) |
+| `--teardown-grace MS` | 1000 | How long each rank holds its channels open after the final barrier (see below); `0` disables |
 | `--help` | – | Usage |
 
-Values can be written `--flag value` or `--flag=value`. Exit code is `0` on success, `1` when
-a rank or a check failed, `2` on a usage error.
+Values can be written `--flag value` or `--flag=value`, and parsing is last-wins. Declaring an
+example flag that collides with one of these names is rejected at startup. Exit code is `0` on
+success (or `--help`), `1` when a rank failed, crashed, timed out or was signalled, `2` on a
+usage error or a failed example-specific guard.
 
 ## Multi-rank local run
 
@@ -107,11 +158,17 @@ a rank or a check failed, `2` on a usage error.
   --config example_programs/config/fmi_examples_redis.json
 ```
 
-The harness allocates shared (`mmap`) input/output buffers, initializes every rank's input in
-the parent, forks one child per rank, waits for all of them (killing stragglers at the
-timeout), then validates every rank's output **in the parent** — some examples share mutable
-validation context across ranks, so validation has to happen in one process. Output ends with
-per-rank status lines and `EXAMPLE <name>: PASS|FAIL`.
+Without `--rank`, the process becomes a launcher rather than a rank: it re-execs
+`/proc/self/exe` once per rank with the original argv plus `--rank I --comm-name <name>`
+appended, then polls for the children until they all exit or the `--timeout` deadline passes, at
+which point survivors are `SIGKILL`ed and reaped. Because the child command line carries
+`--rank`, a child always takes the single-rank path — children can never launch further ranks.
+
+Each child prints its own progress (`rank <R>: ...`) and ends with `rank <R>: PASS` or
+`rank <R>: FAIL`; a crash inside a rank prints `rank <R> crashed: <detail>` first. The launcher
+then prints one wait-status line per rank — `rank <i>: exit=<C>`, `rank <i>: signal=<S>` or
+`rank <i>: TIMEOUT (killed)` — and the verdict `EXAMPLE <name>: PASS|FAIL`. It exits `0` only if
+every rank exited `0`.
 
 ## Single-rank / cross-machine run
 
@@ -127,9 +184,13 @@ Start one process per rank, each with the same `--ranks`, the same `--comm-name`
   --config example_programs/config/fmi_examples_redis.json
 ```
 
-In this mode the harness does not fork and validation is best effort: only the local rank's
-output is checked (checks that need other ranks' buffers will report `FAIL` even when the run
-is fine).
+There is no launcher and no fork in this mode, and nothing is lost by it: validation is in-rank
+either way, so each process checks its own results exactly as it would as a forked child, and its
+exit code is the rank's verdict. The one example to know about is `avg`: it is the only one whose
+global check is rank-conditional. Rank 0 compares the average of the gathered per-rank averages
+against the average over the array it scattered, so that end-to-end verdict lives on rank 0 while
+the other ranks only report that their own part did not fail. Everywhere else — including
+`communicating`, `jacobi`, `npb_ep` and `mantevo_hpccg` — every rank checks its own result.
 
 ## Configs
 
@@ -162,11 +223,10 @@ Runs the fast examples with small parameters, prints a per-example summary and e
 if anything failed. `RANKS` (default 4) and `TIMEOUT` (default 120 s, overridden per example
 where needed) can be set in the environment.
 
-Two built examples are deliberately excluded from the suite: `crashing`, because a rank aborts
-at random by design and the outcome is therefore non-deterministic, and `apply_blur`, because it
-needs OpenCV at build time plus one `input_<rank>.jpg` per rank on disk. Run those by hand.
+One built example is deliberately excluded from the suite: `crashing`, because a rank aborts at
+random by design and the outcome is therefore non-deterministic. Run it by hand.
 
-## Why every example ends with `fmi_examples::rank_barrier()`
+## Teardown: why every example ends with `teardown_sync`
 
 `FMI::Comm::ClientServer::finalize()` (`src/comm/ClientServer.cpp`), called from
 `~Communicator`, deletes every object the peer uploaded. The Redis and S3 download path is a
@@ -176,18 +236,22 @@ after writing it, while the receiver polls at millisecond granularity — the re
 with `Timeout was reached`. For `ring` this is deterministic (the last rank's final act is a
 send to rank 0); for the collectives it shows up as intermittent failures.
 
-Every example that builds a `Communicator` therefore calls `fmi_examples::rank_barrier()` as its
-last statement, while the `Communicator` is still alive. It is *not* an FMI collective — in
-multi-rank mode it is a shared-memory barrier across the forked ranks, bounded by the `--timeout`
-deadline so a crashed peer can never hang the run. In `--rank` mode there is no shared memory, so
-it instead holds the channels open for `--teardown-grace` milliseconds.
+`fmi_examples::teardown_sync(comm, opts)` is therefore the last statement inside every
+`Communicator`'s scope, after validation. It does two things, and both are needed over
+`ClientServer`:
+
+1. **A final `comm.barrier()`**, so no rank starts tearing down before every peer has finished
+   its own operations.
+2. **A `--teardown-grace` sleep** (default 1000 ms) after that barrier. The barrier alone does
+   not quite close the window: `ClientServer`'s barrier uploads a per-peer marker object and
+   polls until it sees `num_peers` of them, so the *first* rank to observe the full count returns
+   and deletes its own marker in `finalize()` while slower peers are still counting markers. The
+   grace period covers exactly that race. Over `Direct` the barrier is a real rendezvous and the
+   grace is merely harmless.
+
+The barrier is best effort: it runs after validation, and a failure there prints
+`note: teardown barrier failed: ...` without failing a rank whose actual work succeeded.
 
 This is a workaround in the examples, not a fix: the underlying defect is in the core library and
 also causes flakiness in FMI's own test suite. Anything else built on top of `ClientServer` needs
 the same end-of-run synchronization.
-
-## apply_blur
-
-`apply_blur` needs OpenCV at build time and one input JPG per rank on disk. Place them where
-the ported `initialize_input` expects them (per-rank `input_<rank>.jpg`) and make sure the
-output directory exists; without OpenCV the target is not built at all.
