@@ -16,7 +16,8 @@ static uint32_t jacobi(void *args, uint32_t size, void *res) {
     int rank = input->function_id;
     int world_size = input->world_size;
 
-    FMI::Communicator comm(rank, world_size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(rank, world_size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
     // comm.barrier();
 
     output->function_id = rank;

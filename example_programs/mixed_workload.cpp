@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <iostream>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <thread>
 
 #include <Communicator.h>
@@ -22,7 +24,8 @@ static uint32_t mixed_workload(void *args, uint32_t, void *res) {
     out->all_ok = true;
     out->done_iterations = 0;
 
-    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
     // comm.barrier();
     std::cout << "Function " << rank << " established communicator" << std::endl;
 
@@ -89,6 +92,15 @@ int main(int argc, char **argv) {
     flags.add_int("sleep-max", 3, "Maximum sleep duration per phase, in seconds");
 
     return fmi_examples::run(argc, argv, "mixed_workload", flags, [](const fmi_examples::Options &opts) {
+        // The P2P phase pairs rank i with rank comm_size-1-i (the GapRunner pairing), so an odd
+        // rank count makes the middle rank its own peer: it would recv from itself before sending
+        // and every rank would then die on the 30s backend timeout. Fail fast instead.
+        if (opts.ranks < 2 || opts.ranks % 2 != 0) {
+            throw std::runtime_error("mixed_workload pairs rank i with rank comm_size-1-i, so it needs an even "
+                                     "rank count of at least 2 (got " +
+                                     std::to_string(opts.ranks) + ")");
+        }
+
         fmi_examples::ExampleSpec spec;
         spec.name = "mixed_workload";
         spec.input_size = sizeof(mixed_workload_input);

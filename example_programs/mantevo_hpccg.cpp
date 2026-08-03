@@ -979,7 +979,8 @@ static uint32_t mantevo_hpccg(void *args, uint32_t, void *res) {
     int size = input->size;
     int rank = input->rank;
 
-    FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
     // comm.barrier();
 
     generate_matrix(size, rank, nx, ny, nz, &A, &x, &b, &xexact);

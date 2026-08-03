@@ -57,6 +57,8 @@ Authors of the C++ code:
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <vector>
 #include <sys/time.h>
 
@@ -276,7 +278,8 @@ static uint32_t npb_ep(void *args, uint32_t, void *res) {
     double *x = new double[nk_plus];
     double q[NQ];
 
-    FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
     // comm.barrier();
 
     printf("\n\n NAS Parallel Benchmarks - EP Benchmark (FMI version)\n\n");
@@ -465,6 +468,14 @@ int main(int argc, char **argv) {
         spec.get_context = [] { return _npb_ep::get_context(); };
         spec.free_context = [](void *ctx) { _npb_ep::free_context(ctx); };
         int m = opts.flags.get_int("m");
+        // The ported kernel bails out with a diagnostic (and no output) when m <= MK, exactly like
+        // the NPB original. Since it returns rather than throws, the harness would score that as a
+        // clean exit and — for rank 0, whose zero-filled output happens to satisfy every check —
+        // report PASS for a benchmark that computed nothing. Reject the value up front instead.
+        if (m <= MK) {
+            throw std::runtime_error("npb_ep requires --m greater than " + std::to_string(MK) + " (MK); got " +
+                                     std::to_string(m));
+        }
         spec.initialize_input = [m](int func_num, int numcores, void *, char *ptr) {
             _npb_ep::fill_input(func_num, numcores, m, ptr);
         };

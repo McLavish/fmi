@@ -59,12 +59,27 @@ examples additionally accept the common flags listed further down.
 | `fixed_size_ckpt_sleep` | Fixed-size resident payload plus a long sleep | `--size-mb` (0), `--sleep-minutes` (10) |
 | `apply_blur` | OpenCV Gaussian blur per rank (needs OpenCV + per-rank input JPGs) | `--input-dir` (`example_programs/apply_blur_inputs`), `--output-dir` (`example_programs/apply_blur_outputs`) |
 
-`jacobi` only accepts rank counts that tile the 200x200 grid into tiles of at most 10000
-doubles: 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 64. Other counts (including 1, 2 and 3) abort
-during input initialization with a message listing the supported values.
+### Rank-count restrictions
 
-`npb_ep` requires `--m` greater than 16; reference sums exist only for 24, 25, 28, 30, 32, 36
-and 40, so `--m 24` is the cheapest value that still verifies its result.
+Examples that cannot run at an arbitrary `--ranks` reject the value up front, before any rank is
+forked, with a message naming the constraint:
+
+- `jacobi` only accepts rank counts that tile the 200x200 grid into tiles of at most 10000
+  doubles: 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 64. Other counts (including 1, 2 and 3) abort
+  with a message listing the supported values.
+- `communicating` and `ring` need at least 2 ranks: their ring phase sends to a hardcoded peer 1,
+  which does not exist in a single-rank communicator.
+- `mixed_workload` needs an **even** rank count of at least 2: it pairs rank `i` with rank
+  `comm_size-1-i`, so an odd count would make the middle rank its own peer.
+- `communicating` also caps out at 50 ranks (its output buffer holds `2 * ranks` ints).
+
+`npb_ep` requires `--m` greater than 16 (`MK`) and rejects smaller values up front; reference sums
+exist only for 24, 25, 28, 30, 32, 36 and 40, so `--m 24` is the cheapest value that still
+verifies its result. The kernel itself is cheap on this machine (`RelWithDebInfo`, 4 ranks:
+0.28 s at `--m 24`, 4.35 s at the `--m 28` default), but a run that involves the `Direct` backend
+can spend far longer in TCPunch rendezvous than in compute — the live-test lane saw `--m 24` on 4
+ranks over the mixed config need about `--timeout 360`. Pass a generous `--timeout` for any run
+that is not Redis-only; `run_examples.sh` already gives `npb_ep` `--timeout 360`.
 
 `fixed_size_ckpt_*`, `long_communicating_checkpoint` and `crashing` run for a long time with
 their GapRunner defaults — always pass smaller values (and `--timeout`) for a local smoke run.
@@ -78,7 +93,7 @@ their GapRunner defaults — always pass smaller values (and `--timeout`) for a 
 | `--config PATH` | `example_programs/config/fmi_examples.json` | FMI JSON config |
 | `--comm-name NAME` | `<example>-<hex>` | FMI communicator name, must agree across ranks |
 | `--timeout SECONDS` | 180 | Wall-clock limit for the rank processes |
-| `--memory MIB` | 128 | `faas_memory` hint for the FMI cost model |
+| `--memory MIB` | 128 | `faas_memory` hint, passed to every example's `Communicator`; it scales the cost model's price-per-latency term and can flip which backend an operation uses |
 | `--teardown-grace MS` | 1000 | In `--rank` mode only: hold channels open this long before teardown (see below) |
 | `--help` | – | Usage |
 
@@ -118,10 +133,23 @@ is fine).
 
 ## Configs
 
-- `config/fmi_examples.json` — Direct (127.0.0.1:10000) and Redis (127.0.0.1:6379) enabled,
-  S3 present but disabled, fault tolerance disabled. The cost model decides per operation.
+- `config/fmi_examples.json` (the built-in `--config` default) — Direct (127.0.0.1:10000) and
+  Redis (127.0.0.1:6379) enabled, S3 present but disabled, fault tolerance disabled. The cost
+  model decides per operation, and with the default hint (`cheap`) and `--memory 128` it picks
+  **Direct** for small point-to-point messages — so this config **needs both Redis and tcpunchd
+  on port 10000**. It does *not* fall back when a backend is unreachable: without tcpunchd,
+  `communicating`, `ring`, `jacobi`, `mantevo_hpccg` and `mixed_workload` fail with
+  `Connection with the rendezvous server failed`.
 - `config/fmi_examples_redis.json` — only Redis enabled (no tcpunchd needed).
 - `config/fmi_examples_direct.json` — only Direct enabled (needs tcpunchd on port 10000).
+
+### Direct backend flakiness
+
+TCPunch pairing occasionally fails to complete even with a healthy `tcpunchd` (a known trait of
+the library, also visible in FMI's own test suite). It shows up as a rank dying in channel setup,
+usually reported as a rendezvous or connection error. Rerun the example — the ported kernels
+themselves are unaffected once the transport is established. If a rerun keeps failing, restart
+`tcpunchd` before looking for a bug in the example.
 
 ## Smoke test
 
@@ -131,7 +159,12 @@ is fine).
 ```
 
 Runs the fast examples with small parameters, prints a per-example summary and exits nonzero
-if anything failed.
+if anything failed. `RANKS` (default 4) and `TIMEOUT` (default 120 s, overridden per example
+where needed) can be set in the environment.
+
+Two built examples are deliberately excluded from the suite: `crashing`, because a rank aborts
+at random by design and the outcome is therefore non-deterministic, and `apply_blur`, because it
+needs OpenCV at build time plus one `input_<rank>.jpg` per rank on disk. Run those by hand.
 
 ## Why every example ends with `fmi_examples::rank_barrier()`
 

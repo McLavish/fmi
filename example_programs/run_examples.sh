@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Smoke test for the FMI example programs: runs the fast examples with small parameters.
 # Usage: example_programs/run_examples.sh [config] [binary_dir]
-# Skeleton — the live-test phase refines the parameter sets.
+#
+# Two of the built examples are deliberately NOT in the suite below:
+#   - crashing:    by design a rank aborts at random (1% chance per iteration), so the run's
+#                  outcome is non-deterministic and cannot be asserted on.
+#   - apply_blur:  needs OpenCV at build time (otherwise the target does not exist at all) plus
+#                  one input_<rank>.jpg per rank on disk, which this repo does not ship.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,13 +27,18 @@ if [ ! -d "$BIN_DIR" ]; then
 fi
 
 # name:extra flags (empty means none). Long-running examples are deliberately shortened.
+# A --timeout in the extra flags wins over the suite-wide $TIMEOUT (last flag wins).
 EXAMPLES=(
     "minimal:"
     "avg:"
     "communicating:"
     "ring:--num-iterations 2"
     "jacobi:"
-    "npb_ep:--m 24"
+    # --m 24 is the cheapest value that still has reference sums to verify against. The kernel
+    # itself is fast (~0.3 s at 4 ranks), but this is the one example the live-test lane saw
+    # exceed the suite-wide cap when the Direct backend was in play, so give it a generous
+    # wall-clock cap: a slow TCPunch rendezvous should not be reported as a failed example.
+    "npb_ep:--m 24 --timeout 360"
     "mantevo_hpccg:--nx 16 --ny 16 --nz 16 --max-iter 20"
     "mixed_workload:--num-iterations 2 --sleep-min 0 --sleep-max 1"
     "checkpoint_workload:--num-iterations 2 --sleep-seconds 0 --num-collectives 2"

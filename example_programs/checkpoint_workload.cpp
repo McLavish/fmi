@@ -22,7 +22,8 @@ static uint32_t checkpoint_workload(void *args, uint32_t, void *res) {
     out->all_ok = true;
     out->done_iterations = 0;
 
-    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
     // comm.barrier();
     std::cout << "Function " << rank << " established communicator" << std::endl;
 

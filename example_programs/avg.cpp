@@ -47,7 +47,8 @@ static uint32_t avg(void *args, uint32_t size, void *res) {
     int num_elements_per_proc = input->num_elements_per_proc;
     output->function_id = world_rank;
 
-    FMI::Communicator comm(world_rank, world_size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(world_rank, world_size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
     // comm.barrier();
 
     // Create a random array of elements on the root process. Its total

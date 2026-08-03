@@ -413,6 +413,7 @@ namespace fmi_examples {
             opts.flags = declared;
 
             bool comm_name_given = false;
+            bool rank_given = false;
             for (int i = 1; i < argc; i++) {
                 std::string arg = argv[i];
                 if (arg == "--help" || arg == "-h") {
@@ -447,6 +448,7 @@ namespace fmi_examples {
                     opts.ranks = static_cast<int>(parse_integer(name, take_value()));
                 } else if (name == "--rank") {
                     opts.rank = static_cast<int>(parse_integer(name, take_value()));
+                    rank_given = true;
                 } else if (name == "--config") {
                     opts.config_path = take_value();
                 } else if (name == "--comm-name") {
@@ -471,7 +473,11 @@ namespace fmi_examples {
             if (opts.ranks > MAX_RANKS) {
                 throw std::runtime_error("--ranks must not exceed " + std::to_string(MAX_RANKS));
             }
-            if (opts.rank >= opts.ranks) {
+            // Both bounds matter: opts.rank defaults to -1 to mean "not given" (Options::single_rank()
+            // tests rank >= 0), so an explicitly supplied negative value would otherwise silently
+            // select multi-rank fork mode instead of failing as a usage error. rank_given keeps the
+            // unset default working while rejecting every explicit out-of-range value, -1 included.
+            if (rank_given && (opts.rank < 0 || opts.rank >= opts.ranks)) {
                 throw std::runtime_error("--rank must be in [0, " + std::to_string(opts.ranks) + ")");
             }
             if (opts.timeout_seconds < 1) {
@@ -543,6 +549,11 @@ namespace fmi_examples {
                 status = 0;
             } catch (const std::exception &e) {
                 std::cout << "Rank " << rank << " crashed: " << e.what() << std::endl;
+            } catch (const std::string &e) {
+                // TCPunch's error_exit (extern/TCPunch/common/utils.h) throws a bare std::string,
+                // so without this branch every Direct-backend rendezvous failure (e.g. no tcpunchd
+                // on port 10000) would be reported only as "unknown exception".
+                std::cout << "Rank " << rank << " crashed: " << e << std::endl;
             } catch (...) {
                 std::cout << "Rank " << rank << " crashed: unknown exception" << std::endl;
             }
@@ -686,6 +697,9 @@ namespace fmi_examples {
                 r.exit_code = 0;
             } catch (const std::exception &e) {
                 std::cout << "Rank " << rank << " crashed: " << e.what() << std::endl;
+            } catch (const std::string &e) {
+                // See run_child(): TCPunch throws bare std::strings.
+                std::cout << "Rank " << rank << " crashed: " << e << std::endl;
             } catch (...) {
                 std::cout << "Rank " << rank << " crashed: unknown exception" << std::endl;
             }

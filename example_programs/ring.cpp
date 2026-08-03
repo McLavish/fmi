@@ -1,6 +1,8 @@
 #include <Communicator.h>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 
 #include "harness.hpp"
 #include "ring.hpp"
@@ -16,7 +18,8 @@ static uint32_t ring(void *args, uint32_t, void *res) {
     out->function_id = rank;
     out->last_recvd = -1;
 
-    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
 
     std::cout << "Function " << rank << " established communicator, starting " << k << " ring iterations" << std::endl;
 
@@ -50,6 +53,13 @@ int main(int argc, char **argv) {
     flags.add_int("num-iterations", 1, "Number of ring iterations");
 
     return fmi_examples::run(argc, argv, "ring", flags, [](const fmi_examples::Options &opts) {
+        // Rank 0 sends to a hardcoded peer 1 and receives from comm_size-1, so with a single rank
+        // it would send to a peer that does not exist and then wait on a receive from itself until
+        // the backend timeout fires. Fail fast instead, like jacobi does for untileable counts.
+        if (opts.ranks < 2) {
+            throw std::runtime_error("ring requires at least 2 ranks (rank 0 sends to peer 1)");
+        }
+
         fmi_examples::ExampleSpec spec;
         spec.name = "ring";
         spec.input_size = sizeof(ring_input);

@@ -21,7 +21,8 @@ static uint32_t communicating(void *args, uint32_t, void *res) {
     int offset = 0;
     memset(out->buffer, 0, sizeof(out->buffer));
 
-    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name());
+    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                           fmi_examples::faas_memory());
     // comm.barrier();
 
     std::cout << "Function " << rank << " established communicator!" << std::endl;
@@ -123,6 +124,12 @@ int main(int argc, char **argv) {
     fmi_examples::Flags flags;
 
     return fmi_examples::run(argc, argv, "communicating", flags, [](const fmi_examples::Options &opts) {
+        // The ring phase sends to a hardcoded peer 1 and receives from comm_size-1, so with a
+        // single rank it would post a send to a peer that does not exist and then wait on a
+        // receive from itself until the backend timeout fires.
+        if (opts.ranks < 2) {
+            throw std::runtime_error("communicating requires at least 2 ranks (the ring phase sends to peer 1)");
+        }
         // communicating_output::buffer holds the bcast result followed by the gather result,
         // so more than 50 ranks would write past its 100 ints.
         if (opts.ranks > _communicating::MAX_COMMUNICATING_RANKS) {
