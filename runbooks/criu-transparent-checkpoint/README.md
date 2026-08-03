@@ -252,13 +252,30 @@ Before the first run:
    `PutObject`. Without it S3 answers a GET for a key that does not exist with 403, not 404 — by
    design, so that a missing key cannot be told apart from one you may not read — and under
    `recover` the channel raises on the first poll of the first collective instead of waiting.
-3. **Export credentials into the environment before starting the sweep.** The sweep inherits its
-   environment; a rank that is checkpointed keeps the environment its image captured, forever, so
-   a session token that expires mid-run cannot be refreshed from there. `aws configure
-   export-credentials --format env` is the shortest route; a profile or `credential_process` in
-   `~/.aws/` is the durable one, because those providers re-read their file when what they handed
-   out expires. **criu images of an S3 rank contain the credentials in plain text** — the `sweep/`
-   directory is gitignored, and it is not somewhere to leave a session token lying around.
+3. **Give the ranks a credential provider that refreshes — not a snapshot.** The sweep inherits its
+   environment, and a rank that is checkpointed keeps the environment its image captured, forever,
+   so a session token that expires mid-run cannot be refreshed from there. `aws configure
+   export-credentials --format env` is the shortest route and it is **the wrong one for a sweep**:
+   measured here, that snapshot was valid for about 15 minutes, while the invocation below takes
+   about 40, so trials began dying at
+   `S3: request refused (... HTTP 400, ExpiredToken ...)` a third of the way in and every later
+   trial failed instantly. Use a provider that re-resolves instead. The AWS SDK for C++ honours
+   `credential_process`, and it can be pointed somewhere harmless rather than at `~/.aws/config`:
+   ```bash
+   cat > /tmp/fmi-aws-config <<'EOF'
+   [profile fmisweep]
+   region = eu-central-1
+   credential_process = env -u AWS_PROFILE -u AWS_CONFIG_FILE aws --profile default configure export-credentials --format process
+   EOF
+   export AWS_CONFIG_FILE=/tmp/fmi-aws-config AWS_PROFILE=fmisweep
+   unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+   ```
+   The `env -u` matters: the helper inherits `AWS_PROFILE`, and without it the process resolves
+   into itself and the CLI stops with `credential process resolution detected an infinite loop`.
+   Unsetting the three environment variables matters too — the SDK's chain checks the environment
+   first, so a stale snapshot there wins over the refreshing profile. **criu images of an S3 rank
+   contain the credentials in plain text** — the `sweep/` directory is gitignored, and it is not
+   somewhere to leave a session token lying around.
 
 ```bash
 python3 sweep.py --config fmi_s3.json --trials 12 --peers 2 4 --rounds 100 \
@@ -281,9 +298,18 @@ absence included. `60000` is therefore about a minute of a store that is not wor
 
 **A run costs money, and the sweep says how much before it starts.** It prints the PUT and GET
 counts it expects and stops above `--max-cost` (default $1) unless `--yes` is given — the default
-`--rounds 40000` is sized for a free plane and is about $52 at eight peers. The estimate is rough
-and low on GETs (it counts one per rank per round per peer and the poll loops ask repeatedly); the
-PUT count, which dominates the bill, is exact. The invocation above estimates $0.03.
+`--rounds 40000` is sized for a free plane and is about $52 at eight peers. The invocation above
+estimates $0.03.
+
+**Read that estimate as a lower bound, not a budget.** It is low on GETs (it counts one per rank
+per round per peer, and the poll loops ask repeatedly), and it is low on PUTs too, despite what
+this file used to claim: it models one PUT per rank per round, while a round of the `baseline`
+shape issues one write per rank per *collective*. Measured against a real bucket, a 2-rank run
+writes 11 objects per round — 5.5 per rank, not 1 — and the count is exactly linear in rounds
+with no fixed overhead. (Under `recover` nothing is deleted at finalize, so the objects a run
+leaves behind *are* its PUT count, which is how that was measured.) The run above printed
+$0.03 and actually spent about $0.16 in PUTs; the two errors do not cancel, since the estimate
+also charges every trial at `max(--peers)`.
 
 An S3-compatible endpoint costs nothing and exercises the same code: add `"endpoint_url":
 "http://127.0.0.1:9000"` and `"use_path_style": true` to the backend block and point it at MinIO
@@ -293,8 +319,8 @@ is where to iterate.
 
 ### What is verified for S3, and what is not
 
-All of it against **MinIO on loopback**, not AWS (see the last row). Baselines: 84030/25770 at 60
-rounds and 1444200/919800 at 400, 2 ranks.
+Most of it against **MinIO on loopback**; the last two rows are against a real bucket in
+`eu-central-1`. Baselines: 84030/25770 at 60 rounds and 1444200/919800 at 400, 2 ranks.
 
 | | |
 | --- | --- |
@@ -304,7 +330,9 @@ rounds and 1444200/919800 at 400, 2 ranks.
 | store cleanup | after `--trials 4 --peers 2 --rounds 100`, the bucket is empty. The `aws s3 rm --recursive` this replaced deleted **nothing** — 36528 objects left behind by a run that reported clean |
 | the SDK's threads and sockets across a freeze | the `AwsEventLoop` CRT threads and the curl connection pool survive dump/restore; the SDK's own retry dials a fresh connection, which is what makes the recovery transparent |
 | the failure bounds | `tests/s3_backend.cpp`, against a fake endpoint on loopback: a write throttled with 503 is retried rather than abandoned; an operation against a store that never answers ends in `BackendFailure` inside its budget; a refusal and a wrong region are raised at once. Against a blackholed address a `download` gives up in 61.8 s on a 60 s budget (one failing request overshoots, by design), where the same code without those bounds took 120 s against a 3 s budget in the test and would have taken 51 minutes against a 60 s one |
-| **anything against real AWS** | **not run.** The AWS session on this machine is expired, and MinIO is a stand-in: it does not throttle, redirect, or expire a session token, which are exactly the conditions the classification and the retry loop exist for. Those paths are covered by the fake endpoint in the suite, not by a bucket |
+| **real AWS, by hand** | 2026-08-03, bucket in `eu-central-1`, 2 ranks, 40 rounds. Clean baseline 50820/12780 at 1352 ms/round. A second run with rank 1 `criu dump --unprivileged --tcp-close --shell-job` after round 10: dump rc=0, restore rc=0, both ranks `DONE` with the baseline checksums, and rank 1 logged rounds 11 through 39 after its restore. The restored rank re-issued its writes to the *same* keys — the run left 440 objects, exactly what the un-checkpointed baseline left |
+| **real AWS, the sweep** | 2026-08-03, `--trials 12 --peers 2 4 --rounds 100 --print-every 1 --delay-range 0.5 20 --max-checkpoints 2 --seed 1`: **12 passed, 0 failed, 0 skipped** in 39 min 48 s, 20 freezes over 7 two-rank and 5 four-rank trials. Bucket empty afterwards. `tests/s3_backend.cpp` also passes against the real bucket (`FMI_S3_TEST_BUCKET` set, `FMI_S3_TEST_SLOW` unset): 12 cases, 10 run, 2 slow ones skipped |
+| what a real bucket still has not shown | no request in any of the above was throttled, redirected, or answered with a retryable 5xx — the classification and retry paths are still covered only by the fake endpoint in the suite. Expiring credentials, on the other hand, are now covered the hard way: see the credential note above |
 
 ## Interpreting failures
 
