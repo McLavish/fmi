@@ -64,10 +64,11 @@ namespace {
 
     //! What a failed S3 request means to a caller that can only ask again or give up.
     enum class Failure {
-        absent,     //!< No such object. To a poll loop that is "not yet", and it is the hot path.
-        no_bucket,  //!< The container itself is not there.
-        refused,    //!< Rejected for who is asking, not for what was asked.
-        transient   //!< 5xx, throttling, a broken connection: the same request may work later.
+        absent,        //!< No such object. To a poll loop "not yet", and it is the hot path.
+        no_bucket,     //!< The container itself is not there.
+        refused,       //!< Rejected for who is asking, not for what was asked.
+        misconfigured, //!< The request cannot be routed or signed as this channel is configured.
+        transient      //!< 5xx, throttling, a broken connection: the same request may work later.
     };
 
     //! Classify by HTTP status and exception name, never by the SDK's error enum alone.
@@ -96,6 +97,13 @@ namespace {
             // Also a 404, so it has to be recognised before absence is.
             return Failure::no_bucket;
         }
+        if (status == 301 || exception == "PermanentRedirect") {
+            // The bucket is in another region, or endpoint_url points somewhere that is not
+            // serving it. S3 answers a GET with a 301 and a redirect nobody follows; before this
+            // it fell through to "might work later" and the operator was told, two hundred failed
+            // requests later, that the store had been unreliable.
+            return Failure::misconfigured;
+        }
         if (status == 404 || exception == "NoSuchKey") {
             return Failure::absent;
         }
@@ -104,14 +112,21 @@ namespace {
         }
         if (status == 400) {
             // 400 is otherwise the SDK's catch-all for a request the service would not take, so
-            // only these names promote it to a refusal. ExpiredToken is the one that matters after
-            // a long freeze; the rest are the same class of "this rank cannot authenticate".
+            // only these names promote it out of "transient". ExpiredToken is the one that matters
+            // after a long freeze — ExpiredTokenException is how STS spells the same thing, kept
+            // as a hedge against the two drifting apart — and the rest are the same class of "this
+            // rank cannot authenticate".
             for (const char* refusal : {"AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch",
-                                        "ExpiredToken", "InvalidToken", "TokenRefreshRequired",
-                                        "RequestTimeTooSkewed"}) {
+                                        "ExpiredToken", "ExpiredTokenException", "InvalidToken",
+                                        "TokenRefreshRequired", "RequestTimeTooSkewed"}) {
                 if (exception == refusal) {
                     return Failure::refused;
                 }
+            }
+            if (exception == "AuthorizationHeaderMalformed") {
+                // "the region us-east-1 is wrong; expecting eu-central-1": a signature the service
+                // will refuse identically every time s3_region says what it says.
+                return Failure::misconfigured;
             }
         }
         return Failure::transient;
@@ -132,6 +147,10 @@ namespace {
                 // Not reachable from a read, where absence is the hot path and never an error.
                 // A write answered "not found" is a bucket problem the service did not name.
                 return "S3: the store answered a write with 404 (" + description + ")";
+            case Failure::misconfigured:
+                return "S3: the request cannot be routed or signed as configured (" + description +
+                       "); s3_region and endpoint_url have to name the region and the endpoint "
+                       "the bucket actually lives in";
             default:
                 return "S3: request refused (" + description + "); credentials or bucket policy — "
                        "and note that without s3:ListBucket a missing key is answered 403, not 404";
@@ -395,50 +414,44 @@ void FMI::Comm::S3::note_transient_failure(const Aws::S3::S3Error& error, const 
  */
 bool FMI::Comm::S3::report_download_failure(const Aws::S3::S3Error& error, const std::string& name,
                                             std::chrono::steady_clock::time_point started) {
-    switch (classify(error)) {
-        case Failure::absent:
-            // The hot path: one of these per rank per poll interval for as long as a peer is late.
-            // Nothing is built and nothing is logged. The store answering at all is also what says
-            // the connection is fine, so the transient count starts over.
-            store_answered();
-            return false;
-        case Failure::no_bucket: {
-            const std::string what = "S3: no such bucket (" + describe(error, name) + ")";
-            if (recover) {
-                throw Utils::BackendFailure(what);
-            }
-            if (!refusal_warned) {
-                refusal_warned = true;
-                BOOST_LOG_TRIVIAL(error) << what << " (waiting out the poll budget)";
-            }
-            return false;
+    const Failure kind = classify(error);
+    if (kind == Failure::absent) {
+        // The hot path: one of these per rank per poll interval for as long as a peer is late.
+        // Nothing is built and nothing is logged. The store answering at all is also what says the
+        // connection is fine, so the transient count starts over.
+        store_answered();
+        return false;
+    }
+    if (kind == Failure::transient) {
+        // Counts the failure and, under recover, ends the operation once the failures have
+        // outlasted either bound. Redis's download never throws for a connection reason because a
+        // poll there costs a millisecond and the budget is a fine failure detector; here a poll
+        // costs a request, a round trip and money, and a request that fails can cost more wall
+        // clock than the whole budget it is charged against.
+        note_transient_failure(error, name, started);
+        if (!transient_warned) {
+            transient_warned = true;
+            BOOST_LOG_TRIVIAL(warning) << "S3: request failed (" << describe(error, name)
+                                       << "), retrying while the poll budget lasts";
         }
-        case Failure::refused: {
-            const std::string what = "S3: request refused (" + describe(error, name) +
-                                     "); credentials or bucket policy — and note that without "
-                                     "s3:ListBucket a missing key is answered 403, not 404";
-            if (recover) {
-                throw Utils::BackendFailure(what);
-            }
-            if (!refusal_warned) {
-                refusal_warned = true;
-                BOOST_LOG_TRIVIAL(error) << what << " (waiting out the poll budget)";
-            }
-            return false;
-        }
-        case Failure::transient:
-            // Counts the failure and, under recover, ends the operation once the failures have
-            // outlasted either bound. Redis's download never throws for a connection reason
-            // because a poll there costs a millisecond and the budget is a fine failure detector;
-            // here a poll costs a request, a round trip and money, and a request that fails can
-            // cost more wall clock than the whole budget it is charged against.
-            note_transient_failure(error, name, started);
-            if (!transient_warned) {
-                transient_warned = true;
-                BOOST_LOG_TRIVIAL(warning) << "S3: request failed (" << describe(error, name)
-                                           << "), retrying while the poll budget lasts";
-            }
-            return false;
+        return false;
+    }
+    // A refusal, a missing bucket, a region that does not match. Nothing here gets better by
+    // asking again, so under recover it is raised; with the flag off the callers have no handler,
+    // so it stays a false and a log line the first time.
+    //
+    // The description is built inside the branches that use it and not before them. This is not
+    // the hot path everywhere: a role without s3:ListBucket has S3 answer 403 for every key that
+    // does not exist yet (see classify), and in that configuration a poll loop arrives here once
+    // per rank per interval — where formatting an error message that the latch above then throws
+    // away is the whole cost of the pass.
+    if (recover) {
+        throw Utils::BackendFailure(permanent_failure_text(kind, describe(error, name)));
+    }
+    if (!refusal_warned) {
+        refusal_warned = true;
+        BOOST_LOG_TRIVIAL(error) << permanent_failure_text(kind, describe(error, name))
+                                 << " (waiting out the poll budget)";
     }
     return false;
 }
@@ -587,6 +600,8 @@ void FMI::Comm::S3::delete_objects(const std::vector<std::string>& names) {
             BOOST_LOG_TRIVIAL(error) << "Error when deleting from S3: " << outcome.GetError();
             continue;
         }
+        // The store answered, which is what the failure count is counting the absence of.
+        store_answered();
         for (const auto& error : outcome.GetResult().GetErrors()) {
             BOOST_LOG_TRIVIAL(error) << "Error when deleting from S3: key " << error.GetKey()
                                      << ": " << error.GetCode() << " " << error.GetMessage();
@@ -620,6 +635,7 @@ std::vector<std::string> FMI::Comm::S3::get_object_names() {
             BOOST_LOG_TRIVIAL(error) << "Error when listing objects from S3: " << outcome.GetError();
             break;
         }
+        store_answered();
         const auto& result = outcome.GetResult();
         for (const auto& object : result.GetContents()) {
             object_names.emplace_back(object.GetKey().c_str(), object.GetKey().size());
