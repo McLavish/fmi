@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -27,6 +28,28 @@
 namespace {
 
     const char TAG[] = "S3Client";
+
+    //! Whether SIGPIPE is still nobody's, so that the SDK's handler may have it.
+    /*!
+     * Utils::suppress_sigpipe states the rule this follows: SIG_DFL is ours to replace, SIG_IGN
+     * means somebody has already done the same thing, and a real handler belongs to the
+     * application. installSigPipeHandler obeys none of that — it installs the SDK's handler
+     * process-wide from a call_once no later channel can undo, and it would do so merely because
+     * an S3 block appears in a config file. So the decision is made here instead, from the
+     * disposition as it stands when the first S3 channel of the process is built.
+     */
+    bool sigpipe_is_unclaimed() {
+        struct sigaction current {};
+        if (::sigaction(SIGPIPE, nullptr, &current) != 0) {
+            // Nothing to go on, and of the two ways to be wrong, a restored rank killed by its
+            // first write to a connection the checkpoint captured is much the worse.
+            return true;
+        }
+        if ((current.sa_flags & SA_SIGINFO) != 0) {
+            return false;
+        }
+        return current.sa_handler == SIG_DFL || current.sa_handler == SIG_IGN;
+    }
 
     //! Bring the AWS SDK up once per process, and deliberately never take it back down.
     /*!
@@ -53,11 +76,10 @@ namespace {
             // a write to a socket the peer has closed reaches the process as a signal. That is the
             // first thing a restored rank does — criu --tcp-close leaves every connection the
             // image captured already dead — and it is the same killer the runbook README documents
-            // for hiredis. This flag makes the SDK install a handler that logs and swallows.
-            // It replaces an application's own SIGPIPE handler, on the same terms
-            // Utils::suppress_sigpipe already states: whatever is installed when the first FMI
-            // channel is built does not survive.
-            options.httpOptions.installSigPipeHandler = true;
+            // for hiredis. This flag makes the SDK install a handler that logs and swallows —
+            // but only where there is nothing of the application's to displace, which is the
+            // same line Utils::suppress_sigpipe draws and which the flag itself does not.
+            options.httpOptions.installSigPipeHandler = sigpipe_is_unclaimed();
             Aws::InitAPI(options);
         });
     }
@@ -250,9 +272,21 @@ FMI::Comm::S3::S3(std::map<std::string, std::string> params, std::map<std::strin
     download_price = std::stod(model_params["download_price"]);
     upload_price = std::stod(model_params["upload_price"]);
 
-    // IMDS off. On anything that is not an EC2 instance — a laptop, a container, a Lambda — the
-    // instance-metadata probe is a connect to a link-local address that nothing answers, paid for
-    // in the credential chain and again in region resolution, before the first request goes out.
+    // IMDS off for endpoint and region resolution. On anything that is not an EC2 instance — a
+    // laptop, a container, a Lambda — the instance-metadata probe is a connect to a link-local
+    // address that nothing answers, before the first request goes out, and the region is required
+    // configuration here anyway.
+    //
+    // It does NOT turn the probe off in the credential chain below, which is a separate switch
+    // the SDK reads from the environment (AWS_EC2_METADATA_DISABLED); passing
+    // imdsConfig.disableImds in the resolved provider configuration was measured to change
+    // nothing in 1.11.861. That is deliberate rather than merely accepted: the instance profile
+    // is the only credential source a rank on an EC2 VM has, and it is the last provider in the
+    // chain, so it is reached only when the environment, the profile and the rest supplied
+    // nothing — a job that was going to fail regardless. On a host where the link-local address
+    // is blackholed rather than refused that costs 16 s (measured, scrubbed environment) before
+    // the failure; set AWS_EC2_METADATA_DISABLED=true, or credentials_provider: environment, if
+    // that matters.
     Aws::Client::ClientConfigurationInitValues init_values;
     init_values.shouldDisableIMDS = true;
     Aws::S3::S3ClientConfiguration config(init_values);
@@ -319,7 +353,17 @@ FMI::Comm::S3::S3(std::map<std::string, std::string> params, std::map<std::strin
     const std::string provider = configured_provider == params.end() || configured_provider->second.empty()
                                  ? "default" : configured_provider->second;
     if (provider == "default") {
-        credentials_provider = Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>(TAG);
+        // Built from this configuration, not from nothing: the no-argument chain reads the
+        // environment for its own settings and adds the instance-metadata provider regardless of
+        // shouldDisableIMDS above, which reaches only the endpoint and region resolution. So a
+        // laptop or a container without AWS_EC2_METADATA_DISABLED in its environment still pays
+        // for a connect to a link-local address nothing answers, at the one moment — the first
+        // request after a restore — when this channel is trying to be quick.
+        // Built from this client's configuration rather than from nothing, which is what the
+        // no-argument chain does: the providers that make their own HTTP requests take the region
+        // and the proxy settings from here instead of re-reading the environment for them.
+        credentials_provider = Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>(
+                TAG, config.ResolveCredentialProviderConfig());
     } else if (provider == "environment") {
         credentials_provider = Aws::MakeShared<Aws::Auth::EnvironmentAWSCredentialsProvider>(TAG);
     } else {
@@ -626,7 +670,13 @@ std::vector<std::string> FMI::Comm::S3::get_object_names() {
     std::vector<std::string> object_names;
     Aws::S3::Model::ListObjectsV2Request request;
     request.WithBucket(bucket_name).WithPrefix(object_key_prefix());
-    while (true) {
+    // A thousand keys per page, so this is a million objects under one communicator's prefix:
+    // past any job, and short of forever. The cap is not for a large listing but for an endpoint
+    // that keeps saying "truncated" — an S3-compatible implementation that hands back a token it
+    // does not advance would otherwise spin here, inside a barrier's poll, for good.
+    const int max_pages = 1000;
+    Aws::String previous_token;
+    for (int page = 0; page < max_pages; page++) {
         auto outcome = client->ListObjectsV2(request);
         if (!outcome.IsSuccess()) {
             // Never thrown: this runs inside the flag-off barrier's poll loop, which has no
@@ -644,13 +694,14 @@ std::vector<std::string> FMI::Comm::S3::get_object_names() {
             break;
         }
         const Aws::String& token = result.GetNextContinuationToken();
-        if (token.empty()) {
-            // A truncated listing without a token is a service that contradicts itself; asking
-            // again with the same request would repeat the same page forever.
-            BOOST_LOG_TRIVIAL(error) << "S3: truncated listing without a continuation token, "
+        if (token.empty() || token == previous_token) {
+            // A truncated listing without a token, or with the one that produced this page, is a
+            // service that contradicts itself; asking again would repeat the same page forever.
+            BOOST_LOG_TRIVIAL(error) << "S3: truncated listing without a new continuation token, "
                                         "returning the " << object_names.size() << " names read so far";
             break;
         }
+        previous_token = token;
         request.SetContinuationToken(token);
     }
     return object_names;
