@@ -117,6 +117,27 @@ namespace {
         return Failure::transient;
     }
 
+    //! What to say about a failure that asking again cannot change.
+    /*!
+     * Every one of these means the store answered and the answer will be the same next time, so
+     * the text has to point at the configuration or the credentials rather than at the peer whose
+     * object never appeared. Shared by the read and the write paths, which classify identically
+     * and differ only in what they do afterwards.
+     */
+    std::string permanent_failure_text(Failure kind, const std::string& description) {
+        switch (kind) {
+            case Failure::no_bucket:
+                return "S3: no such bucket (" + description + ")";
+            case Failure::absent:
+                // Not reachable from a read, where absence is the hot path and never an error.
+                // A write answered "not found" is a bucket problem the service did not name.
+                return "S3: the store answered a write with 404 (" + description + ")";
+            default:
+                return "S3: request refused (" + description + "); credentials or bucket policy — "
+                       "and note that without s3:ListBucket a missing key is answered 403, not 404";
+        }
+    }
+
     //! A required configuration value, or an error naming the key.
     std::string required(const std::map<std::string, std::string>& params, const std::string& key) {
         auto it = params.find(key);
@@ -461,29 +482,71 @@ bool FMI::Comm::S3::download_object(channel_data buf, std::string name) {
  * The peer that will read this object has no other way of learning that it was written, and its
  * only reaction to an absent object is to poll until its budget runs out. Logging the failure and
  * returning — which is what happens with the flag off, and what the S3 channel has always done —
- * therefore surfaces as an unexplained Timeout, on a different rank, a minute later. Under recover
- * the failure is raised here, where the reason is known, after the SDK has already spent its
- * retries on it.
+ * therefore surfaces as an unexplained Timeout, on a different rank, a minute later.
+ *
+ * So under recover the write is retried under the same budget the reader is spending on it, at the
+ * same interval, and only then raised. The SDK's own retries are not that budget: four attempts
+ * over three seconds is the right answer to a packet that went missing and the wrong one to a
+ * prefix S3 has decided to throttle, which is a routine few seconds of 503 SlowDown and exactly
+ * what a collective produces when every rank writes under one prefix at once. Giving up there
+ * would make the flag whose purpose is surviving disruption strictly less robust than not setting
+ * it: the reader tolerates two hundred of the identical error.
+ *
+ * A refusal is different and is raised at once. A bucket that does not exist, credentials that
+ * expired while this rank was frozen, a region that does not match — the store has answered, and
+ * no amount of asking again changes what it said. This is the same split download_object makes,
+ * and the same one Redis makes between a command that could not be completed and a store that
+ * completed it and said no.
  */
 void FMI::Comm::S3::upload_object(channel_data buf, std::string name) {
-    Aws::S3::Model::PutObjectRequest request;
-    request.WithBucket(bucket_name).WithKey(name);
+    auto put = [&] () {
+        Aws::S3::Model::PutObjectRequest request;
+        request.WithBucket(bucket_name).WithKey(name);
+        // Rebuilt per attempt: the request owns the body stream, and a stream that has been read
+        // once is at its end. Re-sending the same one would write an empty object.
+        const std::shared_ptr<Aws::IOStream> data =
+                Aws::MakeShared<boost::interprocess::bufferstream>(TAG, buf.buf, buf.len);
+        request.SetBody(data);
+        return client->PutObject(request);
+    };
 
-    const std::shared_ptr<Aws::IOStream> data = Aws::MakeShared<boost::interprocess::bufferstream>(TAG, buf.buf, buf.len);
-
-    request.SetBody(data);
-    auto outcome = client->PutObject(request);
-    if (outcome.IsSuccess()) {
-        consecutive_transient_failures = 0;
-        transient_warned = false;
-        refusal_warned = false;
-        return;
-    }
     if (!recover) {
+        auto outcome = put();
+        if (outcome.IsSuccess()) {
+            store_answered();
+            return;
+        }
         BOOST_LOG_TRIVIAL(error) << "Error when uploading to S3: " << outcome.GetError();
         return;
     }
-    throw Utils::BackendFailure("S3: could not write object (" + describe(outcome.GetError(), name) + ")");
+
+    // The reader's budget, spent the same way: one attempt per poll interval, for as long as the
+    // reader would keep polling for what this call owes it. note_transient_failure ends it earlier
+    // when the failures have outlasted the wall clock or the consecutive-failure limit, which is
+    // what keeps a store that fails slowly from turning this loop into hours of retrying.
+    const unsigned int attempts = poll_attempts(max_timeout, timeout);
+    std::string last_failure;
+    for (unsigned int attempt = 0; attempt < attempts; attempt++) {
+        const auto started = std::chrono::steady_clock::now();
+        auto outcome = put();
+        if (outcome.IsSuccess()) {
+            store_answered();
+            return;
+        }
+        const Failure kind = classify(outcome.GetError());
+        last_failure = describe(outcome.GetError(), name);
+        if (kind != Failure::transient) {
+            throw Utils::BackendFailure(permanent_failure_text(kind, last_failure));
+        }
+        note_transient_failure(outcome.GetError(), name, started);
+        if (attempt + 1 < attempts) {
+            // The interval the readers sleep between polls, so a store that is coming back is
+            // waited for at the same rate on both sides.
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
+        }
+    }
+    throw Utils::BackendFailure("S3: could not write " + name + " within the poll budget (" +
+                                std::to_string(attempts) + " attempts): " + last_failure);
 }
 
 void FMI::Comm::S3::delete_object(std::string name) {
