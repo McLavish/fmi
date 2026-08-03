@@ -99,6 +99,7 @@ endif()
 
 option(FMI_BUILD_TESTS "Build FMI tests" OFF)
 option(FMI_BUILD_TOOLS "Build FMI tools" ${FMI_BUILD_TOOLS_DEFAULT})
+option(FMI_BUILD_EXAMPLES "Build example programs" OFF)
 
 if (FMI_BUILD_TESTS)
     add_subdirectory(tests)
@@ -106,4 +107,8 @@ endif()
 
 if (FMI_BUILD_TOOLS)
     add_subdirectory(tools)
+endif()
+
+if (FMI_BUILD_EXAMPLES)
+    add_subdirectory(example_programs)
 endif()
