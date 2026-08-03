@@ -9,6 +9,9 @@
 #include "../include/comm/Channel.h"
 #include "../include/comm/ClientServer.h"
 #include "../include/comm/Redis.h"
+#if FMI_ENABLE_S3
+#include "../include/comm/S3.h"
+#endif
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -1270,6 +1273,84 @@ BOOST_AUTO_TEST_CASE(recovered_barrier_completes) {
     munmap(ok, sizeof(int) * num_peers);
     munmap(entered, sizeof(std::atomic<int>) * generations);
 }
+
+#if FMI_ENABLE_S3
+
+//! The other backend of this family takes the recover flag now that it implements its half.
+/*!
+ * S3 refused the flag at construction until this landed, and the refusal was not pedantry: the
+ * family's half of the contract on its own — finalize deletes nothing, upload stops recording what
+ * it wrote — is every object of every run kept and billed forever, while a failed write is still
+ * logged and dropped and a short object still read as complete. All three backend obligations
+ * exist now, so the flag is accepted; the one the channel cannot install itself, the expiry, is a
+ * bucket lifecycle rule the constructor asks for out loud.
+ *
+ * Nothing here touches a network. An S3 channel is built from configuration alone, and these
+ * parameters point it at a port nothing listens on, so a regression that dialled at construction
+ * would fail here rather than reach a bucket. Everything that talks to a store is in the S3Backend
+ * suite, behind FMI_S3_TEST_BUCKET.
+ */
+BOOST_AUTO_TEST_CASE(s3_takes_the_recover_flag) {
+    std::map<std::string, std::string> model_params = {
+            {"bandwidth",      "50.0"},
+            {"overhead",       "40.4"},
+            {"transfer_price", "0.0"},
+            {"download_price", "0.00000043"},
+            {"upload_price",   "0.0000054"}
+    };
+    std::map<std::string, std::string> params = {
+            {"bucket_name",          "fmi-clientserver-recovery-no-such-bucket"},
+            {"s3_region",            "eu-central-1"},
+            {"timeout",              "100"},
+            {"max_timeout",          "1000"},
+            // Nothing listens on port 1, and no request is made here anyway.
+            {"endpoint_url",         "http://127.0.0.1:1"},
+            {"use_path_style",       "true"},
+            {"credentials_provider", "environment"}
+    };
+
+    BOOST_CHECK_NO_THROW(FMI::Comm::S3(params, model_params));
+
+    auto recovering = params;
+    recovering["recover"] = "true";
+    recovering["object_ttl_s"] = "60";
+    BOOST_CHECK_NO_THROW(FMI::Comm::S3(recovering, model_params));
+
+    // The family's validation covers this backend too: a zero poll interval is a rank that would
+    // never notice a store that has gone away, and under recover that is refused before the
+    // client is built.
+    auto degenerate = recovering;
+    degenerate["timeout"] = "0";
+    BOOST_CHECK_EXCEPTION(FMI::Comm::S3(degenerate, model_params), std::runtime_error,
+                          [] (const std::runtime_error& e) {
+                              return std::string(e.what()).find("timeout") != std::string::npos;
+                          });
+
+    // Configuration errors name the key that is wrong, because a channel receives its parameters
+    // as untyped strings and nothing below it knows which one the operator wrote.
+    auto no_bucket = recovering;
+    no_bucket.erase("bucket_name");
+    BOOST_CHECK_EXCEPTION(FMI::Comm::S3(no_bucket, model_params), std::runtime_error,
+                          [] (const std::runtime_error& e) {
+                              return std::string(e.what()).find("bucket_name") != std::string::npos;
+                          });
+
+    auto no_region = recovering;
+    no_region.erase("s3_region");
+    BOOST_CHECK_EXCEPTION(FMI::Comm::S3(no_region, model_params), std::runtime_error,
+                          [] (const std::runtime_error& e) {
+                              return std::string(e.what()).find("s3_region") != std::string::npos;
+                          });
+
+    auto unknown_provider = recovering;
+    unknown_provider["credentials_provider"] = "instance-profile";
+    BOOST_CHECK_EXCEPTION(FMI::Comm::S3(unknown_provider, model_params), std::runtime_error,
+                          [] (const std::runtime_error& e) {
+                              return std::string(e.what()).find("credentials_provider") != std::string::npos;
+                          });
+}
+
+#endif // FMI_ENABLE_S3
 
 BOOST_AUTO_TEST_SUITE_END();
 

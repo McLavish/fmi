@@ -155,30 +155,29 @@ namespace {
  * assumes: an operation has to fail inside the budget for the budget to be the failure detector.
  */
 FMI::Comm::S3::S3(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params) : RecoverableClientServer(params) {
-    // The recovery contract is split between this class and the family above it, and only the
-    // family's half exists here so far. Accepting the flag would turn on exactly the halves that
-    // are dangerous without the other: finalize would stop deleting and upload would stop
-    // recording what it wrote, while this backend still writes plain PutObjects with no expiry —
-    // FMI configures no bucket lifecycle rule — so every object of every run would stay in the
-    // bucket, and be billed for, forever. It would also promise what upload_object below does not
-    // do (a failed write is logged and dropped, under a flag whose whole point is that a write is
-    // a delivery obligation) and what download_object does not check (a short object is copied and
-    // reported as a complete read).
-    //
-    // Refused rather than ignored: an operator who wrote it down asked for those guarantees, and a
-    // channel that quietly gives them a different set is worse than one that says no. Remove this
-    // when the S3 half lands — the TTL by lifecycle rule, the upload escalation, the length check.
-    if (recover) {
-        throw std::runtime_error("S3: \"recover\" is not implemented by this backend "
-                                 "(no object expiry, no upload escalation, no length check); "
-                                 "remove it from the S3 configuration block");
-    }
     // See Utils::suppress_sigpipe. Called before the SDK is initialised so that a process which
     // has no SIGPIPE disposition of its own gets one either way, whichever of the two runs first.
     Utils::suppress_sigpipe();
     initialise_sdk_once();
 
     bucket_name = required(params, "bucket_name");
+    if (recover) {
+        // The one obligation of the contract this backend cannot meet by itself. Redis writes
+        // every object with SET ... EX and each one expires on its own; S3 has no per-object
+        // expiry at all, only a bucket-level lifecycle rule, and a channel cannot install one
+        // (it is bucket configuration, and a job's credentials generally may not change it).
+        // So object_ttl_s is accepted here — a config that sets it is not wrong — and does
+        // nothing: on S3 the mechanism is the rule.
+        //
+        // Which makes this the whole cleanup story under recover, since finalize deletes nothing:
+        // without a rule every object of every run stays in the bucket, and is billed, forever.
+        // Said once, at construction, where the operator can still connect it to what they wrote.
+        BOOST_LOG_TRIVIAL(warning) << "S3 recover: nothing is deleted on the way out, and S3 has "
+                                      "no per-object expiry (object_ttl_s does not apply here) — "
+                                      "bucket " << bucket_name << " must carry a lifecycle "
+                                      "expiration rule, or this job's objects are kept and billed "
+                                      "indefinitely";
+    }
     bandwidth = std::stod(model_params["bandwidth"]);
     overhead = std::stod(model_params["overhead"]);
     transfer_price = std::stod(model_params["transfer_price"]);
