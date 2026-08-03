@@ -319,20 +319,36 @@ is where to iterate.
 
 ### What is verified for S3, and what is not
 
-Most of it against **MinIO on loopback**; the last two rows are against a real bucket in
-`eu-central-1`. Baselines: 84030/25770 at 60 rounds and 1444200/919800 at 400, 2 ranks.
+Two tiers, and they are not interchangeable. **MinIO on loopback** is where this was iterated and
+is where most of the rows come from; **a real bucket in `eu-central-1`** is the evidence that the
+plane works against AWS itself, and that is the last block. Baselines for the MinIO rows:
+84030/25770 at 60 rounds and 1444200/919800 at 400, 2 ranks.
+
+#### Tier 1 — MinIO on loopback (iteration)
 
 | | |
 | --- | --- |
-| by hand, 2 ranks, rank 1 `criu dump --unprivileged --tcp-close --shell-job` at round 10 of 60 | 3/3 restored; both ranks `DONE` with the baseline checksums, and the frozen rank logged rounds 15 through 55 after its restore |
-| `sweep.py --config <minio>.json --trials 6 --peers 2 --rounds 120 --print-every 1 --delay-range 0.5 8 --max-checkpoints 2 --seed 5` | 6 passed, 0 failed, 0 skipped |
-| the same at `--trials 3 --peers 4 --rounds 60 --max-checkpoints 1 --seed 21` | 3 passed, 0 failed, 0 skipped |
-| store cleanup | after `--trials 4 --peers 2 --rounds 100`, the bucket is empty. The `aws s3 rm --recursive` this replaced deleted **nothing** — 36528 objects left behind by a run that reported clean |
-| the SDK's threads and sockets across a freeze | the `AwsEventLoop` CRT threads and the curl connection pool survive dump/restore; the SDK's own retry dials a fresh connection, which is what makes the recovery transparent |
-| the failure bounds | `tests/s3_backend.cpp`, against a fake endpoint on loopback: a write throttled with 503 is retried rather than abandoned; an operation against a store that never answers ends in `BackendFailure` inside its budget; a refusal and a wrong region are raised at once. Against a blackholed address a `download` gives up in 61.8 s on a 60 s budget (one failing request overshoots, by design), where the same code without those bounds took 120 s against a 3 s budget in the test and would have taken 51 minutes against a 60 s one |
-| **real AWS, by hand** | 2026-08-03, bucket in `eu-central-1`, 2 ranks, 40 rounds. Clean baseline 50820/12780 at 1352 ms/round. A second run with rank 1 `criu dump --unprivileged --tcp-close --shell-job` after round 10: dump rc=0, restore rc=0, both ranks `DONE` with the baseline checksums, and rank 1 logged rounds 11 through 39 after its restore. The restored rank re-issued its writes to the *same* keys — the run left 440 objects, exactly what the un-checkpointed baseline left |
-| **real AWS, the sweep** | 2026-08-03, `--trials 12 --peers 2 4 --rounds 100 --print-every 1 --delay-range 0.5 20 --max-checkpoints 2 --seed 1`: **12 passed, 0 failed, 0 skipped** in 39 min 48 s, 20 freezes over 7 two-rank and 5 four-rank trials. Bucket empty afterwards. `tests/s3_backend.cpp` also passes against the real bucket (`FMI_S3_TEST_BUCKET` set, `FMI_S3_TEST_SLOW` unset): 12 cases, 10 run, 2 slow ones skipped |
-| what a real bucket still has not shown | no request in any of the above was throttled, redirected, or answered with a retryable 5xx — the classification and retry paths are still covered only by the fake endpoint in the suite. Expiring credentials, on the other hand, are now covered the hard way: see the credential note above |
+| MinIO, by hand, 2 ranks, rank 1 `criu dump --unprivileged --tcp-close --shell-job` at round 10 of 60 | 3/3 restored; both ranks `DONE` with the baseline checksums, and the frozen rank logged rounds 15 through 55 after its restore |
+| MinIO, `sweep.py --config <minio>.json --trials 6 --peers 2 --rounds 120 --print-every 1 --delay-range 0.5 8 --max-checkpoints 2 --seed 5` | 6 passed, 0 failed, 0 skipped |
+| MinIO, the same at `--trials 3 --peers 4 --rounds 60 --max-checkpoints 1 --seed 21` | 3 passed, 0 failed, 0 skipped |
+| MinIO, store cleanup | after `--trials 4 --peers 2 --rounds 100`, the bucket is empty. The `aws s3 rm --recursive` this replaced deleted **nothing** — 36528 objects left behind by a run that reported clean |
+| MinIO, the SDK's threads and sockets across a freeze | the `AwsEventLoop` CRT threads and the curl connection pool survive dump/restore; the SDK's own retry dials a fresh connection, which is what makes the recovery transparent |
+| loopback fake endpoint, the failure bounds | `tests/s3_backend.cpp`: a write throttled with 503 is retried rather than abandoned; an operation against a store that never answers ends in `BackendFailure` inside its budget; a refusal and a wrong region are raised at once. Against a blackholed address a `download` gives up in 61.8 s on a 60 s budget (one failing request overshoots, by design), where the same code without those bounds took 120 s against a 3 s budget in the test and would have taken 51 minutes against a 60 s one |
+
+#### Tier 2 — a real bucket in `eu-central-1` (2026-08-03)
+
+All of it in one pass, account `323756936843`, against a bucket that was empty at the start
+(`list-objects-v2` → `KeyCount 0`) and carried the lifecycle rule step 1 asks for
+(`expire-sweep-objects`, `Expiration` 1 day, `AbortIncompleteMultipartUpload` 1 day).
+
+| | |
+| --- | --- |
+| **the `S3Backend` suite** | run from `build-s3/tests` with `FMI_S3_TEST_BUCKET=fmi-criu-sweep-323756936843-eu-central-1`, `FMI_S3_TEST_REGION=eu-central-1`, `FMI_S3_TEST_SLOW` unset: **12 cases, 10 run, `*** No errors detected`, 14.3 s**. The 2 not run are the `SLOW`-gated `listing_crosses_page_boundaries` and `batched_delete_beats_one_request_per_object`, MinIO-only by design. The bucket is empty again afterwards — the suite tidies up after itself |
+| **by hand, a freeze** | 2 ranks, 40 rounds. Timing first: a 10-round calibration took 13.49 s (1349 ms/round) and the 40-round clean baseline 54.08 s (1352 ms/round) — against a region a round is ~1.35 s, not the milliseconds MinIO on loopback gives. Baseline checksums **50820** (rank 0) / **12780** (rank 1). The freeze run used this file's exact invocation — `criu dump --unprivileged -t PID -D img --tcp-close --shell-job`, reap, `criu restore --unprivileged -D img --tcp-close --shell-job -d` — after round 10: **dump rc=0, restore rc=0**, both ranks `DONE` with the baseline checksums, rank 1 logged rounds **11 through 39** after its restore, 52.8 s wall. The restored rank re-issued its writes to the *same* keys: the checkpointed run left **440 objects, exactly what the un-checkpointed baseline left** |
+| **the sweep** | `--trials 12 --peers 2 4 --rounds 100 --print-every 1 --delay-range 0.5 20 --max-checkpoints 2 --seed 1 --max-cost 0.60`. The cost guard printed `S3 request estimate: 4800 PUT + 19200 GET, about $0.03 (12 trials x 4 peers x 100 rounds)` and `--max-cost 0.60` cleared it with no `--yes`. Result **12 passed, 0 failed, 0 skipped, exit 0**, 12:29:40Z → 13:09:28Z, **39 min 48 s**. 7 two-peer and 5 four-peer trials, 20 freezes in total, including the same rank frozen twice (trials 6, 8, 9) and a freeze landing while a peer was itself mid-repair (trials 1, 2, 7, 10, 11). Credentials refreshed transparently throughout, restores included |
+| **what the pass cost** | counting every request conservatively: ~29,700 PUT/LIST-class at $0.0054/1k = **$0.160**, ~89,000 GET at $0.00043/1k = $0.038, DELETE free — **about $0.20** for everything (the sweep, the suite, the calibration, the by-hand runs, an aborted first sweep attempt and the listings), against the printed $0.03. Read the estimate paragraph above before sizing a longer run |
+| **bucket end state** | `list-objects-v2` → `KeyCount 0`, no `Contents`. Nothing stray left behind |
+| what a real bucket still has not shown | no request in any run above was throttled, redirected, or answered with a retryable 5xx — the classification and retry paths are still covered only by the fake endpoint in the suite. Expiring credentials, on the other hand, are now covered the hard way: an earlier attempt at this same sweep died at `S3: request refused (... HTTP 400, ExpiredToken ...)` a third of the way in; see the credential note above |
 
 ## Interpreting failures
 
