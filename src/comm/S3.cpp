@@ -16,10 +16,13 @@
 
 #include <boost/log/trivial.hpp>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -139,7 +142,30 @@ namespace {
             // was not a number.
             throw std::runtime_error("S3: " + key + " must be a number, got \"" + it->second + "\"");
         }
-        return std::min(high, std::max(low, value));
+        if (value < low || value > high) {
+            // Not clamped. A number outside the range this channel can act on is a typo far more
+            // often than a request, and silently turning max_attempts: -5 into 1, or
+            // request_timeout_ms: 0 into one millisecond, hands back a working channel configured
+            // as nobody asked.
+            throw std::runtime_error("S3: " + key + " must be between " + std::to_string(low) +
+                                     " and " + std::to_string(high) + ", got " + it->second);
+        }
+        return value;
+    }
+
+    //! How many passes a poll loop of this channel makes before it gives up.
+    /*!
+     * The same arithmetic ClientServer::download does — one `timeout` charged per pass until
+     * max_timeout is reached — rounded up, because a budget that is not a multiple of the interval
+     * buys one more pass and not one fewer.
+     */
+    unsigned int poll_attempts(unsigned int max_timeout, unsigned int timeout) {
+        if (timeout == 0) {
+            // Only reachable with the flag off: RecoverableClientServer refuses a zero interval
+            // under recover, and nothing on the flag-off path calls this.
+            return 1;
+        }
+        return std::max(1u, (max_timeout + timeout - 1) / timeout);
     }
 
 }
@@ -196,7 +222,19 @@ FMI::Comm::S3::S3(std::map<std::string, std::string> params, std::map<std::strin
     config.connectTimeoutMs = numeric_param(params, "connect_timeout_ms", 3000, 1, 3600000);
     // A request that never returns is worse for a recovered rank than one that fails: the poll
     // loop above can retry a failure, but it cannot interrupt a transfer.
-    config.requestTimeoutMs = numeric_param(params, "request_timeout_ms", 15000, 1, 3600000);
+    //
+    // Both knobs, because only one of them is the cap the key's name promises. The SDK's
+    // requestTimeoutMs is, on the curl client every Linux build uses, CURLOPT_LOW_SPEED_TIME:
+    // how long the transfer may stay below lowSpeedLimit — one byte per second — before it is
+    // abandoned (ClientConfiguration.h:203-210,226-230). A store that trickles a byte a second
+    // therefore satisfies it forever. CURLOPT_TIMEOUT_MS, the wall clock of the whole request
+    // including DNS, connect, TLS and transfer, is httpRequestTimeoutMs, and it defaults to 0,
+    // meaning no cap at all. Setting the two together is what makes the number an operator
+    // writes here the number of milliseconds a request may take. Note that it bounds one HTTP
+    // request: with the retry strategy below, a failing call costs up to max_attempts of these.
+    const long request_timeout_ms = numeric_param(params, "request_timeout_ms", 15000, 1, 3600000);
+    config.httpRequestTimeoutMs = request_timeout_ms;
+    config.requestTimeoutMs = request_timeout_ms;
     // One rank is one thread issuing one request at a time; the pool only has to cover the
     // handles a retry leaves behind. 25 (the SDK default) is 25 sockets per rank of the job.
     config.maxConnections = static_cast<unsigned>(numeric_param(params, "max_connections", 4, 1, 1024));
@@ -269,6 +307,59 @@ std::string FMI::Comm::S3::describe(const Aws::S3::S3Error& error, const std::st
            ": " + std::string(error.GetMessage().c_str());
 }
 
+//! The store answered. Whatever it said, nothing is outstanding against it any more.
+void FMI::Comm::S3::store_answered() {
+    consecutive_transient_failures = 0;
+    transient_warned = false;
+    refusal_warned = false;
+}
+
+//! Count one failed request that might pass, and end the operation once waiting stops being sane.
+/*!
+ * Two bounds, because either one alone leaves a rank waiting far past the patience it was
+ * configured with. A count catches a store that fails quickly and forever; a clock catches one
+ * that fails slowly, which is precisely what an unreachable store does.
+ *
+ * The clock is the one that matters here, and it is not the poll loop's. ClientServer::download
+ * charges its budget one `timeout` — 100 ms in the shipped S3 config — for each pass, whatever
+ * that pass actually cost. A request to an endpoint that drops packets costs the connect timeout
+ * plus every retry the SDK makes, measured at 15 s against a blackholed address and 65 s against
+ * one that accepts the connection and then says nothing. So max_timeout, which reads as a minute
+ * of patience, is 600 of those passes: hours before the arithmetic budget runs out, on a rank
+ * whose peers gave up after their own minute. That is the gap this closes, and it is the same
+ * claim the constructor makes about its timeouts — an operation has to fail inside the budget for
+ * the budget to be the failure detector.
+ *
+ * The clock runs across CONSECUTIVE failures only, and any answer from the store restarts it —
+ * including "no such object", which is what a peer that has not written yet looks like. A rank
+ * frozen for an hour therefore costs its peers nothing here: their requests keep being answered.
+ */
+void FMI::Comm::S3::note_transient_failure(const Aws::S3::S3Error& error, const std::string& name,
+                                           std::chrono::steady_clock::time_point started) {
+    if (consecutive_transient_failures == 0) {
+        // From when the request went out, not from when its failure was noticed: on this path
+        // those are tens of seconds apart, and that difference is the whole problem.
+        failing_since = started;
+    }
+    consecutive_transient_failures++;
+    if (!recover) {
+        // Flag off there is nobody to raise this to — the callers are poll loops with no handler
+        // — so the count is kept for the log line and nothing else happens.
+        return;
+    }
+    const auto failing_for = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - failing_since).count();
+    if (consecutive_transient_failures <= transient_failure_limit &&
+        failing_for < static_cast<long long>(max_timeout)) {
+        return;
+    }
+    throw Utils::BackendFailure("S3: " + std::to_string(consecutive_transient_failures) +
+                                " failed requests in a row over " + std::to_string(failing_for) +
+                                " ms (budget " + std::to_string(max_timeout) + " ms, limit " +
+                                std::to_string(transient_failure_limit) + " requests): " +
+                                describe(error, name));
+}
+
 //! Say what a failed download was, and decide whether the caller may keep waiting for it.
 /*!
  * The whole point of the classification is that "the object is not there yet" and "this rank
@@ -281,15 +372,14 @@ std::string FMI::Comm::S3::describe(const Aws::S3::S3Error& error, const std::st
  * has already given a reason for is not waited out. With the flag off nothing may change shape —
  * the callers have no handler — so it stays a false, plus a log line the first time.
  */
-bool FMI::Comm::S3::report_download_failure(const Aws::S3::S3Error& error, const std::string& name) {
+bool FMI::Comm::S3::report_download_failure(const Aws::S3::S3Error& error, const std::string& name,
+                                            std::chrono::steady_clock::time_point started) {
     switch (classify(error)) {
         case Failure::absent:
             // The hot path: one of these per rank per poll interval for as long as a peer is late.
             // Nothing is built and nothing is logged. The store answering at all is also what says
             // the connection is fine, so the transient count starts over.
-            consecutive_transient_failures = 0;
-            transient_warned = false;
-            refusal_warned = false;
+            store_answered();
             return false;
         case Failure::no_bucket: {
             const std::string what = "S3: no such bucket (" + describe(error, name) + ")";
@@ -316,18 +406,12 @@ bool FMI::Comm::S3::report_download_failure(const Aws::S3::S3Error& error, const
             return false;
         }
         case Failure::transient:
-            consecutive_transient_failures++;
-            if (recover && consecutive_transient_failures > transient_failure_limit) {
-                // Deliberately far above what any poll budget spends: each of these is a request
-                // the SDK has already retried and backed off on, so reaching the limit means
-                // minutes of a store that is reachable and not working. Redis's download never
-                // throws for a connection reason because a poll there costs a millisecond and the
-                // budget is a fine failure detector; here a poll costs a request, a round trip and
-                // money, and a budget wide enough to survive a checkpoint is wide enough to spend
-                // an hour on a bucket that will not answer.
-                throw Utils::BackendFailure("S3: " + std::to_string(consecutive_transient_failures) +
-                                            " failed requests in a row (" + describe(error, name) + ")");
-            }
+            // Counts the failure and, under recover, ends the operation once the failures have
+            // outlasted either bound. Redis's download never throws for a connection reason
+            // because a poll there costs a millisecond and the budget is a fine failure detector;
+            // here a poll costs a request, a round trip and money, and a request that fails can
+            // cost more wall clock than the whole budget it is charged against.
+            note_transient_failure(error, name, started);
             if (!transient_warned) {
                 transient_warned = true;
                 BOOST_LOG_TRIVIAL(warning) << "S3: request failed (" << describe(error, name)
@@ -341,13 +425,14 @@ bool FMI::Comm::S3::report_download_failure(const Aws::S3::S3Error& error, const
 bool FMI::Comm::S3::download_object(channel_data buf, std::string name) {
     Aws::S3::Model::GetObjectRequest request;
     request.WithBucket(bucket_name).WithKey(name);
+    // Taken before the request goes out: what a failure costs in wall clock is exactly what the
+    // poll loop above cannot see, and it is what the failure bound is measured in.
+    const auto started = std::chrono::steady_clock::now();
     auto outcome = client->GetObject(request);
     if (!outcome.IsSuccess()) {
-        return report_download_failure(outcome.GetError(), name);
+        return report_download_failure(outcome.GetError(), name, started);
     }
-    consecutive_transient_failures = 0;
-    transient_warned = false;
-    refusal_warned = false;
+    store_answered();
 
     auto& body = outcome.GetResult().GetBody();
     body.read(buf.buf, buf.len);
