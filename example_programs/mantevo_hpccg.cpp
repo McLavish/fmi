@@ -55,6 +55,7 @@ using std::endl;
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <map>
 #include <string>
 #include <sys/resource.h>
@@ -63,8 +64,8 @@ using std::endl;
 
 #include <Communicator.h>
 
-#include "harness.hpp"
-#include "mantevo_hpccg.hpp"
+#include "launcher.hpp"
+#include "util.hpp"
 
 // These constants are upper bounds that might need to be changes for
 // pathological matrices, e.g., those with nearly dense rows/columns.
@@ -963,93 +964,9 @@ static int HPCCG(FMI::Communicator &comm, HPC_Sparse_Matrix *A, const double *co
     return (0);
 }
 
-static uint32_t mantevo_hpccg(void *args, uint32_t, void *res) {
-    mantevo_hpccg_input *input = static_cast<mantevo_hpccg_input *>(args);
-    mantevo_hpccg_output *output = static_cast<mantevo_hpccg_output *>(res);
-
-    HPC_Sparse_Matrix *A;
-    double *x, *b, *xexact;
-    int ierr = 0;
-    double times[7];
-    double t6 = 0.0;
-    int nx = input->nx;
-    int ny = input->ny;
-    int nz = input->nz;
-
-    int size = input->size;
-    int rank = input->rank;
-
-    FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name(),
-                           fmi_examples::faas_memory());
-    // comm.barrier();
-
-    generate_matrix(size, rank, nx, ny, nz, &A, &x, &b, &xexact);
-
-    // Transform matrix indices from global to local values.
-    // Define number of columns for the local matrix.
-
-    t6 = mytimer();
-    make_local_matrix(comm, A, size, rank);
-    t6 = mytimer() - t6;
-    times[6] = t6;
-
-    int niters = 0;
-    double normr = 0.0;
-    int max_iter = input->max_iter;
-    double tolerance = input->tolerance; // Set tolerance to zero to make all runs
-                                         // do max_iter iterations
-    ierr = HPCCG(comm, A, b, x, max_iter, tolerance, niters, normr, times, rank, size);
-
-    if (ierr)
-        cerr << "Error in call to CG: " << ierr << ".\n" << endl;
-
-    if (rank == 0) {
-        double fniters = niters;
-        double fnrow = A->total_nrow;
-        double fnnz = A->total_nnz;
-        double fnops_ddot = fniters * 4 * fnrow;
-        double fnops_waxpby = fniters * 6 * fnrow;
-        double fnops_sparsemv = fniters * 2 * fnnz;
-        double fnops = fnops_ddot + fnops_waxpby + fnops_sparsemv;
-
-        cout << "Number of iterations " << niters << endl;
-        cout << "Final residual " << normr << endl;
-
-        cout << "Time Total " << times[0] << endl;
-        cout << "Time DDOT " << times[1] << endl;
-        cout << "Time WAXPBY " << times[2] << endl;
-        cout << "Time SPARSEMV " << times[3] << endl;
-
-        cout << "FLOPS Total" << fnops << endl;
-        cout << "FLOPS DDOT" << fnops_ddot << endl;
-        cout << "FLOPS WAXPBY" << fnops_waxpby << endl;
-        cout << "FLOPS SPARSEMV" << fnops_sparsemv << endl;
-
-        cout << "MFLOPS Total" << fnops / times[0] / 1.0E6 << endl;
-        cout << "MFLOPS DDOT" << fnops_ddot / times[1] / 1.0E6 << endl;
-        cout << "MFLOPS WAXPBY" << fnops_waxpby / times[2] / 1.0E6 << endl;
-        cout << "MFLOPS SPARSEMV" << fnops_sparsemv / (times[3]) / 1.0E6 << endl;
-    } else {
-        cout << "Summary info on rank 0" << endl;
-    }
-
-    output->rank = rank;
-    output->niters = niters;
-    output->normr = normr;
-
-    destroyMatrix(A);
-    delete[] x;
-    delete[] b;
-    delete[] xexact;
-
-    // Hold every channel open until all ranks are finished: FMI's ClientServer
-    // teardown deletes objects peers may not have downloaded yet.
-    fmi_examples::rank_barrier();
-
-    return sizeof(mantevo_hpccg_output);
-}
-
 int main(int argc, char **argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
     fmi_examples::Flags flags;
     flags.add_int("nx", 64, "Local grid points in x per rank");
     flags.add_int("ny", 64, "Local grid points in y per rank");
@@ -1057,27 +974,165 @@ int main(int argc, char **argv) {
     flags.add_int("max-iter", 150, "Maximum number of CG iterations");
     flags.add_double("tolerance", 0.0, "Residual tolerance, 0 runs the full max_iter - 1 iterations");
 
-    return fmi_examples::run(argc, argv, "mantevo_hpccg", flags, [](const fmi_examples::Options &opts) {
-        fmi_examples::ExampleSpec spec;
-        spec.name = "mantevo_hpccg";
-        spec.input_size = sizeof(mantevo_hpccg_input);
-        spec.output_size = sizeof(mantevo_hpccg_output);
-        spec.get_context = [] { return _mantevo_hpccg::get_context(); };
-        spec.free_context = [](void *ctx) { _mantevo_hpccg::free_context(ctx); };
+    fmi_examples::Options opts;
+    int exit_code = 0;
+    if (!fmi_examples::parse_cli(argc, argv, "mantevo_hpccg", flags, opts, exit_code)) {
+        return exit_code;
+    }
 
-        int nx = opts.flags.get_int("nx");
-        int ny = opts.flags.get_int("ny");
-        int nz = opts.flags.get_int("nz");
-        int max_iter = opts.flags.get_int("max-iter");
-        double tolerance = opts.flags.get_double("tolerance");
+    // Read the sizes as long long so an out-of-range value is a usage error instead of an
+    // exception out of Flags::get_int. Every rank owns an nx*ny*nz block of the chimney stack
+    // domain, so the dimensions must be positive (generate_matrix only asserts that, and the
+    // assert is compiled out in a release build) and the derived sizes must still fit the int
+    // fields of HPC_Sparse_Matrix: local_nnz is 27 * local_nrow, total_nrow is local_nrow * ranks.
+    // Checked before the launcher branch so both the launcher and an explicit --rank process
+    // reject the run.
+    const long long nx_arg = opts.flags.get_long("nx");
+    const long long ny_arg = opts.flags.get_long("ny");
+    const long long nz_arg = opts.flags.get_long("nz");
+    const long long max_iter_arg = opts.flags.get_long("max-iter");
+    const double tolerance = opts.flags.get_double("tolerance"); // Set tolerance to zero to make
+                                                                 // all runs do max_iter iterations
 
-        spec.initialize_input = [nx, ny, nz, max_iter, tolerance](int func_num, int numcores, void *, char *ptr) {
-            _mantevo_hpccg::fill_input(func_num, numcores, nx, ny, nz, max_iter, tolerance, ptr);
-        };
-        spec.check_output = [max_iter, tolerance](int func_num, int numcores, void *ctx, char *ptr) {
-            return _mantevo_hpccg::verify_output(func_num, numcores, max_iter, tolerance, ctx, ptr);
-        };
-        spec.fn = mantevo_hpccg;
-        return spec;
-    });
+    if (nx_arg < 1 || ny_arg < 1 || nz_arg < 1) {
+        std::cerr << "mantevo_hpccg requires --nx, --ny and --nz to be at least 1" << std::endl;
+        return 2;
+    }
+    if (max_iter_arg < 1 || max_iter_arg > INT32_MAX) {
+        std::cerr << "mantevo_hpccg requires --max-iter to be in [1, " << INT32_MAX << "]" << std::endl;
+        return 2;
+    }
+    // Short circuiting keeps every product below from overflowing: each factor is known to be
+    // <= max_local_nrow by the time it is multiplied.
+    const long long max_local_nrow = INT32_MAX / 27;
+    if (nx_arg > max_local_nrow || ny_arg > max_local_nrow || nz_arg > max_local_nrow ||
+        nx_arg * ny_arg > max_local_nrow || nx_arg * ny_arg * nz_arg > max_local_nrow) {
+        std::cerr << "mantevo_hpccg requires --nx * --ny * --nz to be at most " << max_local_nrow
+                  << " (27 nonzeros per row must fit an int)" << std::endl;
+        return 2;
+    }
+    if (nx_arg * ny_arg * nz_arg * opts.ranks > INT32_MAX) {
+        std::cerr << "mantevo_hpccg requires --nx * --ny * --nz * ranks to be at most " << INT32_MAX
+                  << " (the global row count must fit an int)" << std::endl;
+        return 2;
+    }
+
+    if (!opts.single_rank()) {
+        return fmi_examples::spawn_local(argc, argv, opts);
+    }
+
+    const int rank = opts.rank;
+    const int size = opts.ranks;
+    const int nx = static_cast<int>(nx_arg);
+    const int ny = static_cast<int>(ny_arg);
+    const int nz = static_cast<int>(nz_arg);
+    const int max_iter = static_cast<int>(max_iter_arg);
+    bool ok = true;
+
+    try {
+        FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                               fmi_examples::faas_memory());
+
+        std::cout << "rank " << rank << ": established communicator, running HPCCG on a local " << nx << "x" << ny << "x"
+                  << nz << " grid, max_iter " << max_iter << ", tolerance " << tolerance << std::endl;
+
+        HPC_Sparse_Matrix *A;
+        double *x, *b, *xexact;
+        int ierr = 0;
+        double times[7];
+        double t6 = 0.0;
+
+        generate_matrix(size, rank, nx, ny, nz, &A, &x, &b, &xexact);
+
+        // Transform matrix indices from global to local values.
+        // Define number of columns for the local matrix.
+
+        t6 = mytimer();
+        make_local_matrix(comm, A, size, rank);
+        t6 = mytimer() - t6;
+        times[6] = t6;
+
+        int niters = 0;
+        double normr = 0.0;
+        ierr = HPCCG(comm, A, b, x, max_iter, tolerance, niters, normr, times, rank, size);
+
+        if (ierr)
+            cerr << "Error in call to CG: " << ierr << ".\n" << endl;
+
+        if (rank == 0) {
+            double fniters = niters;
+            double fnrow = A->total_nrow;
+            double fnnz = A->total_nnz;
+            double fnops_ddot = fniters * 4 * fnrow;
+            double fnops_waxpby = fniters * 6 * fnrow;
+            double fnops_sparsemv = fniters * 2 * fnnz;
+            double fnops = fnops_ddot + fnops_waxpby + fnops_sparsemv;
+
+            cout << "Number of iterations " << niters << endl;
+            cout << "Final residual " << normr << endl;
+
+            cout << "Time Total " << times[0] << endl;
+            cout << "Time DDOT " << times[1] << endl;
+            cout << "Time WAXPBY " << times[2] << endl;
+            cout << "Time SPARSEMV " << times[3] << endl;
+
+            cout << "FLOPS Total" << fnops << endl;
+            cout << "FLOPS DDOT" << fnops_ddot << endl;
+            cout << "FLOPS WAXPBY" << fnops_waxpby << endl;
+            cout << "FLOPS SPARSEMV" << fnops_sparsemv << endl;
+
+            cout << "MFLOPS Total" << fnops / times[0] / 1.0E6 << endl;
+            cout << "MFLOPS DDOT" << fnops_ddot / times[1] / 1.0E6 << endl;
+            cout << "MFLOPS WAXPBY" << fnops_waxpby / times[2] / 1.0E6 << endl;
+            cout << "MFLOPS SPARSEMV" << fnops_sparsemv / (times[3]) / 1.0E6 << endl;
+        } else {
+            cout << "Summary info on rank 0" << endl;
+        }
+
+        destroyMatrix(A);
+        delete[] x;
+        delete[] b;
+        delete[] xexact;
+
+        // With tolerance 0 the CG loop never breaks early, so every run does the full iteration
+        // count (max_iter - 1).
+        if (tolerance == 0.0) {
+            ok &= compare(rank, "niters", max_iter - 1, niters);
+        }
+        if (!std::isfinite(normr)) {
+            std::cout << "rank " << rank << " returned non-finite residual " << normr << std::endl;
+            ok = false;
+        }
+
+        // niters and the final residual both come out of collectives, so every rank must report
+        // the same pair. Gather {niters, normr} on rank 0 and compare each rank against rank 0's
+        // own values.
+        std::vector<double> summary = {static_cast<double>(niters), normr};
+        FMI::Comm::Data<std::vector<double>> senddata(summary);
+        FMI::Comm::Data<std::vector<double>> recvdata(static_cast<std::size_t>(2 * size));
+        comm.gather(senddata, recvdata, 0);
+        if (rank == 0) {
+            std::vector<double> gathered = recvdata.get();
+            for (int p = 1; p < size; p++) {
+                ok &= compare<double>(rank, "niters of rank " + std::to_string(p), gathered[0],
+                                      gathered[2 * p]);
+                ok &= compare<double>(rank, "normr of rank " + std::to_string(p), gathered[1],
+                                      gathered[2 * p + 1]);
+            }
+        }
+
+        fmi_examples::teardown_sync(comm, opts);
+    } catch (const std::exception &e) {
+        std::cout << "rank " << rank << " crashed: " << e.what() << std::endl;
+        ok = false;
+    } catch (const std::string &s) {
+        std::cout << "rank " << rank << " crashed: " << s << std::endl;
+        ok = false;
+    } catch (...) {
+        std::cout << "rank " << rank << " crashed: unknown exception" << std::endl;
+        ok = false;
+    }
+
+    std::cout << "rank " << rank << ": " << (ok ? "PASS" : "FAIL") << std::endl;
+    return ok ? 0 : 1;
 }

@@ -1,156 +1,173 @@
-#include <cstdint>
-#include <cstring>
+#include <Communicator.h>
+
+#include <cstdio>
+#include <exception>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <Communicator.h>
+#include "launcher.hpp"
+#include "util.hpp"
 
-#include "communicating.hpp"
-#include "harness.hpp"
+namespace {
 
-static uint32_t communicating(void *args, uint32_t, void *res) {
-    communicating_input *in = static_cast<communicating_input *>(args);
-    communicating_output *out = static_cast<communicating_output *>(res);
-
-    int rank = in->function_id;
-    int comm_size = in->world_size;
-
-    out->function_id = rank;
-    int offset = 0;
-    memset(out->buffer, 0, sizeof(out->buffer));
-
-    FMI::Communicator comm(rank, comm_size, fmi_examples::config_path(), fmi_examples::comm_name(),
-                           fmi_examples::faas_memory());
-    // comm.barrier();
-
-    std::cout << "Function " << rank << " established communicator!" << std::endl;
-
-    std::cout << "Function " << rank << " preparing to run ring" << std::endl;
-
-    // P2P: send, recv in a ring
-    {
-        FMI::Comm::Data<int> sendbuf(rank);
-        FMI::Comm::Data<int> recvbuf(-1);
-        if (rank == 0) {
-            comm.send(sendbuf, 1);
-            comm.recv(recvbuf, comm_size - 1);
-        } else {
-            comm.recv(recvbuf, (rank - 1 + comm_size) % comm_size);
-            comm.send(sendbuf, (rank + 1) % comm_size);
+    /*!
+     * Element-wise comparison against an expected vector.
+     *
+     * util.hpp's compare<T> streams both values on mismatch, so it cannot be instantiated for
+     * std::vector<int> (no operator<<). The size is checked first so the element loop never
+     * indexes past the received vector.
+     */
+    bool compare_vector(int rank, const std::string &field, const std::vector<int> &expected,
+                        const std::vector<int> &got) {
+        if (!compare(rank, field + ".size", static_cast<int>(expected.size()), static_cast<int>(got.size()))) {
+            return false;
         }
-
-        out->recvd_ring_msg = recvbuf.get();
-    }
-
-    std::cout << "Function " << rank << " preparing to run bcast" << std::endl;
-
-    // bcast
-    {
-        std::vector<int> v(comm_size, -1);
-        if (rank == 0) {
-            for (int i = 0; i < comm_size; ++i)
-                v[i] = i;
+        bool ok = true;
+        for (std::size_t i = 0; i < expected.size(); i++) {
+            ok &= compare(rank, field + "[" + std::to_string(i) + "]", expected[i], got[i]);
         }
-
-        FMI::Comm::Data<std::vector<int>> bcastbuf(std::move(v));
-        comm.bcast(bcastbuf, 0);
-
-        memcpy(out->buffer + offset, bcastbuf.data(), comm_size * sizeof(int));
-        offset += comm_size;
+        return ok;
     }
 
-    std::cout << "Function " << rank << " preparing to run gather" << std::endl;
-
-    // gather
-    {
-        std::vector<int> v = {rank};
-        FMI::Comm::Data<std::vector<int>> sendbuf(std::move(v));
-        FMI::Comm::Data<std::vector<int>> recvbuf(std::vector<int>((rank == 0) ? comm_size : 0));
-
-        comm.gather(sendbuf, recvbuf, 0);
-
-        if (rank == 0)
-            memcpy(out->buffer + offset, recvbuf.data(), comm_size * sizeof(int));
-        offset += comm_size;
-    }
-
-    std::cout << "Function " << rank << " preparing to run scatter" << std::endl;
-
-    // scatter
-    {
-        std::vector<int> v(comm_size, -1);
-        for (int i = 0; i < comm_size; ++i)
-            v[i] = i;
-
-        FMI::Comm::Data<std::vector<int>> scatterbuf(std::move(v));
-        FMI::Comm::Data<std::vector<int>> recvbuf(std::vector<int>(1, -1));
-
-        comm.scatter(scatterbuf, recvbuf, 0);
-
-        out->recvd_scatter_msg = recvbuf.get()[0];
-    }
-
-    std::cout << "Function " << rank << " preparing to run reduce, allreduce, scan" << std::endl;
-
-    // reduce, allreduce and scan
-    {
-        FMI::Comm::Data<int> sendbuf_reduce(rank), sendbuf_allreduce(rank), sendbuf_scan(rank);
-        FMI::Comm::Data<int> recvbuf_reduce(-1), recvbuf_allreduce(-1), recvbuf_scan(-1);
-
-        FMI::Utils::Function<int> fadd([](int a, int b) -> int { return a + b; }, true, true);
-
-        comm.reduce(sendbuf_reduce, recvbuf_reduce, 0, fadd);
-        out->result_reduce = recvbuf_reduce.get();
-
-        comm.allreduce(sendbuf_allreduce, recvbuf_allreduce, fadd);
-        out->result_allreduce = recvbuf_allreduce.get();
-
-        comm.scan(sendbuf_scan, recvbuf_scan, fadd);
-        out->result_scan = recvbuf_scan.get();
-    }
-
-    std::cout << "Function " << rank << " is done communicating!" << std::endl;
-
-    // Hold every channel open until all ranks are finished: FMI's ClientServer
-    // teardown deletes objects peers may not have downloaded yet.
-    fmi_examples::rank_barrier();
-
-    return sizeof(communicating_output);
-}
+} // namespace
 
 int main(int argc, char **argv) {
-    fmi_examples::Flags flags;
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
-    return fmi_examples::run(argc, argv, "communicating", flags, [](const fmi_examples::Options &opts) {
-        // The ring phase sends to a hardcoded peer 1 and receives from comm_size-1, so with a
-        // single rank it would post a send to a peer that does not exist and then wait on a
-        // receive from itself until the backend timeout fires.
-        if (opts.ranks < 2) {
-            throw std::runtime_error("communicating requires at least 2 ranks (the ring phase sends to peer 1)");
-        }
-        // communicating_output::buffer holds the bcast result followed by the gather result,
-        // so more than 50 ranks would write past its 100 ints.
-        if (opts.ranks > _communicating::MAX_COMMUNICATING_RANKS) {
-            throw std::runtime_error("communicating supports at most " +
-                                     std::to_string(_communicating::MAX_COMMUNICATING_RANKS) +
-                                     " ranks (output buffer holds 2 * ranks ints)");
+    fmi_examples::Options opts;
+    int exit_code = 0;
+    if (!fmi_examples::parse_cli(argc, argv, "communicating", opts, exit_code)) {
+        return exit_code;
+    }
+
+    // The ring phase sends to a hardcoded peer 1 and receives from ranks-1, so with a single rank
+    // it would send to a peer that does not exist and then wait on a receive from itself until the
+    // backend timeout fires. Checked before the launcher branch so both the launcher and an
+    // explicit --rank process reject the run.
+    if (opts.ranks < 2) {
+        std::cerr << "communicating requires at least 2 ranks (the ring phase sends to peer 1)" << std::endl;
+        return 2;
+    }
+
+    if (!opts.single_rank()) {
+        return fmi_examples::spawn_local(argc, argv, opts);
+    }
+
+    const int rank = opts.rank;
+    const int ranks = opts.ranks;
+    bool ok = true;
+
+    try {
+        FMI::Communicator comm(rank, ranks, fmi_examples::config_path(), fmi_examples::comm_name(),
+                               fmi_examples::faas_memory());
+
+        std::cout << "rank " << rank << ": established communicator" << std::endl;
+
+        std::cout << "rank " << rank << ": preparing to run ring" << std::endl;
+
+        // P2P: send, recv in a ring
+        {
+            FMI::Comm::Data<int> sendbuf(rank);
+            FMI::Comm::Data<int> recvbuf(-1);
+            if (rank == 0) {
+                comm.send(sendbuf, 1);
+                comm.recv(recvbuf, ranks - 1);
+            } else {
+                comm.recv(recvbuf, (rank - 1 + ranks) % ranks);
+                comm.send(sendbuf, (rank + 1) % ranks);
+            }
+
+            ok &= compare(rank, "recvd_ring_msg", (rank - 1 + ranks) % ranks, recvbuf.get());
         }
 
-        fmi_examples::ExampleSpec spec;
-        spec.name = "communicating";
-        spec.input_size = sizeof(communicating_input);
-        spec.output_size = sizeof(communicating_output);
-        spec.get_context = [] { return _communicating::get_context(); };
-        spec.free_context = [](void *ctx) { _communicating::free_context(ctx); };
-        spec.initialize_input = [](int func_num, int numcores, void *ctx, char *ptr) {
-            _communicating::initialize_input(func_num, numcores, ctx, ptr);
-        };
-        spec.check_output = [](int func_num, int numcores, void *ctx, char *ptr) {
-            return _communicating::check_output(func_num, numcores, ctx, ptr);
-        };
-        spec.fn = communicating;
-        return spec;
-    });
+        std::cout << "rank " << rank << ": preparing to run bcast" << std::endl;
+
+        // bcast
+        {
+            std::vector<int> v(ranks, -1);
+            if (rank == 0) {
+                for (int i = 0; i < ranks; ++i)
+                    v[i] = i;
+            }
+
+            FMI::Comm::Data<std::vector<int>> bcastbuf(std::move(v));
+            comm.bcast(bcastbuf, 0);
+
+            std::vector<int> expected(ranks);
+            for (int i = 0; i < ranks; ++i)
+                expected[i] = i;
+            ok &= compare_vector(rank, "bcast", expected, bcastbuf.get());
+        }
+
+        std::cout << "rank " << rank << ": preparing to run gather" << std::endl;
+
+        // gather
+        {
+            std::vector<int> v = {rank};
+            FMI::Comm::Data<std::vector<int>> sendbuf(std::move(v));
+            FMI::Comm::Data<std::vector<int>> recvbuf(std::vector<int>((rank == 0) ? ranks : 0));
+
+            comm.gather(sendbuf, recvbuf, 0);
+
+            if (rank == 0) {
+                std::vector<int> expected(ranks);
+                for (int i = 0; i < ranks; ++i)
+                    expected[i] = i;
+                ok &= compare_vector(rank, "gather", expected, recvbuf.get());
+            }
+        }
+
+        std::cout << "rank " << rank << ": preparing to run scatter" << std::endl;
+
+        // scatter
+        {
+            std::vector<int> v(ranks, -1);
+            for (int i = 0; i < ranks; ++i)
+                v[i] = i;
+
+            FMI::Comm::Data<std::vector<int>> scatterbuf(std::move(v));
+            FMI::Comm::Data<std::vector<int>> recvbuf(std::vector<int>(1, -1));
+
+            comm.scatter(scatterbuf, recvbuf, 0);
+
+            ok &= compare_vector(rank, "scatter", std::vector<int>(1, rank), recvbuf.get());
+        }
+
+        std::cout << "rank " << rank << ": preparing to run reduce, allreduce, scan" << std::endl;
+
+        // reduce, allreduce and scan
+        {
+            FMI::Comm::Data<int> sendbuf_reduce(rank), sendbuf_allreduce(rank), sendbuf_scan(rank);
+            FMI::Comm::Data<int> recvbuf_reduce(-1), recvbuf_allreduce(-1), recvbuf_scan(-1);
+
+            FMI::Utils::Function<int> fadd([](int a, int b) -> int { return a + b; }, true, true);
+
+            comm.reduce(sendbuf_reduce, recvbuf_reduce, 0, fadd);
+            // Only the root receives the result; both backends leave a non-root recvbuf untouched.
+            ok &= compare(rank, "result_reduce", (rank == 0) ? ((ranks - 1) * ranks / 2) : -1, recvbuf_reduce.get());
+
+            comm.allreduce(sendbuf_allreduce, recvbuf_allreduce, fadd);
+            ok &= compare(rank, "result_allreduce", (ranks - 1) * ranks / 2, recvbuf_allreduce.get());
+
+            comm.scan(sendbuf_scan, recvbuf_scan, fadd);
+            ok &= compare(rank, "result_scan", rank * (rank + 1) / 2, recvbuf_scan.get());
+        }
+
+        std::cout << "rank " << rank << ": done communicating" << std::endl;
+
+        fmi_examples::teardown_sync(comm, opts);
+    } catch (const std::exception &e) {
+        std::cout << "rank " << rank << " crashed: " << e.what() << std::endl;
+        ok = false;
+    } catch (const std::string &s) {
+        std::cout << "rank " << rank << " crashed: " << s << std::endl;
+        ok = false;
+    } catch (...) {
+        std::cout << "rank " << rank << " crashed: unknown exception" << std::endl;
+        ok = false;
+    }
+
+    std::cout << "rank " << rank << ": " << (ok ? "PASS" : "FAIL") << std::endl;
+    return ok ? 0 : 1;
 }

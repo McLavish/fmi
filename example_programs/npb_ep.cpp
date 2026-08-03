@@ -47,25 +47,26 @@ Authors of the C++ code:
 */
 
 // This file adapts the NPB-CPP serial EP benchmark (ep.cpp, plus randlc and
-// vranlc from common/c_randdp.cpp) to an FMI function:
+// vranlc from common/c_randdp.cpp) to an FMI program:
 //  - M is a runtime input instead of a compile-time npbparams.hpp constant,
 //  - the batch loop is distributed round-robin over the FMI ranks,
 //  - the three MPI_Allreduce calls of the NPB MPI version (sx, sy, q) are
 //    fused into a single sum-allreduce at the end.
 
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <stdexcept>
-#include <string>
-#include <vector>
-#include <sys/time.h>
-
 #include <Communicator.h>
 
-#include "harness.hpp"
-#include "npb_ep.hpp"
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <exception>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include <sys/time.h>
+
+#include "launcher.hpp"
+#include "util.hpp"
 
 /*
  * --------------------------------------------------------------------
@@ -102,6 +103,9 @@ Authors of the C++ code:
    2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0)
 #define t46 (t23 * t23)
 #endif
+
+// Largest M the reference table below knows (class E).
+#define MAX_M 40
 
 /*
  * ---------------------------------------------------------------------
@@ -230,6 +234,36 @@ static double wtime(void) {
     return ((double)tp.tv_sec) + tp.tv_usec / 1000000.0;
 }
 
+// Reference sums from the verification part of the original EP benchmark.
+// M = 24/25/28/30/32/36/40 correspond to classes S/W/A/B/C/D/E.
+static bool reference_sums(int m, double &sx_verify_value, double &sy_verify_value) {
+    if (m == 24) {
+        sx_verify_value = -3.247834652034740e+3;
+        sy_verify_value = -6.958407078382297e+3;
+    } else if (m == 25) {
+        sx_verify_value = -2.863319731645753e+3;
+        sy_verify_value = -6.320053679109499e+3;
+    } else if (m == 28) {
+        sx_verify_value = -4.295875165629892e+3;
+        sy_verify_value = -1.580732573678431e+4;
+    } else if (m == 30) {
+        sx_verify_value = 4.033815542441498e+4;
+        sy_verify_value = -2.660669192809235e+4;
+    } else if (m == 32) {
+        sx_verify_value = 4.764367927995374e+4;
+        sy_verify_value = -8.084072988043731e+4;
+    } else if (m == 36) {
+        sx_verify_value = 1.982481200946593e+5;
+        sy_verify_value = -1.020596636361769e+5;
+    } else if (m == 40) {
+        sx_verify_value = -5.319717441530e+05;
+        sy_verify_value = -3.688834557731e+05;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 // FMI communication helper, replacing the MPI calls of the NPB MPI version
 static void allreduce_sum_double(FMI::Communicator &comm, double *sendbuf, double *recvbuf, int count) {
     FMI::Utils::Function<std::vector<double>> f(
@@ -247,242 +281,280 @@ static void allreduce_sum_double(FMI::Communicator &comm, double *sendbuf, doubl
     std::memcpy(recvbuf, result.data(), count * sizeof(double));
 }
 
-/* ep */
-static uint32_t npb_ep(void *args, uint32_t, void *res) {
-    npb_ep_input *input = static_cast<npb_ep_input *>(args);
-    npb_ep_output *output = static_cast<npb_ep_output *>(res);
+int main(int argc, char **argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
-    int size = input->size;
-    int rank = input->rank;
-    int m = input->m;
+    fmi_examples::Flags flags;
+    flags.add_int("m", 28, "Log_2 of the number of random number pairs (24=class S, 28=class A)");
 
-    double Mops, t1, t2, t3, t4, x1, x2;
-    double sx, sy, tm, an, gc;
-    double sx_verify_value, sy_verify_value, sx_err, sy_err;
-    int np;
-    int i, ik, kk, l, k;
-    int k_offset;
-    bool verified;
-    double dum[3] = {1.0, 1.0, 1.0};
-
-    if (m <= MK) {
-        printf("EP: M = %d must be greater than MK = %d\n", m, MK);
-        return 0;
+    fmi_examples::Options opts;
+    int exit_code = 0;
+    if (!fmi_examples::parse_cli(argc, argv, "npb_ep", flags, opts, exit_code)) {
+        return exit_code;
     }
 
-    const int mm = m - MK;
-    const int nn = 1 << mm;
-    const int nk = 1 << MK;
-    const int nk_plus = 2 * nk + 1;
-
-    double *x = new double[nk_plus];
-    double q[NQ];
-
-    FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name(),
-                           fmi_examples::faas_memory());
-    // comm.barrier();
-
-    printf("\n\n NAS Parallel Benchmarks - EP Benchmark (FMI version)\n\n");
-    printf(" Number of random numbers generated: %15.0f\n", pow(2.0, m + 1));
-    printf(" Rank %d of %d\n", rank, size);
-
-    verified = false;
-
-    /*
-     * --------------------------------------------------------------------
-     * compute the number of "batches" of random number pairs generated
-     * per processor. Adjust if the number of processors does not evenly
-     * divide the total number
-     * --------------------------------------------------------------------
-     */
-    np = nn;
-
-    /*
-     * call the random number generator functions and initialize
-     * the x-array to reduce the effects of paging on the timings.
-     * also, call all mathematical functions that are used. make
-     * sure these initializations cannot be eliminated as dead code.
-     */
-    vranlc(0, &dum[0], dum[1], &dum[2]);
-    dum[0] = randlc(&dum[1], dum[2]);
-    for (i = 0; i < nk_plus; i++) {
-        x[i] = -1.0e99;
-    }
-    Mops = log(sqrt(fabs(max(1.0, 1.0))));
-
-    double t_start = wtime();
-
-    t1 = A;
-    vranlc(0, &t1, A, x);
-
-    /* compute AN = A ^ (2 * NK) (mod 2^46) */
-
-    t1 = A;
-
-    for (i = 0; i < MK + 1; i++) {
-        t2 = randlc(&t1, t1);
+    // The kernel needs at least one batch of 2^MK pairs, so m has to sit above MK; the original
+    // kernel only printed a diagnostic and returned in that case, which would exit 0 and score as
+    // a clean run of a benchmark that had computed nothing. The upper bound keeps
+    // "1 << (m - MK)" well inside int and matches the largest entry of the reference table.
+    // Read as a long long so an out-of-int-range value is rejected here instead of throwing.
+    const long long m_arg = opts.flags.get_long("m");
+    if (m_arg <= MK || m_arg > MAX_M) {
+        std::cerr << "npb_ep requires --m in (" << MK << ", " << MAX_M << "]; got " << m_arg
+                  << " (reference sums exist for m in {24, 25, 28, 30, 32, 36, 40})" << std::endl;
+        return 2;
     }
 
-    an = t1;
-    gc = 0.0;
-    sx = 0.0;
-    sy = 0.0;
-
-    for (i = 0; i <= NQ - 1; i++) {
-        q[i] = 0.0;
+    if (!opts.single_rank()) {
+        return fmi_examples::spawn_local(argc, argv, opts);
     }
 
-    /*
-     * each instance of this loop may be performed independently. we compute
-     * the k offsets separately to take into account the fact that some nodes
-     * have more numbers to generate than others.
-     * the batches are distributed round-robin over the FMI ranks; the results
-     * are independent of the number of ranks.
-     */
-    k_offset = -1;
+    const int rank = opts.rank;
+    const int size = opts.ranks;
+    const int m = static_cast<int>(m_arg);
+    bool ok = true;
 
-    int batches_done = 0;
-    int local_batches = (rank < np) ? ((np - 1 - rank) / size + 1) : 0;
-    int print_freq = max(1, local_batches / 100);
+    try {
+        double Mops, t1, t2, t3, t4, x1, x2;
+        double sx, sy, tm, an, gc;
+        double sx_verify_value, sy_verify_value, sx_err, sy_err;
+        int np;
+        int i, ik, kk, l, k;
+        int k_offset;
+        bool verified;
+        double dum[3] = {1.0, 1.0, 1.0};
 
-    for (k = 1 + rank; k <= np; k += size) {
-        kk = k_offset + k;
-        t1 = S;
-        t2 = an;
+        const int mm = m - MK;
+        const int nn = 1 << mm;
+        const int nk = 1 << MK;
+        const int nk_plus = 2 * nk + 1;
 
-        /* find starting seed t1 for this kk */
-        for (i = 1; i <= 100; i++) {
-            ik = kk / 2;
-            if ((2 * ik) != kk) {
-                t3 = randlc(&t1, t2);
-            }
-            if (ik == 0) {
-                break;
-            }
-            t3 = randlc(&t2, t2);
-            kk = ik;
-        }
+        // std::vector instead of the original new[]/delete[] so an exception out of any FMI call
+        // below cannot leak the buffer.
+        std::vector<double> x(nk_plus);
+        double q[NQ];
 
-        /* compute uniform pseudorandom numbers */
-        vranlc(2 * nk, &t1, A, x);
+        FMI::Communicator comm(rank, size, fmi_examples::config_path(), fmi_examples::comm_name(),
+                               fmi_examples::faas_memory());
+
+        std::cout << "rank " << rank << ": established communicator, running EP with m = " << m << std::endl;
+
+        printf("\n\n NAS Parallel Benchmarks - EP Benchmark (FMI version)\n\n");
+        printf(" Number of random numbers generated: %15.0f\n", pow(2.0, m + 1));
+        printf(" Rank %d of %d\n", rank, size);
+
+        verified = false;
 
         /*
-         * compute gaussian deviates by acceptance-rejection method and
-         * tally counts in concentric square annuli. this loop is not
-         * vectorizable.
+         * --------------------------------------------------------------------
+         * compute the number of "batches" of random number pairs generated
+         * per processor. Adjust if the number of processors does not evenly
+         * divide the total number
+         * --------------------------------------------------------------------
          */
+        np = nn;
 
-        for (i = 0; i < nk; i++) {
-            x1 = 2.0 * x[2 * i] - 1.0;
-            x2 = 2.0 * x[2 * i + 1] - 1.0;
-            t1 = pow2(x1) + pow2(x2);
-            if (t1 <= 1.0) {
-                t2 = sqrt(-2.0 * log(t1) / t1);
-                t3 = (x1 * t2);
-                t4 = (x2 * t2);
-                l = max(fabs(t3), fabs(t4));
-                q[l] += 1.0;
-                sx = sx + t3;
-                sy = sy + t4;
+        /*
+         * call the random number generator functions and initialize
+         * the x-array to reduce the effects of paging on the timings.
+         * also, call all mathematical functions that are used. make
+         * sure these initializations cannot be eliminated as dead code.
+         */
+        vranlc(0, &dum[0], dum[1], &dum[2]);
+        dum[0] = randlc(&dum[1], dum[2]);
+        for (i = 0; i < nk_plus; i++) {
+            x[i] = -1.0e99;
+        }
+        Mops = log(sqrt(fabs(max(1.0, 1.0))));
+
+        double t_start = wtime();
+
+        t1 = A;
+        vranlc(0, &t1, A, x.data());
+
+        /* compute AN = A ^ (2 * NK) (mod 2^46) */
+
+        t1 = A;
+
+        for (i = 0; i < MK + 1; i++) {
+            t2 = randlc(&t1, t1);
+        }
+
+        an = t1;
+        gc = 0.0;
+        sx = 0.0;
+        sy = 0.0;
+
+        for (i = 0; i <= NQ - 1; i++) {
+            q[i] = 0.0;
+        }
+
+        /*
+         * each instance of this loop may be performed independently. we compute
+         * the k offsets separately to take into account the fact that some nodes
+         * have more numbers to generate than others.
+         * the batches are distributed round-robin over the FMI ranks; the results
+         * are independent of the number of ranks.
+         */
+        k_offset = -1;
+
+        int batches_done = 0;
+        int local_batches = (rank < np) ? ((np - 1 - rank) / size + 1) : 0;
+        int print_freq = max(1, local_batches / 100);
+
+        for (k = 1 + rank; k <= np; k += size) {
+            kk = k_offset + k;
+            t1 = S;
+            t2 = an;
+
+            /* find starting seed t1 for this kk */
+            for (i = 1; i <= 100; i++) {
+                ik = kk / 2;
+                if ((2 * ik) != kk) {
+                    t3 = randlc(&t1, t2);
+                }
+                if (ik == 0) {
+                    break;
+                }
+                t3 = randlc(&t2, t2);
+                kk = ik;
+            }
+
+            /* compute uniform pseudorandom numbers */
+            vranlc(2 * nk, &t1, A, x.data());
+
+            /*
+             * compute gaussian deviates by acceptance-rejection method and
+             * tally counts in concentric square annuli. this loop is not
+             * vectorizable.
+             */
+
+            for (i = 0; i < nk; i++) {
+                x1 = 2.0 * x[2 * i] - 1.0;
+                x2 = 2.0 * x[2 * i + 1] - 1.0;
+                t1 = pow2(x1) + pow2(x2);
+                if (t1 <= 1.0) {
+                    t2 = sqrt(-2.0 * log(t1) / t1);
+                    t3 = (x1 * t2);
+                    t4 = (x2 * t2);
+                    l = max(fabs(t3), fabs(t4));
+                    q[l] += 1.0;
+                    sx = sx + t3;
+                    sy = sy + t4;
+                }
+            }
+
+            batches_done++;
+            if (batches_done % print_freq == 0 || batches_done == local_batches) {
+                printf("Rank %d: finished batch %d of %d\n", rank, batches_done, local_batches);
+                fflush(stdout);
             }
         }
 
-        batches_done++;
-        if (batches_done % print_freq == 0 || batches_done == local_batches) {
-            printf("Rank %d: finished batch %d of %d\n", rank, batches_done, local_batches);
-            fflush(stdout);
+        // combine partial sums of all ranks
+        double sums[NQ + 2], gsums[NQ + 2];
+        sums[0] = sx;
+        sums[1] = sy;
+        memcpy(&sums[2], q, NQ * sizeof(double));
+
+        allreduce_sum_double(comm, sums, gsums, NQ + 2);
+
+        sx = gsums[0];
+        sy = gsums[1];
+        memcpy(q, &gsums[2], NQ * sizeof(double));
+
+        for (i = 0; i <= NQ - 1; i++) {
+            gc = gc + q[i];
         }
-    }
 
-    // combine partial sums of all ranks
-    double sums[NQ + 2], gsums[NQ + 2];
-    sums[0] = sx;
-    sums[1] = sy;
-    memcpy(&sums[2], q, NQ * sizeof(double));
+        tm = wtime() - t_start;
 
-    allreduce_sum_double(comm, sums, gsums, NQ + 2);
-
-    sx = gsums[0];
-    sy = gsums[1];
-    memcpy(q, &gsums[2], NQ * sizeof(double));
-
-    for (i = 0; i <= NQ - 1; i++) {
-        gc = gc + q[i];
-    }
-
-    tm = wtime() - t_start;
-
-    verified = _npb_ep::reference_sums(m, sx_verify_value, sy_verify_value);
-    if (verified) {
-        sx_err = fabs((sx - sx_verify_value) / sx_verify_value);
-        sy_err = fabs((sy - sy_verify_value) / sy_verify_value);
-        verified = ((sx_err <= EPSILON) && (sy_err <= EPSILON));
-    }
-    Mops = pow(2.0, m + 1) / tm / 1000000.0;
-
-    if (rank == 0) {
-        printf("\n EP Benchmark Results:\n\n");
-        printf(" CPU Time =%10.4f\n", tm);
-        printf(" N = 2^%5d\n", m);
-        printf(" No. Gaussian Pairs = %15.0f\n", gc);
-        printf(" Sums = %25.15e %25.15e\n", sx, sy);
-        printf(" Counts: \n");
-        for (i = 0; i < NQ - 1; i++) {
-            printf("%3d%15.0f\n", i, q[i]);
+        const bool has_reference = reference_sums(m, sx_verify_value, sy_verify_value);
+        verified = has_reference;
+        if (verified) {
+            sx_err = fabs((sx - sx_verify_value) / sx_verify_value);
+            sy_err = fabs((sy - sy_verify_value) / sy_verify_value);
+            verified = ((sx_err <= EPSILON) && (sy_err <= EPSILON));
         }
-        printf(" Mop/s total = %15.2f\n", Mops);
-        printf(" Verification = %s\n", verified ? "SUCCESSFUL" : "UNSUCCESSFUL");
-    } else {
-        printf("Summary info on rank 0\n");
+        Mops = pow(2.0, m + 1) / tm / 1000000.0;
+
+        if (rank == 0) {
+            printf("\n EP Benchmark Results:\n\n");
+            printf(" CPU Time =%10.4f\n", tm);
+            printf(" N = 2^%5d\n", m);
+            printf(" No. Gaussian Pairs = %15.0f\n", gc);
+            printf(" Sums = %25.15e %25.15e\n", sx, sy);
+            printf(" Counts: \n");
+            for (i = 0; i < NQ - 1; i++) {
+                printf("%3d%15.0f\n", i, q[i]);
+            }
+            printf(" Mop/s total = %15.2f\n", Mops);
+            printf(" Verification = %s\n", verified ? "SUCCESSFUL" : "UNSUCCESSFUL");
+        } else {
+            printf("Summary info on rank 0\n");
+        }
+        fflush(stdout);
+
+        // Self validation: the allreduced sums must be finite and, when the reference table knows
+        // this m, match the published values within a relative error of EPSILON. compare() from
+        // util.hpp cannot be used here because its double specialization is an absolute tolerance.
+        if (!std::isfinite(sx) || !std::isfinite(sy)) {
+            std::cout << "rank " << rank << " returned non-finite sums " << sx << " " << sy << std::endl;
+            ok = false;
+        }
+        if (has_reference) {
+            if (sx_err > EPSILON) {
+                std::cout << "rank " << rank << " returned wrong sx: expected " << sx_verify_value << ", got " << sx
+                          << std::endl;
+                ok = false;
+            }
+            if (sy_err > EPSILON) {
+                std::cout << "rank " << rank << " returned wrong sy: expected " << sy_verify_value << ", got " << sy
+                          << std::endl;
+                ok = false;
+            }
+        } else {
+            std::cout << "No EP reference sums for M = " << m << ", skipping sum verification for rank " << rank
+                      << std::endl;
+        }
+
+        // Cross-rank check: the allreduce must have left every rank with the same sx/sy/gc. Collected
+        // with a gather, i.e. a different collective than the one being verified, so a broken
+        // allreduce cannot hide behind the check that inspects it.
+        std::vector<double> triple = {sx, sy, gc};
+        std::vector<double> all_triples;
+        if (rank == 0) {
+            all_triples = std::vector<double>(3 * size);
+        }
+        FMI::Comm::Data<std::vector<double>> _buf_triple(triple), _buf_all_triples(all_triples);
+        comm.gather(_buf_triple, _buf_all_triples, 0);
+        all_triples = _buf_all_triples.get();
+
+        if (rank == 0) {
+            for (int r = 0; r < size; r++) {
+                ok &= compare<double>(r, "sx", sx, all_triples[3 * r]);
+                ok &= compare<double>(r, "sy", sy, all_triples[3 * r + 1]);
+                ok &= compare<double>(r, "gc", gc, all_triples[3 * r + 2]);
+            }
+        }
+
+        fmi_examples::teardown_sync(comm, opts);
+    } catch (const std::exception &e) {
+        std::cout << "rank " << rank << " crashed: " << e.what() << std::endl;
+        ok = false;
+    } catch (const std::string &s) {
+        std::cout << "rank " << rank << " crashed: " << s << std::endl;
+        ok = false;
+    } catch (...) {
+        std::cout << "rank " << rank << " crashed: unknown exception" << std::endl;
+        ok = false;
     }
-    fflush(stdout);
 
-    output->rank = rank;
-    output->sx = sx;
-    output->sy = sy;
-    output->gc = gc;
-
-    delete[] x;
-
-    // Hold every channel open until all ranks are finished: FMI's ClientServer
-    // teardown deletes objects peers may not have downloaded yet.
-    fmi_examples::rank_barrier();
-
-    return sizeof(npb_ep_output);
+    std::cout << "rank " << rank << ": " << (ok ? "PASS" : "FAIL") << std::endl;
+    return ok ? 0 : 1;
 }
 
 #undef max
 #undef pow2
 #undef A
 #undef S
-
-int main(int argc, char **argv) {
-    fmi_examples::Flags flags;
-    flags.add_int("m", 28, "Log_2 of the number of random number pairs (24=class S, 28=class A)");
-
-    return fmi_examples::run(argc, argv, "npb_ep", flags, [](const fmi_examples::Options &opts) {
-        fmi_examples::ExampleSpec spec;
-        spec.name = "npb_ep";
-        spec.input_size = sizeof(npb_ep_input);
-        spec.output_size = sizeof(npb_ep_output);
-        spec.get_context = [] { return _npb_ep::get_context(); };
-        spec.free_context = [](void *ctx) { _npb_ep::free_context(ctx); };
-        int m = opts.flags.get_int("m");
-        // The ported kernel bails out with a diagnostic (and no output) when m <= MK, exactly like
-        // the NPB original. Since it returns rather than throws, the harness would score that as a
-        // clean exit and — for rank 0, whose zero-filled output happens to satisfy every check —
-        // report PASS for a benchmark that computed nothing. Reject the value up front instead.
-        if (m <= MK) {
-            throw std::runtime_error("npb_ep requires --m greater than " + std::to_string(MK) + " (MK); got " +
-                                     std::to_string(m));
-        }
-        spec.initialize_input = [m](int func_num, int numcores, void *, char *ptr) {
-            _npb_ep::fill_input(func_num, numcores, m, ptr);
-        };
-        spec.check_output = [m](int func_num, int numcores, void *ctx, char *ptr) {
-            return _npb_ep::verify_output(func_num, numcores, m, ctx, ptr);
-        };
-        spec.fn = npb_ep;
-        return spec;
-    });
-}
