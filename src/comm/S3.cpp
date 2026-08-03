@@ -9,7 +9,7 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
-#include <aws/s3/model/ListObjectsRequest.h>
+#include <aws/s3/model/ListObjectsV2Request.h>
 
 #include <boost/log/trivial.hpp>
 
@@ -408,18 +408,48 @@ void FMI::Comm::S3::delete_object(std::string name) {
     }
 }
 
+//! Every object this communicator has written, however many pages that takes.
+/*!
+ * Two things were wrong with asking for one unfiltered page. S3 returns at most a thousand keys
+ * per response and says so in IsTruncated, which was ignored: past a thousand objects — one
+ * barrier at 1000 ranks, or any job that has been running for a while, since nothing is deleted
+ * before finalize — the caller silently saw a prefix of the bucket. And the request had no prefix
+ * at all, so every job sharing the bucket listed every other job's objects, which the barrier
+ * above counts by suffix: another communicator's markers arrive as this one's.
+ *
+ * Under recover this is not on any hot path — RecoverableClientServer::barrier asks for the N
+ * marker keys by name instead — but the flag-off barrier calls it once per poll, so the prefix is
+ * also what keeps that request proportional to the job rather than to the bucket.
+ */
 std::vector<std::string> FMI::Comm::S3::get_object_names() {
     std::vector<std::string> object_names;
-    Aws::S3::Model::ListObjectsRequest request;
-    request.WithBucket(bucket_name);
-    auto outcome = client->ListObjects(request);
-    if (outcome.IsSuccess()) {
-        auto objects = outcome.GetResult().GetContents();
-        for (auto& object : objects) {
-            object_names.push_back(object.GetKey());
+    Aws::S3::Model::ListObjectsV2Request request;
+    request.WithBucket(bucket_name).WithPrefix(object_key_prefix());
+    while (true) {
+        auto outcome = client->ListObjectsV2(request);
+        if (!outcome.IsSuccess()) {
+            // Never thrown: this runs inside the flag-off barrier's poll loop, which has no
+            // handler and re-enters on an empty result, and from nothing that could act on it.
+            // What was collected so far is returned, which is what a partial listing means.
+            BOOST_LOG_TRIVIAL(error) << "Error when listing objects from S3: " << outcome.GetError();
+            break;
         }
-    } else {
-        BOOST_LOG_TRIVIAL(error) << "Error when listing objects from S3: " << outcome.GetError();
+        const auto& result = outcome.GetResult();
+        for (const auto& object : result.GetContents()) {
+            object_names.emplace_back(object.GetKey().c_str(), object.GetKey().size());
+        }
+        if (!result.GetIsTruncated()) {
+            break;
+        }
+        const Aws::String& token = result.GetNextContinuationToken();
+        if (token.empty()) {
+            // A truncated listing without a token is a service that contradicts itself; asking
+            // again with the same request would repeat the same page forever.
+            BOOST_LOG_TRIVIAL(error) << "S3: truncated listing without a continuation token, "
+                                        "returning the " << object_names.size() << " names read so far";
+            break;
+        }
+        request.SetContinuationToken(token);
     }
     return object_names;
 }
