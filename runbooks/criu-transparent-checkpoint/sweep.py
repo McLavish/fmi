@@ -185,19 +185,25 @@ def s3_cost_guard(args, confirmed):
     The other planes are free: a local Redis or a TCP mesh costs the same whether a run is
     twenty trials or twenty thousand. S3 charges per request, and this sweep's default is
     --rounds 40000, which was chosen for a plane where a round is a couple of syscalls. At
-    eight peers that default is about five dollars and eleven hours of wall clock, entered by
+    eight peers that default is hundreds of dollars and eleven hours of wall clock, entered by
     leaving one flag off -- so the estimate is printed for every S3 run and a large one has to
     be asked for.
 
-    The estimate is deliberately rough and on the high side: one PUT per rank per round, and
-    one GET per rank per round per peer, which counts the poll loops' repeated GETs as if
-    every object were found on the first ask (they are not, so the real GET count is higher --
-    but GETs are twelve times cheaper than PUTs and the PUT count is exact).
+    The PUT model is measured, not assumed: a rank writes one object per *collective*, not per
+    round, so the baseline shape's ~11 producer-side operations per round left 110 objects
+    after 2 ranks x 10 rounds and 440 after 2 ranks x 40 (under recover the object count IS
+    the PUT count) -- ~5.5 PUTs per rank per round at 2 ranks, tending to ~6 as ranks grow.
+    8 per rank per round buys margin on top of that. GETs are modelled as one per rank per
+    round per peer, which undercounts the poll loops' repeated asks -- but GETs are twelve
+    times cheaper than PUTs.
     """
+    # Measured 5.5 PUTs/rank/round at 2 ranks on the baseline shape, ~6 asymptotically;
+    # 8 keeps the estimate on the high side for every shipped shape.
+    puts_per_rank_round = 8
     peers = max(args.peers)
     rounds = args.rounds
     trials = args.trials
-    puts = trials * peers * rounds
+    puts = trials * peers * rounds * puts_per_rank_round
     gets = trials * peers * rounds * peers
     # us-east-1/eu-central-1 standard pricing, per 1000 requests, 2026.
     dollars = puts / 1000. * 0.005 + gets / 1000. * 0.0004
