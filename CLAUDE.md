@@ -50,6 +50,29 @@ via `include/` (exported to a parent scope as `FMI_INCLUDE_DIRS`). The transpare
 runbook's subject program is built as well whenever `FMI_ENABLE_REDIS` is ON and FMI is the
 top-level project; it is an ordinary FMI application, so it needs no option of its own.
 
+### S3-enabled build
+
+The AWS SDK is not packaged on Ubuntu; build the one component the `S3` backend needs and point
+CMake at it. Verified against **aws-sdk-cpp 1.11.861** (the version the S3 channel's error
+classification was measured against):
+
+```bash
+git clone --recurse-submodules https://github.com/aws/aws-sdk-cpp -b 1.11.861 /tmp/aws-sdk-cpp
+cmake -S /tmp/aws-sdk-cpp -B /tmp/aws-sdk-cpp/build -GNinja \
+  -DBUILD_ONLY=s3 -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTING=OFF \
+  -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local/aws-sdk-cpp"
+cmake --build /tmp/aws-sdk-cpp/build --target install   # 8-20 min
+
+cmake -S . -B build-s3 -DFMI_ENABLE_S3=ON -DFMI_ENABLE_REDIS=ON -DFMI_ENABLE_TCPUNCH=OFF \
+  -DFMI_BUILD_TESTS=ON -DCMAKE_PREFIX_PATH="$HOME/.local/aws-sdk-cpp"
+cmake --build build-s3 -j"$(nproc)"
+export LD_LIBRARY_PATH="$HOME/.local/aws-sdk-cpp/lib"   # if ldd on the binaries misses aws libs
+```
+
+Needs `libcurl4-openssl-dev libssl-dev ninja-build`. The suite runs from `build-s3/tests` exactly
+as from `build/tests`, and is green without AWS credentials.
+
 ### Local Direct-only debug build (no AWS/Redis)
 
 This is the fastest dev loop and the path verified on Ubuntu 24.04. It disables the S3 and
@@ -100,11 +123,19 @@ cd build/tests
 ./Boost_Tests_run --list_content                   # list all suites/cases
 ```
 
-Fourteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
+Fifteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
 `Channels`, `Communicator`, `LinkLayer`, `LinkRecovery`, `LinkLiveness`, `LinkIncarnations`,
 `FramedTransport`, `TransportRecovery`, `OperationIdentity`, `ProtocolValidation`,
-`ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`, `ClientServerRecovery`.
+`ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`, `ClientServerRecovery`,
+`S3Backend`.
 (`tests/client.cpp` is a standalone sample, not a suite, and is not compiled into the binary.)
+`S3Backend` only exists in an `FMI_ENABLE_S3=ON` build, and splits in two: the cases that need a
+working store skip green unless `FMI_S3_TEST_BUCKET` names one (plus optional
+`FMI_S3_TEST_REGION`/`_ENDPOINT`/`_PATH_STYLE`/`_SLOW`), while the cases about failure — a
+throttled write that is retried, an operation that gives up inside its budget, a refusal that is
+not waited out — always run, against a fake S3 endpoint the suite serves on loopback. So the
+S3-enabled build is green with no credentials and no bucket, and still covers the recovery
+bounds.
 
 **Most tests need live infrastructure:** everything that talks `DirectTCP` needs a running
 Redis, which is its peer registry, and `config/fmi_identity_test.json` drives the `Redis`
@@ -241,7 +272,7 @@ The dependency direction is: user API → channel policy → channel → transpo
     `Communicator::incarnation`.
 
 - **Store-family recovery** (`include/comm/RecoverableClientServer.h`,
-  `src/comm/RecoverableClientServer.cpp`, `src/comm/Redis.cpp`): the same idea as the sequenced
+  `src/comm/RecoverableClientServer.cpp`, `src/comm/Redis.cpp`, `src/comm/S3.cpp`): the same idea as the sequenced
   link layer for the other channel family, in the same place in the hierarchy —
   `RecoverableClientServer` sits between `ClientServer`, which keeps the collective algorithms
   and is untouched, and the concrete backends, exactly as `TcpChannelBase` sits between
@@ -249,9 +280,9 @@ The dependency direction is: user API → channel policy → channel → transpo
   config block, **off by default**: unset, every override delegates to the base and the keys, the
   deletes and the byte copies are what the family always wrote. The only flag-off difference
   anywhere is that a NULL hiredis reply is now a named `std::runtime_error` instead of a null
-  dereference. `Redis` implements the flag; `S3` is re-based onto the class but **refuses the
-  flag at construction**, because the family half (no deletion) without an S3 half (a lifecycle
-  rule) is unbounded cost plus silent data loss.
+  dereference. **Both backends implement the flag.** `Redis` was first; `S3` refused it at
+  construction until it had its own half, because the family half (no deletion) without an S3 half
+  is unbounded cost plus silent data loss.
   - Why the store family needs so much less machinery than TCP: all protocol state is
     process-local memory that criu restores byte-exact (the `num_operations` counters, the poll
     loops' locals), the store holds durable whole values, and every command is an idempotent
@@ -276,6 +307,30 @@ The dependency direction is: user API → channel policy → channel → transpo
     exact marker keys, which also ends the cross-communicator suffix false-arrivals; and
     `object_key_prefix()` gains a `|` separator, closing the `"job"` rank 11 vs `"job1"` rank 1
     key collision for recovered jobs.
+  - **The S3 half.** The mechanism is the same and the client is the difference: a request costs a
+    round trip and money, and one that fails can cost more wall clock than the whole budget it is
+    charged against. So the channel is configured explicitly rather than by SDK default —
+    `connect_timeout_ms` (3000), `request_timeout_ms` (15000, set on *both* `httpRequestTimeoutMs`
+    and `requestTimeoutMs`, since the SDK field of that name is curl's low-speed time and not a
+    cap), `max_attempts` (4, an explicit `StandardRetryStrategy`), `max_connections` (4),
+    `transient_failure_limit` (200), `credentials_provider` (`default`|`environment`),
+    `endpoint_url` + `use_path_style` for MinIO/LocalStack. A failure is classified by HTTP status
+    and exception name, **never by the SDK's error enum** (1.11.861 maps `ExpiredToken` to
+    `UNKNOWN`): absence is the silent hot path; a refusal, a missing bucket and a
+    misrouted/missigned request (301 `PermanentRedirect`, 400 `AuthorizationHeaderMalformed`) are
+    raised at once under `recover`; anything else is transient and bounded twice — by
+    `transient_failure_limit` consecutive failures **and** by `max_timeout` milliseconds of wall
+    clock across them, measured from the request that opened the run and restarted by any answer,
+    absence included. Uploads retry at the poll interval under those same bounds before throwing.
+    Also here and unconditional: `ListObjectsV2` with the communicator's prefix and pagination
+    (one unpaginated whole-bucket page before), `DeleteObjects` in batches of 1000 at finalize,
+    `std::call_once` SDK init that is never shut down (`Init`→`Shutdown`→`Init` is unsupported).
+  - **S3 has no per-object expiry**, so the TTL half of the contract cannot be met by the channel:
+    `object_ttl_s` is accepted and inert there, and the bucket **must carry a lifecycle expiration
+    rule** or a recovered job's objects are kept and billed forever. The constructor says so at
+    `warning` whenever `recover` is on. Grant `s3:ListBucket` to the ranks' role as well — without
+    it S3 answers a GET for a missing key with 403, not 404, so every not-yet-written object looks
+    like a refusal and `recover` raises on the first poll of the first collective.
   - Two preconditions this makes load-bearing. **`comm_name` must be unique per job run**: with
     nothing deleted, a same-named run inside the TTL window reads stale keys as live data, and
     its first barrier is satisfied instantly by the previous run's markers. And under a
@@ -284,11 +339,14 @@ The dependency direction is: user API → channel policy → channel → transpo
     exact-length check now reports rather than truncating past. `Utils::Timeout` remains
     **terminal for the communicator** (the counters are not retry-safe): `recover` makes timeouts
     rarer, not recoverable.
-  - `runbooks/criu-transparent-checkpoint/fmi_redis.json` is the checkpointing config for this
-    data plane, and it enables Redis and nothing else on purpose — with DirectTCP also enabled
-    the cost model routes every operation of that subject to DirectTCP, so a sweep would exercise
-    no store code at all and report green. That runbook's README documents the sweep invocation
-    and the evidence.
+  - `runbooks/criu-transparent-checkpoint/fmi_redis.json` and `fmi_s3.json` are the checkpointing
+    configs for this data plane, and each enables its one backend and nothing else on purpose —
+    with DirectTCP also enabled the cost model routes every operation of that subject to
+    DirectTCP, so a sweep would exercise no store code at all and report green. `sweep.py
+    --config` picks the plane and cleans up after it; on S3 it also prints the requests and
+    dollars a run will spend and refuses one above `--max-cost` (default $1) without `--yes`,
+    because the sweep's default `--rounds 40000` is sized for a free plane and is $52 at eight
+    peers. That runbook's README documents the invocations and the evidence.
 
 - **Python bindings** (`python/`): a Boost.Python module. `fmi_python.cpp` is the module entry
   point — it registers the `Communicator` class and the type/op helpers (`hints`, `func`, `op`,

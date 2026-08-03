@@ -140,7 +140,7 @@ freeze lands ends `ALREADY FINISHED (trial is void)` and is skipped; lengthen a 
 `--max-checkpoints N` checkpoints up to N times per run, choosing a fresh rank each time, which
 exercises a rank being frozen while a peer is itself mid-repair.
 
-## ClientServer (Redis) data plane
+## ClientServer (Redis, S3) data plane
 
 Everything above runs over `DirectTCP`. The store-backed family checkpoints too, by an entirely
 different mechanism, and the same sweep drives it — `--config` chooses the plane:
@@ -213,6 +213,8 @@ All on `fmi_redis.json`, single host, live Redis on `127.0.0.1:6379`, criu 4.2.1
 
 The DirectTCP profile was re-verified against the same `sweep.py` after the `--config` refactor —
 `--trials 3 --peers 2 --rounds 8000 --seed 7` on the unchanged `fmi.json`, 3 passed, 0 failed.
+Re-checked after the S3 cost guard landed: `--trials 3 --peers 2 --rounds 4000 --seed 3`, 2
+passed, 0 failed, 1 skipped (a freeze that landed after the job had finished).
 
 `--shape collectives_sweep` is **not** covered, and the reason is not the store: its *clean*
 baseline fails at 4 ranks before any trial runs, on a pre-existing `ClientServer::reduce` bug. For
@@ -222,6 +224,87 @@ with its own contribution and then folds the remaining ranks in ascending order,
 contribution in its own slot and is correct. Reproduced on the commit this work branched from,
 unrelated to the recovery flag, and not fixed here. `--shape noncommutative` rotates its root the
 same way and is affected identically.
+
+### The S3 plane
+
+`fmi_s3.json` is the same shape as `fmi_redis.json` — S3 enabled, everything else off, for the
+same reason — with `timeout: 100`, `max_timeout: 60000`, `recover: true`. Two values are yours:
+
+```jsonc
+"bucket_name": "fmi-criu-sweep-CHANGE-ME",   // a bucket you own; the placeholder fails loudly
+"s3_region":   "eu-central-1"
+```
+
+Before the first run:
+
+1. **Put a lifecycle expiration rule on the bucket.** This is not optional and it is not a
+   nicety: under `recover` nothing is ever deleted by a rank, and S3 has no per-object expiry, so
+   `object_ttl_s` cannot do here what it does for Redis. Without a rule every object of every run
+   is kept and billed forever. One day is plenty:
+   ```bash
+   aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
+     --lifecycle-configuration '{"Rules":[{"ID":"fmi-sweep","Status":"Enabled",
+       "Filter":{"Prefix":""},"Expiration":{"Days":1},
+       "AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}'
+   ```
+   The channel says the same thing at `warning` every time a recovering S3 channel is built.
+2. **Grant `s3:ListBucket`** on the bucket to whatever the ranks run as, not just `GetObject` and
+   `PutObject`. Without it S3 answers a GET for a key that does not exist with 403, not 404 — by
+   design, so that a missing key cannot be told apart from one you may not read — and under
+   `recover` the channel raises on the first poll of the first collective instead of waiting.
+3. **Export credentials into the environment before starting the sweep.** The sweep inherits its
+   environment; a rank that is checkpointed keeps the environment its image captured, forever, so
+   a session token that expires mid-run cannot be refreshed from there. `aws configure
+   export-credentials --format env` is the shortest route; a profile or `credential_process` in
+   `~/.aws/` is the durable one, because those providers re-read their file when what they handed
+   out expires. **criu images of an S3 rank contain the credentials in plain text** — the `sweep/`
+   directory is gitignored, and it is not somewhere to leave a session token lying around.
+
+```bash
+python3 sweep.py --config fmi_s3.json --trials 12 --peers 2 4 --rounds 100 \
+    --print-every 1 --delay-range 0.5 20 --max-checkpoints 2
+```
+
+`--print-every 1` is mandatory: the progress check reads a round line logged *after* the freeze,
+and at S3 latencies a run of 100 rounds prints too rarely otherwise. `--delay-range 0.5 20` is
+likewise sized for a plane where a round is two round trips to a region, not two syscalls.
+
+**`max_timeout` means two different things here**, and the section above is only half the story on
+S3. For a peer that is merely late it is still iterations — `max_timeout / timeout` polls, each
+paying a round trip — so a rank frozen for two minutes costs its peers nothing but patience. But a
+*failing* request on this backend can cost far more wall clock than the interval it is charged:
+15 s against an address that drops packets, 65 s against one that accepts the connection and then
+says nothing. So a run of consecutive failures is bounded by `max_timeout` **milliseconds** as
+well, measured from the request that opened the run and restarted by any answer from the store,
+absence included. `60000` is therefore about a minute of a store that is not working, and about
+66 s × the poll count of a peer that is simply slow.
+
+**A run costs money, and the sweep says how much before it starts.** It prints the PUT and GET
+counts it expects and stops above `--max-cost` (default $1) unless `--yes` is given — the default
+`--rounds 40000` is sized for a free plane and is about $52 at eight peers. The estimate is rough
+and low on GETs (it counts one per rank per round per peer and the poll loops ask repeatedly); the
+PUT count, which dominates the bill, is exact. The invocation above estimates $0.03.
+
+An S3-compatible endpoint costs nothing and exercises the same code: add `"endpoint_url":
+"http://127.0.0.1:9000"` and `"use_path_style": true` to the backend block and point it at MinIO
+(`docker run --rm -d -p 9000:9000 minio/minio server /data`, credentials `minioadmin`). Not
+evidence for AWS — throttling, redirects and expiring tokens are what a real bucket adds — but it
+is where to iterate.
+
+### What is verified for S3, and what is not
+
+All of it against **MinIO on loopback**, not AWS (see the last row). Baselines: 84030/25770 at 60
+rounds and 1444200/919800 at 400, 2 ranks.
+
+| | |
+| --- | --- |
+| by hand, 2 ranks, rank 1 `criu dump --unprivileged --tcp-close --shell-job` at round 10 of 60 | 3/3 restored; both ranks `DONE` with the baseline checksums, and the frozen rank logged rounds 15 through 55 after its restore |
+| `sweep.py --config <minio>.json --trials 6 --peers 2 --rounds 120 --print-every 1 --delay-range 0.5 8 --max-checkpoints 2 --seed 5` | 6 passed, 0 failed, 0 skipped |
+| the same at `--trials 3 --peers 4 --rounds 60 --max-checkpoints 1 --seed 21` | 3 passed, 0 failed, 0 skipped |
+| store cleanup | after `--trials 4 --peers 2 --rounds 100`, the bucket is empty. The `aws s3 rm --recursive` this replaced deleted **nothing** — 36528 objects left behind by a run that reported clean |
+| the SDK's threads and sockets across a freeze | the `AwsEventLoop` CRT threads and the curl connection pool survive dump/restore; the SDK's own retry dials a fresh connection, which is what makes the recovery transparent |
+| the failure bounds | `tests/s3_backend.cpp`, against a fake endpoint on loopback: a write throttled with 503 is retried rather than abandoned; an operation against a store that never answers ends in `BackendFailure` inside its budget; a refusal and a wrong region are raised at once. Against a blackholed address a `download` gives up in 63 s on a 60 s budget, where the same code without those bounds took 120 s against a 3 s budget in the test and would have taken 51 minutes against a 60 s one |
+| **anything against real AWS** | **not run.** The AWS session on this machine is expired, and MinIO is a stand-in: it does not throttle, redirect, or expire a session token, which are exactly the conditions the classification and the retry loop exist for. Those paths are covered by the fake endpoint in the suite, not by a bucket |
 
 ## Interpreting failures
 
