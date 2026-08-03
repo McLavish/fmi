@@ -15,8 +15,10 @@ trial rather than being absorbed.
 checksums are only ever compared within one shape and rank count.
 
 --config selects the FMI configuration, and with it the data plane under test: fmi.json runs
-the job over DirectTCP, fmi_redis.json over Redis. The config must enable exactly one backend
-(see data_plane), and the sweep cleans up whatever that backend leaves behind between trials.
+the job over DirectTCP, fmi_redis.json over Redis, fmi_s3.json over S3. The config must enable
+exactly one backend (see data_plane), and the sweep cleans up whatever that backend leaves
+behind between trials. An S3 run also costs money, so it prints what it expects to spend and
+stops above --max-cost; see s3_cost_guard.
 """
 import argparse
 import json
@@ -101,8 +103,10 @@ def clean_comm(comm):
         # from ever reading a previous trial's values as live data.
         _redis_delete_pattern(host, port, f"{comm}*")
     elif name == "S3":
-        # TODO: the S3 phase adds the cost/profile guard that has to sit in front of this --
-        # a sweep against a real bucket is real money and a real, possibly shared, bucket.
+        # Under "recover" the channel deletes nothing, and S3 has no per-object expiry, so a
+        # trial's whole message history stays in the bucket until the lifecycle rule or this
+        # line removes it. The cost guard in main() is what stands in front of a sweep large
+        # enough for that to matter.
         subprocess.run(["aws", "s3", "rm", f"s3://{params.get('bucket_name')}/{comm}",
                         "--recursive", "--only-show-errors"], capture_output=True)
 
@@ -116,6 +120,38 @@ def clean_run(prefix):
     elif name == "S3":
         subprocess.run(["aws", "s3", "rm", f"s3://{params.get('bucket_name')}/{prefix}",
                         "--recursive", "--only-show-errors"], capture_output=True)
+
+
+def s3_cost_guard(args, confirmed):
+    """Refuse a sweep whose S3 bill would be a surprise. Returns False to stop.
+
+    The other planes are free: a local Redis or a TCP mesh costs the same whether a run is
+    twenty trials or twenty thousand. S3 charges per request, and this sweep's default is
+    --rounds 40000, which was chosen for a plane where a round is a couple of syscalls. At
+    eight peers that default is about five dollars and eleven hours of wall clock, entered by
+    leaving one flag off -- so the estimate is printed for every S3 run and a large one has to
+    be asked for.
+
+    The estimate is deliberately rough and on the high side: one PUT per rank per round, and
+    one GET per rank per round per peer, which counts the poll loops' repeated GETs as if
+    every object were found on the first ask (they are not, so the real GET count is higher --
+    but GETs are twelve times cheaper than PUTs and the PUT count is exact).
+    """
+    peers = max(args.peers)
+    rounds = args.rounds
+    trials = args.trials
+    puts = trials * peers * rounds
+    gets = trials * peers * rounds * peers
+    # us-east-1/eu-central-1 standard pricing, per 1000 requests, 2026.
+    dollars = puts / 1000. * 0.005 + gets / 1000. * 0.0004
+    print(f"S3 request estimate: {puts} PUT + {gets} GET, about ${dollars:.2f} "
+          f"({trials} trials x {peers} peers x {rounds} rounds)")
+    if dollars <= args.max_cost or confirmed:
+        return True
+    print(f"estimated ${dollars:.2f} is over --max-cost ${args.max_cost:.2f}. Re-run with "
+          f"--yes to go ahead, or lower --rounds/--trials/--peers. The sweep's default of "
+          f"--rounds 40000 is sized for a free data plane.", file=sys.stderr)
+    return False
 
 
 def known_shapes():
@@ -388,6 +424,11 @@ def main():
     ap.add_argument("--max-checkpoints", type=int, default=1)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--max-cost", type=float, default=1.0,
+                    help="S3 only: estimated dollars this run may spend before it asks for "
+                         "--yes. The other data planes are free and ignore it")
+    ap.add_argument("--yes", action="store_true",
+                    help="go ahead with an S3 run over --max-cost")
     args = ap.parse_args()
 
     PRINT_EVERY = args.print_every
@@ -400,6 +441,8 @@ def main():
         else os.path.join(HERE, args.config)
     PLANE = data_plane(CONFIG)
     print(f"data plane: {PLANE[0]} (from {CONFIG})")
+    if PLANE[0] == "S3" and not s3_cost_guard(args, args.yes):
+        return 2
 
     available = known_shapes()
     if available is None:
