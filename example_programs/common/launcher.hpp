@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <ctime>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -42,6 +43,18 @@ namespace fmi_examples {
             add(name, Kind::Int, help).int_value = default_value;
         }
 
+        /*!
+         * Like add_int, but the accepted range is limited to what an int can hold, so a value that
+         * does not fit is rejected while the command line is being parsed (a usage error, exit 2)
+         * instead of later, by get_int throwing out of the example's main.
+         */
+        void add_int32(const std::string &name, int default_value, const std::string &help = "") {
+            Entry &e = add(name, Kind::Int, help);
+            e.int_value = default_value;
+            e.min_value = INT32_MIN;
+            e.max_value = INT32_MAX;
+        }
+
         void add_double(const std::string &name, double default_value, const std::string &help = "") {
             add(name, Kind::Double, help).double_value = default_value;
         }
@@ -54,6 +67,7 @@ namespace fmi_examples {
             return find(name, Kind::Int).int_value;
         }
 
+        //! Defensive: flags read with get_int should be declared with add_int32, which makes the throw unreachable.
         int get_int(const std::string &name) const {
             long long v = get_long(name);
             if (v < INT32_MIN || v > INT32_MAX) {
@@ -94,24 +108,30 @@ namespace fmi_examples {
             long long int_value = 0;
             double double_value = 0.0;
             std::string string_value;
+            //! Accepted range of an integer flag, narrowed by add_int32.
+            long long min_value = std::numeric_limits<long long>::min();
+            long long max_value = std::numeric_limits<long long>::max();
         };
 
         const std::vector<Entry> &entries() const {
             return order;
         }
 
-        //! Assigns a raw command line token to a declared flag; throws if it does not parse.
+        //! Assigns a raw command line token to a declared flag; throws if it does not parse or is out of range.
         void set_from_string(const std::string &name, const std::string &value) {
             Entry &e = mutable_find(name);
+            if (e.kind == Kind::String) {
+                e.string_value = value;
+                return;
+            }
+            long long parsed_int = 0;
+            double parsed_double = 0.0;
             try {
                 size_t consumed = 0;
                 if (e.kind == Kind::Int) {
-                    e.int_value = std::stoll(value, &consumed);
-                } else if (e.kind == Kind::Double) {
-                    e.double_value = std::stod(value, &consumed);
+                    parsed_int = std::stoll(value, &consumed);
                 } else {
-                    e.string_value = value;
-                    consumed = value.size();
+                    parsed_double = std::stod(value, &consumed);
                 }
                 if (consumed != value.size()) {
                     throw std::invalid_argument("trailing characters");
@@ -119,6 +139,18 @@ namespace fmi_examples {
             } catch (const std::exception &) {
                 throw std::runtime_error("invalid value for --" + normalize(name) + ": '" + value + "'");
             }
+            if (e.kind != Kind::Int) {
+                e.double_value = parsed_double;
+                return;
+            }
+            // Range is checked here, while parse_cli's try block is still on the stack, so an
+            // out-of-range value is a usage error rather than an exception escaping main().
+            if (parsed_int < e.min_value || parsed_int > e.max_value) {
+                throw std::runtime_error("value for --" + normalize(name) + " must be in [" +
+                                         std::to_string(e.min_value) + ", " + std::to_string(e.max_value) + "]: '" +
+                                         value + "'");
+            }
+            e.int_value = parsed_int;
         }
 
         std::string default_text(const Entry &e) const {
@@ -264,7 +296,7 @@ namespace fmi_examples {
                << ")\n"
                << "  --memory MIB       faas_memory hint for the FMI cost model (default " << DEFAULT_MEMORY_MIB
                << ")\n"
-               << "  --teardown-grace MS  Hold channels open this long after the final barrier\n"
+               << "  --teardown-grace MS  Hold channels open this long after the final rendezvous\n"
                << "                     (default " << DEFAULT_TEARDOWN_GRACE_MS << ", 0 disables)\n"
                << "  --help             Print this message\n";
             if (!flags.entries().empty()) {
@@ -276,17 +308,30 @@ namespace fmi_examples {
             os << "\nFlag values may be given as '--flag value' or '--flag=value'.\n";
         }
 
-        inline long long parse_integer(const std::string &flag, const std::string &value) {
+        /*!
+         * Parses a common flag's value and rejects anything outside [min_value, max_value].
+         *
+         * The bounds are mandatory because every caller narrows the result (to int, unsigned int or
+         * long) right away: without them a value such as 4294967300 would wrap into a perfectly
+         * valid-looking one (a 4-second --timeout, 1 rank, rank 0) and pass the checks below.
+         */
+        inline long long parse_integer(const std::string &flag, const std::string &value, long long min_value,
+                                       long long max_value) {
+            long long parsed = 0;
             try {
                 size_t consumed = 0;
-                long long parsed = std::stoll(value, &consumed);
+                parsed = std::stoll(value, &consumed);
                 if (consumed != value.size()) {
                     throw std::invalid_argument("trailing characters");
                 }
-                return parsed;
             } catch (const std::exception &) {
                 throw std::runtime_error("invalid value for " + flag + ": '" + value + "'");
             }
+            if (parsed < min_value || parsed > max_value) {
+                throw std::runtime_error("value for " + flag + " must be in [" + std::to_string(min_value) + ", " +
+                                         std::to_string(max_value) + "]: '" + value + "'");
+            }
+            return parsed;
         }
 
         inline void reject_reserved_flags(const Flags &declared) {
@@ -341,9 +386,9 @@ namespace fmi_examples {
                 };
 
                 if (name == "--ranks") {
-                    opts.ranks = static_cast<int>(parse_integer(name, take_value()));
+                    opts.ranks = static_cast<int>(parse_integer(name, take_value(), 1, MAX_RANKS));
                 } else if (name == "--rank") {
-                    opts.rank = static_cast<int>(parse_integer(name, take_value()));
+                    opts.rank = static_cast<int>(parse_integer(name, take_value(), 0, INT32_MAX));
                     rank_given = true;
                 } else if (name == "--config") {
                     opts.config_path = take_value();
@@ -351,11 +396,12 @@ namespace fmi_examples {
                     opts.comm_name = take_value();
                     comm_name_given = true;
                 } else if (name == "--timeout") {
-                    opts.timeout_seconds = static_cast<int>(parse_integer(name, take_value()));
+                    opts.timeout_seconds = static_cast<int>(parse_integer(name, take_value(), 1, INT32_MAX));
                 } else if (name == "--memory") {
-                    opts.memory_mib = static_cast<unsigned int>(parse_integer(name, take_value()));
+                    opts.memory_mib = static_cast<unsigned int>(parse_integer(name, take_value(), 1, UINT32_MAX));
                 } else if (name == "--teardown-grace") {
-                    opts.teardown_grace_ms = static_cast<long>(parse_integer(name, take_value()));
+                    opts.teardown_grace_ms = static_cast<long>(
+                            parse_integer(name, take_value(), 0, std::numeric_limits<long>::max()));
                 } else if (declared.has(name)) {
                     opts.flags.set_from_string(name, take_value());
                 } else {
@@ -363,16 +409,18 @@ namespace fmi_examples {
                 }
             }
 
+            // The bounds passed to parse_integer above already rejected every out-of-range value,
+            // including a negative --rank (opts.rank defaults to -1 to mean "not given", so an
+            // explicit negative would otherwise silently select the launcher instead of failing as a
+            // usage error). What is left here is the one bound parse_integer cannot know: --rank must
+            // be below --ranks, whichever order the two flags appear in. The rest are kept as
+            // belt-and-braces in case a bound is ever loosened at the call site.
             if (opts.ranks < 1) {
                 throw std::runtime_error("--ranks must be at least 1");
             }
             if (opts.ranks > MAX_RANKS) {
                 throw std::runtime_error("--ranks must not exceed " + std::to_string(MAX_RANKS));
             }
-            // Both bounds matter: opts.rank defaults to -1 to mean "not given" (Options::single_rank()
-            // tests rank >= 0), so an explicitly supplied negative value would otherwise silently
-            // select the launcher instead of failing as a usage error. rank_given keeps the unset
-            // default working while rejecting every explicit out-of-range value, -1 included.
             if (rank_given && (opts.rank < 0 || opts.rank >= opts.ranks)) {
                 throw std::runtime_error("--rank must be in [0, " + std::to_string(opts.ranks) + ")");
             }
@@ -553,38 +601,80 @@ namespace fmi_examples {
         return ok ? 0 : 1;
     }
 
+    namespace detail {
+
+        /*!
+         * The rendezvous teardown_sync waits on: a 1-element sum-allreduce of the token 1, whose
+         * result is the number of ranks that took part.
+         *
+         * NOT comm.barrier(), deliberately. FMI::Comm::ClientServer::barrier()
+         * (src/comm/ClientServer.cpp:44) counts arrivals by listing the whole store and matching
+         * object names by SUFFIX only ("_barrier_<n>"), with no communicator prefix -- and over
+         * Redis the listing is a literal `KEYS *` over the entire database
+         * (src/comm/Redis.cpp:64). Any object left behind by an unrelated run or test that died
+         * before finalize() therefore counts as an arrived peer. On a store holding such leftovers
+         * (measured here: 63 stale keys ending in "_barrier_0" in a 15k-key database) the count is
+         * already >= num_peers on the first poll, so the barrier returns immediately without a
+         * single peer having arrived and the teardown guarantee silently degrades to the grace
+         * sleep alone.
+         *
+         * Allreduce has no such failure mode: over ClientServer it is reduce-then-bcast
+         * (src/comm/Channel.cpp:64) and every object involved is fetched by its exact name --
+         * "<comm_name><i>_reduce_<n>" and "<comm_name>0_bcast_<n>" (src/comm/ClientServer.cpp:109
+         * and :35) -- so only objects of this very communicator can satisfy it. The ordering is the one
+         * a barrier is wanted for: root leaves only after downloading every peer's token, and every
+         * other peer leaves only after downloading the broadcast that root writes afterwards.
+         */
+        inline int teardown_rendezvous(FMI::Communicator &comm) {
+            FMI::Comm::Data<int> token(1);
+            FMI::Comm::Data<int> arrived(0);
+            FMI::Utils::Function<int> sum([](int a, int b) { return a + b; }, true, true);
+            comm.allreduce(token, arrived, sum);
+            return arrived.get();
+        }
+
+    } // namespace detail
+
     /*!
      * Last statements of every example, executed while the Communicator is still alive: an FMI
-     * barrier followed by a short grace period.
+     * rendezvous over all ranks followed by a short grace period.
      *
      * WHY: FMI::Comm::ClientServer::finalize() (src/comm/ClientServer.cpp:67) runs from
      * ~Communicator and deletes every object this peer ever uploaded. Over Redis/S3 a recv is a
      * plain GET that does not consume, so a message has to stay in the store until the receiver
      * has polled it -- a rank whose last operation is a send would otherwise delete that message
      * microseconds after writing it, while the receiver polls at millisecond granularity and then
-     * fails with "Timeout was reached". The barrier orders that: nobody starts tearing down before
-     * every peer has finished its own operations.
+     * fails with "Timeout was reached". The rendezvous orders that: nobody starts tearing down
+     * before every peer has finished its own operations.
      *
-     * The barrier alone is not quite enough over ClientServer: its implementation
-     * (src/comm/ClientServer.cpp:44) uploads a per-peer marker object and polls until it sees
-     * num_peers of them, so the first rank to observe the full count returns and deletes its own
-     * marker in finalize() while slower peers are still counting markers. The grace period covers
-     * exactly that window. Over Direct the barrier is a real rendezvous and the grace is merely
-     * harmless.
+     * The rendezvous alone is not quite enough over ClientServer. Its last step is a broadcast from
+     * root, and root returns as soon as it has uploaded that object, so it can delete it in
+     * finalize() while slower peers are still polling for it. The grace period covers exactly that
+     * window. Over Direct the rendezvous is a real handshake and the grace is merely harmless.
      *
-     * The barrier is best effort: a failure here is reported but must not fail a rank whose actual
-     * work already succeeded (this runs after validation).
+     * That last leg is irreducible here (a barrier has the mirror-image version of it), so
+     * --teardown-grace 0 over Redis/S3 costs whoever loses the race a poll up to the backend's
+     * max_timeout -- measured at ~30 s per rank with the shipped Redis config -- before this gives
+     * up and prints the note. The run still passes; the grace exists to avoid the wait.
+     *
+     * It is best effort: a failure here is reported but must not fail a rank whose actual work
+     * already succeeded (this runs after validation). A rendezvous that returns a count other than
+     * opts.ranks did not synchronize what it was supposed to, so say so.
      */
     inline void teardown_sync(FMI::Communicator &comm, const Options &opts) {
         try {
-            comm.barrier();
+            int arrived = detail::teardown_rendezvous(comm);
+            if (arrived != opts.ranks) {
+                std::cout << "note: teardown rendezvous saw " << arrived << " of " << opts.ranks << " ranks"
+                          << std::endl;
+            }
         } catch (const std::exception &e) {
-            std::cout << "note: teardown barrier failed: " << e.what() << std::endl;
+            std::cout << "note: teardown rendezvous failed: " << e.what() << std::endl;
         } catch (const std::string &s) {
             // TCPunch's error_exit (extern/TCPunch/common/utils.h) throws a bare std::string.
-            std::cout << "note: teardown barrier failed: " << s << std::endl;
+            std::cout << "note: teardown rendezvous failed: " << s << std::endl;
         } catch (...) {
-            std::cout << "note: teardown barrier failed: unknown exception" << std::endl;
+            std::cout << "note: teardown rendezvous failed: unknown exception" << std::endl;
         }
         if (opts.teardown_grace_ms > 0) {
             detail::sleep_ms(opts.teardown_grace_ms);

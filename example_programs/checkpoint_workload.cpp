@@ -14,9 +14,9 @@ int main(int argc, char **argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
     fmi_examples::Flags flags;
-    flags.add_int("num-iterations", 1, "Number of workload iterations");
-    flags.add_int("sleep-seconds", 0, "Seconds to sleep per iteration");
-    flags.add_int("num-collectives", 0, "Number of allreduces per iteration");
+    flags.add_int32("num-iterations", 1, "Number of workload iterations");
+    flags.add_int32("sleep-seconds", 0, "Seconds to sleep per iteration");
+    flags.add_int32("num-collectives", 0, "Number of allreduces per iteration");
 
     fmi_examples::Options opts;
     int exit_code = 0;

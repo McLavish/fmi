@@ -15,9 +15,9 @@ int main(int argc, char **argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
     fmi_examples::Flags flags;
-    flags.add_int("num-iterations", 5, "Number of mixed sleep/P2P/allreduce iterations");
-    flags.add_int("sleep-min", 1, "Minimum sleep duration per phase, in seconds");
-    flags.add_int("sleep-max", 3, "Maximum sleep duration per phase, in seconds");
+    flags.add_int32("num-iterations", 5, "Number of mixed sleep/P2P/allreduce iterations");
+    flags.add_int32("sleep-min", 1, "Minimum sleep duration per phase, in seconds");
+    flags.add_int32("sleep-max", 3, "Maximum sleep duration per phase, in seconds");
 
     fmi_examples::Options opts;
     int exit_code = 0;

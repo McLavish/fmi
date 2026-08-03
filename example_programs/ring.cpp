@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
     fmi_examples::Flags flags;
-    flags.add_int("num-iterations", 1, "Number of ring iterations");
+    flags.add_int32("num-iterations", 1, "Number of ring iterations");
 
     fmi_examples::Options opts;
     int exit_code = 0;

@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
 
     fmi_examples::Flags flags;
     flags.add_int("size-mb", 0, "Size of the per-rank memory ballast in MiB");
-    flags.add_int("sleep-minutes", 10, "Number of minutes each rank sleeps");
+    flags.add_int32("sleep-minutes", 10, "Number of minutes each rank sleeps");
 
     fmi_examples::Options opts;
     int exit_code = 0;

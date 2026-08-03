@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
                                fmi_examples::comm_name(), fmi_examples::faas_memory());
         /* ... the algorithm ... */
         ok = compare(opts.rank, "last_recvd", expected, got);   // in-rank self-check
-        fmi_examples::teardown_sync(comm, opts);   // barrier + grace, Communicator still alive
+        fmi_examples::teardown_sync(comm, opts);   // rendezvous + grace, Communicator still alive
     } catch (const std::exception &e) { /* rank R crashed: ... */ ok = false; }
       catch (const std::string &s)    { /* TCPunch throws bare strings */ ok = false; }
       catch (...)                     { ok = false; }
@@ -143,13 +143,15 @@ their GapRunner defaults — always pass smaller values (and `--timeout`) for a 
 | `--comm-name NAME` | `<example>-<hex>` | FMI communicator name, must agree across ranks |
 | `--timeout SECONDS` | 180 | Wall-clock limit the launcher gives the rank processes |
 | `--memory MIB` | 128 | `faas_memory` hint, passed to every example's `Communicator`; it scales the cost model's price-per-latency term and can flip which backend an operation uses |
-| `--teardown-grace MS` | 1000 | How long each rank holds its channels open after the final barrier (see below); `0` disables |
+| `--teardown-grace MS` | 1000 | How long each rank holds its channels open after the final rendezvous (see below); `0` disables |
 | `--help` | – | Usage |
 
 Values can be written `--flag value` or `--flag=value`, and parsing is last-wins. Declaring an
-example flag that collides with one of these names is rejected at startup. Exit code is `0` on
-success (or `--help`), `1` when a rank failed, crashed, timed out or was signalled, `2` on a
-usage error or a failed example-specific guard.
+example flag that collides with one of these names is rejected at startup. Every numeric flag has
+a declared range that is enforced while parsing, before the value is narrowed to the type it is
+stored in, so an out-of-range value is always a usage error and never wraps into a plausible one.
+Exit code is `0` on success (or `--help`), `1` when a rank failed, crashed, timed out or was
+signalled, `2` on a usage error or a failed example-specific guard.
 
 ## Multi-rank local run
 
@@ -184,13 +186,24 @@ Start one process per rank, each with the same `--ranks`, the same `--comm-name`
   --config example_programs/config/fmi_examples_redis.json
 ```
 
-There is no launcher and no fork in this mode, and nothing is lost by it: validation is in-rank
-either way, so each process checks its own results exactly as it would as a forked child, and its
-exit code is the rank's verdict. The one example to know about is `avg`: it is the only one whose
-global check is rank-conditional. Rank 0 compares the average of the gathered per-rank averages
-against the average over the array it scattered, so that end-to-end verdict lives on rank 0 while
-the other ranks only report that their own part did not fail. Everywhere else — including
-`communicating`, `jacobi`, `npb_ep` and `mantevo_hpccg` — every rank checks its own result.
+There is no launcher and no fork in this mode: validation is in-rank either way, so each process
+checks its own results exactly as it would as a forked child, and its exit code is that rank's
+verdict.
+
+A few checks are rank-conditional, and in this mode they run only in the process that owns them
+— so the run's verdict is complete only once the owning rank's exit code is included:
+
+- `avg` — rank 0 owns the end-to-end verdict: it compares the average of the gathered per-rank
+  averages against the average over the array it scattered. The other ranks only report that
+  their own part did not fail.
+- `npb_ep` and `mantevo_hpccg` — every rank verifies its own result (EP sums against the
+  reference table; a finite residual and the expected iteration count), but the *cross-rank
+  agreement* check over the gathered values is evaluated on rank 0 only.
+- `communicating` — the gather result only exists on rank 0, so only rank 0 checks it. Every
+  other collective in that example is checked on every rank.
+
+Everywhere else every rank checks its own result, so a single process's exit code is that rank's
+full verdict.
 
 ## Configs
 
@@ -240,17 +253,41 @@ send to rank 0); for the collectives it shows up as intermittent failures.
 `Communicator`'s scope, after validation. It does two things, and both are needed over
 `ClientServer`:
 
-1. **A final `comm.barrier()`**, so no rank starts tearing down before every peer has finished
-   its own operations.
-2. **A `--teardown-grace` sleep** (default 1000 ms) after that barrier. The barrier alone does
-   not quite close the window: `ClientServer`'s barrier uploads a per-peer marker object and
-   polls until it sees `num_peers` of them, so the *first* rank to observe the full count returns
-   and deletes its own marker in `finalize()` while slower peers are still counting markers. The
-   grace period covers exactly that race. Over `Direct` the barrier is a real rendezvous and the
-   grace is merely harmless.
+1. **A final rendezvous over all ranks**, so no rank starts tearing down before every peer has
+   finished its own operations. It is a 1-element sum-allreduce of the token `1`, and
+   deliberately *not* `comm.barrier()`. `ClientServer::barrier()` counts arrivals by listing the
+   whole store and matching object names by **suffix** only (`_barrier_<n>`), with no
+   communicator prefix — and `Redis::get_object_names()` is a literal `KEYS *` over the entire
+   database. Any object left behind by an unrelated run or test that died before `finalize()`
+   therefore counts as an arrived peer, and on a store holding such leftovers (this machine's
+   dev Redis had 63 stale keys ending in `_barrier_0`) the barrier returns on its first poll
+   without a single peer having arrived. Measured with a probe that is rank 0 of 4 and the only
+   process running: `comm.barrier()` returned after 7 ms, the allreduce rendezvous correctly
+   blocked until the backend timeout. Same result end to end, with `checkpoint_workload` in
+   cross-machine mode over Redis, ranks 0–2 started immediately and rank 3 only after 8 s: with
+   the barrier ranks 0–2 exited after 1.02 s (the grace alone) while rank 3 had not even started;
+   with the rendezvous they exited after 9.01 s, i.e. only once every peer had arrived. Allreduce
+   is reduce-then-bcast and fetches every object by its exact, communicator-qualified name, so
+   only this communicator's own peers can satisfy it.
+2. **A `--teardown-grace` sleep** (default 1000 ms) after that rendezvous. The rendezvous alone
+   does not quite close the window: its last step is a broadcast from root, and root returns as
+   soon as it has uploaded that object, so it can delete the object in `finalize()` while slower
+   peers are still polling for it. The grace period covers exactly that race — this last leg is
+   irreducible over `ClientServer` (a barrier has the mirror-image version of it), which is why
+   the grace is not redundant. Over `Direct` the rendezvous is a real handshake and the grace is
+   merely harmless.
 
-The barrier is best effort: it runs after validation, and a failure there prints
-`note: teardown barrier failed: ...` without failing a rank whose actual work succeeded.
+   Consequently `--teardown-grace 0` is not free over Redis/S3: losing that race makes each
+   affected rank poll for the vanished object until the backend's `max_timeout` (30 s in the
+   shipped configs) before giving up. Measured with `ring --num-iterations 2 --teardown-grace 0`
+   over Redis: every run still passed, but most ranks printed `note: teardown rendezvous failed:
+   Timeout was reached` after ~30 s. Leave the grace at its default unless the run is `Direct`
+   only.
+
+The rendezvous is best effort: it runs after validation, and a failure there prints
+`note: teardown rendezvous failed: ...` without failing a rank whose actual work succeeded. Its
+result is the number of participating ranks, so a count other than `--ranks` prints
+`note: teardown rendezvous saw N of M ranks`.
 
 This is a workaround in the examples, not a fix: the underlying defect is in the core library and
 also causes flakiness in FMI's own test suite. Anything else built on top of `ClientServer` needs
