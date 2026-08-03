@@ -778,6 +778,74 @@ BOOST_AUTO_TEST_CASE(reconnect_survives_the_middle_of_a_collective) {
     munmap(ok, sizeof(int) * num_peers);
 }
 
+//! An ordered reduce folds in absolute rank order, whoever the root is.
+/*!
+ * The root used to seed the accumulator with its OWN contribution and fold the others in
+ * afterwards, computing f(v_root, v0, ...) instead of f(v0, ..., v(n-1)) — correct only for
+ * root 0, which is every root this suite and the baseline shape had used, and wrong for all
+ * the others. The non-commutative 2*a+b below turns any deviation from strict rank order into
+ * a different number, and the loop takes every rank through the root seat once.
+ */
+BOOST_AUTO_TEST_CASE(ordered_reduce_is_rank_ordered_for_every_root) {
+    constexpr int num_peers = 4;
+    const std::string comm_name = unique_comm_name("redroot");
+
+    int* ok = static_cast<int*>(mmap(nullptr, sizeof(int) * num_peers, PROT_READ | PROT_WRITE,
+                                     MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    BOOST_REQUIRE(ok != MAP_FAILED);
+    for (int i = 0; i < num_peers; i++) {
+        ok[i] = 0;
+    }
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    auto params = recover_params({{"max_timeout", "30000"}});
+
+    bool all_good = true;
+    try {
+        BreakableRedis channel(params, redis_test_model_params);
+        channel.set_peer_id(peer_id);
+        channel.set_num_peers(num_peers);
+        channel.set_comm_name(comm_name);
+
+        auto ordered = [] (char* a, char* b) {
+            *reinterpret_cast<int*>(a) = 2 * *reinterpret_cast<int*>(a) + *reinterpret_cast<int*>(b);
+        };
+        raw_function fold{ordered, false, false};
+
+        for (int root = 0; root < num_peers; root++) {
+            int contribution = 10 * (root + 1) + peer_id;
+            int result = 0;
+            channel.reduce({reinterpret_cast<char*>(&contribution), sizeof(contribution)},
+                           {reinterpret_cast<char*>(&result), sizeof(result)}, root, fold);
+            if (peer_id == root) {
+                int want = 10 * (root + 1);
+                for (int i = 1; i < num_peers; i++) {
+                    want = 2 * want + (10 * (root + 1) + i);
+                }
+                if (result != want) {
+                    all_good = false;
+                    BOOST_TEST_MESSAGE("root " << root << ": got " << result << " want " << want);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        all_good = false;
+        BOOST_TEST_MESSAGE("rank " << peer_id << " failed: " << e.what());
+    }
+    ok[peer_id] = all_good ? 1 : 0;
+
+    rank_guard.reap_ranks();
+    for (int i = 0; i < num_peers; i++) {
+        BOOST_TEST(ok[i] == 1, "rank " << i << "'s reduces did not fold in rank order");
+    }
+    auto sweeper = make_redis(comm_name, 0, 1);
+    purge(*sweeper, comm_name);
+    munmap(ok, sizeof(int) * num_peers);
+}
+
 //! A store that refuses a write says so, and the write is not quietly dropped.
 /*!
  * A full or read-only Redis answers SET with an error and stores nothing. Logging that and

@@ -216,14 +216,18 @@ The DirectTCP profile was re-verified against the same `sweep.py` after the `--c
 Re-checked after the S3 cost guard landed: `--trials 3 --peers 2 --rounds 4000 --seed 3`, 2
 passed, 0 failed, 1 skipped (a freeze that landed after the job had finished).
 
-`--shape collectives_sweep` is **not** covered, and the reason is not the store: its *clean*
-baseline fails at 4 ranks before any trial runs, on a pre-existing `ClientServer::reduce` bug. For
-an ordered (non-commutative) reduction with a root other than 0, the root seeds the accumulator
-with its own contribution and then folds the remaining ranks in ascending order, computing
-`f(v_root, v_0, …)` instead of `f(v_0, …, v_n-1)`; `ClientServer::scan` already parks its own
-contribution in its own slot and is correct. Reproduced on the commit this work branched from,
-unrelated to the recovery flag, and not fixed here. `--shape noncommutative` rotates its root the
-same way and is affected identically.
+`--shape collectives_sweep` and `--shape noncommutative` are covered since the ordered-reduce
+fix. `ClientServer::reduce` used to seed the accumulator with the root's own contribution and
+fold the remaining ranks in ascending order — `f(v_root, v_0, …)` instead of `f(v_0, …, v_n-1)`
+— correct only for root 0, the only root the `baseline` shape uses, and reproduced on the commit
+this work branched from. Both of these shapes assert the fold in absolute rank order under a
+rotating root, so their *clean* baselines failed at 4 ranks before any trial ran. The fix parks
+the root's contribution in its own slot, exactly as `scan` always did, and brings the store
+family into agreement with `PeerToPeer`'s rank-indexed fold — a multi-backend config can no
+longer get a different ordered-reduce result depending on which channel the cost model picked.
+Verified on the Redis plane after the fix, `--trials 3 --peers 4 --max-checkpoints 2 --seed 1`:
+`collectives_sweep` (`--rounds 1000`) 3 passed, 0 failed; `noncommutative` (`--rounds 2000`)
+3 passed, 0 failed — clean baselines and mid-collective freezes included.
 
 ### The S3 plane
 

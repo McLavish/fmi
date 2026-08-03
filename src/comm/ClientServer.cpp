@@ -96,6 +96,13 @@ void FMI::Comm::ClientServer::upload(channel_data buf, std::string name) {
 }
 
 void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf, FMI::Utils::peer_num root, raw_function f) {
+    // An out-of-range root used to be a silent stray write; since the root's contribution is
+    // parked at data[root] it would be a whole payload written past the buffer instead. Loud
+    // beats either.
+    if (root >= num_peers) {
+        throw std::runtime_error("reduce root " + std::to_string(root) + " is out of range for "
+                                 + std::to_string(num_peers) + " peers");
+    }
     // Capture and advance once, at entry, as barrier() does: the counter names this operation's
     // objects, so it must be read once and land in the same place whatever way this call ends.
     // The root advanced it after the poll loop, which an exception out of download_object skips
@@ -109,37 +116,75 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
         std::vector<bool> received(num_peers, false);
         std::vector<bool> applied(num_peers, false);
         auto buffer_length = sendbuf.len;
-        std::vector<char> data(buffer_length * num_peers);
-        std::memcpy(reinterpret_cast<void*>(recvbuf.buf), sendbuf.buf, buffer_length);
+        std::vector<char> data(static_cast<std::size_t>(buffer_length) * num_peers);
+
+        // Park the root's own contribution in its own slot rather than seeding the accumulator
+        // with it. A reduce is f(v0, v1, ..., v(n-1)) in absolute rank order whoever the root
+        // is; seeding recvbuf with v_root and folding the others in afterwards computed
+        // f(v_root, v0, ...) instead — the same multiset, so a commutative reduction never
+        // noticed, but a different result for an ordered one at every root except 0, which is
+        // exactly the case left_to_right exists to serve. Copying sendbuf out first also makes
+        // the routine safe when sendbuf and recvbuf alias. (scan() had the same bug and
+        // carries the same fix.)
+        std::memcpy(data.data() + static_cast<std::size_t>(root) * buffer_length, sendbuf.buf, buffer_length);
         received[root] = true;
-        applied[root] = true;
+
+        bool accumulator_seeded = false;
+        Utils::peer_num next_in_order = 0;
+
+        auto fold = [&] (Utils::peer_num i) {
+            char* element = data.data() + static_cast<std::size_t>(i) * buffer_length;
+            if (!accumulator_seeded) {
+                std::memcpy(reinterpret_cast<void*>(recvbuf.buf), element, buffer_length);
+                accumulator_seeded = true;
+            } else {
+                f.f(recvbuf.buf, element);
+            }
+            applied[i] = true;
+        };
+
+        auto apply_ready = [&] () {
+            if (left_to_right) {
+                // Strict index order, and only ever a prefix: a gap must stall the fold, never
+                // be skipped over.
+                while (next_in_order < num_peers && received[next_in_order]) {
+                    fold(next_in_order);
+                    next_in_order++;
+                }
+            } else {
+                for (Utils::peer_num i = 0; i < num_peers; i++) {
+                    if (received[i] && !applied[i]) {
+                        fold(i);
+                    }
+                }
+            }
+        };
+
+        // The root already holds its own input; fold what is ready before waiting so a
+        // single-rank communicator completes without depending on max_timeout being non-zero.
+        apply_ready();
+
         unsigned int elapsed_time = 0;
         while (elapsed_time < max_timeout && std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; }) ) {
             // Receive all values
-            for (int i = 0; i < num_peers; i++) {
+            for (Utils::peer_num i = 0; i < num_peers; i++) {
                 if (received[i]) {
                     continue;
                 }
                 std::string file_name = object_key_prefix() + std::to_string(i) + "_reduce_" + std::to_string(operation_num);
-                if (download_object({data.data() + i * buffer_length, buffer_length}, file_name)) {
+                if (download_object({data.data() + static_cast<std::size_t>(i) * buffer_length, buffer_length}, file_name)) {
                     received[i] = true;
                 }
             }
-            // Apply function where possible
-            bool all_left_applied = true;
-            for (int i = 0; i < num_peers; i++) {
-                if (received[i] && !applied[i] && (!left_to_right || all_left_applied)) {
-                    f.f(recvbuf.buf, data.data() + i * buffer_length);
-                    applied[i] = true;
-                } else if (!received[i]) {
-                    all_left_applied = false;
-                }
-            }
+            apply_ready();
 
             elapsed_time += timeout;
             std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
         }
         if (std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; })) {
+            // recvbuf now holds a prefix of the fold, or nothing at all if v0 never arrived —
+            // not the old unconditional entry-time copy of v_root. Timeout is terminal for the
+            // communicator, so nothing reads it either way; noted because it is observable.
             throw Utils::Timeout();
         }
     } else {
