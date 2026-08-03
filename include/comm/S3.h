@@ -31,9 +31,6 @@ namespace FMI::Comm {
     private:
         std::string bucket_name;
         std::unique_ptr<Aws::S3::S3Client, Aws::Deleter<Aws::S3::S3Client>> client;
-        Aws::SDKOptions options;
-        //! Only one AWS SDK InitApi is allowed per application, we therefore track the number of instances (for multiple communicators) and call InitApi / ShutdownApi only on the first / last instance.
-        inline static int instances = 0;
         // Model params
         double bandwidth;
         double overhead;
