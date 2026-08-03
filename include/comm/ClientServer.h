@@ -50,6 +50,16 @@ namespace FMI::Comm {
         //! Delete the object with the given name, needs to be implemented by channels.
         virtual void delete_object(std::string name) = 0;
 
+        //! Delete a whole set of objects at once.
+        /*!
+         * One delete_object per name by default, which is what finalize did inline before this
+         * existed. A backend whose store deletes in batches should override it: on S3 a request
+         * per object is a round trip per message of the whole job, and finalize runs from the
+         * communicator's destructor where nothing overlaps it. Like delete_object, this must not
+         * throw — see the note there.
+         */
+        virtual void delete_objects(const std::vector<std::string>& names);
+
         //! Deletes all objects that were created during the execution.
         void finalize() override;
 

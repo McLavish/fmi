@@ -22,6 +22,9 @@ namespace FMI::Comm {
 
         void delete_object(std::string name) override;
 
+        //! One DeleteObjects request per thousand names instead of one request per name.
+        void delete_objects(const std::vector<std::string>& names) override;
+
         std::vector<std::string> get_object_names() override;
 
         double get_latency(Utils::peer_num producer, Utils::peer_num consumer, std::size_t size_in_bytes) override;

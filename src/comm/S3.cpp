@@ -8,7 +8,10 @@
 #include <aws/core/http/Scheme.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/Delete.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
+#include <aws/s3/model/DeleteObjectsRequest.h>
+#include <aws/s3/model/ObjectIdentifier.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 
 #include <boost/log/trivial.hpp>
@@ -405,6 +408,42 @@ void FMI::Comm::S3::delete_object(std::string name) {
     auto outcome = client->DeleteObject(request);
     if (!outcome.IsSuccess()) {
         BOOST_LOG_TRIVIAL(error) << "Error when deleting from S3: " << outcome.GetError();
+    }
+}
+
+//! Delete in batches of a thousand, the most one DeleteObjects request takes.
+/*!
+ * The default implementation is a request per object, which at finalize is a round trip per
+ * message the rank ever sent: at sweep scale that is tens of seconds of teardown per rank, all of
+ * it inside ~Communicator. Batching makes it one request per thousand.
+ *
+ * Nothing here throws. This runs from a destructor, and every outcome — a whole batch that failed,
+ * an individual key the service refused — is reported and stepped over, because the objects
+ * outlive the process either way and an exception here would not.
+ */
+void FMI::Comm::S3::delete_objects(const std::vector<std::string>& names) {
+    const std::size_t batch = 1000;
+    for (std::size_t start = 0; start < names.size(); start += batch) {
+        Aws::S3::Model::Delete payload;
+        for (std::size_t i = start; i < names.size() && i < start + batch; i++) {
+            Aws::S3::Model::ObjectIdentifier object;
+            object.SetKey(Aws::String(names[i].c_str(), names[i].size()));
+            payload.AddObjects(std::move(object));
+        }
+        // Quiet: without it the response repeats every key that was deleted, which is the whole
+        // job's traffic echoed back for nobody to read.
+        payload.SetQuiet(true);
+        Aws::S3::Model::DeleteObjectsRequest request;
+        request.WithBucket(bucket_name).WithDelete(std::move(payload));
+        auto outcome = client->DeleteObjects(request);
+        if (!outcome.IsSuccess()) {
+            BOOST_LOG_TRIVIAL(error) << "Error when deleting from S3: " << outcome.GetError();
+            continue;
+        }
+        for (const auto& error : outcome.GetResult().GetErrors()) {
+            BOOST_LOG_TRIVIAL(error) << "Error when deleting from S3: key " << error.GetKey()
+                                     << ": " << error.GetCode() << " " << error.GetMessage();
+        }
     }
 }
 

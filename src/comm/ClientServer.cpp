@@ -67,7 +67,11 @@ void FMI::Comm::ClientServer::barrier() {
 void FMI::Comm::ClientServer::finalize() {
     // Reached at communicator destruction, so every object this channel created is retained
     // for the whole job and dropped in one pass here.
-    for (const auto& object_name : created_objects) {
+    delete_objects(created_objects);
+}
+
+void FMI::Comm::ClientServer::delete_objects(const std::vector<std::string>& names) {
+    for (const auto& object_name : names) {
         delete_object(object_name);
     }
 }
