@@ -140,6 +140,17 @@ def clean_comm(comm):
     if name == "DirectTCP":
         # The peer registry hash, exactly as this sweep has always cleaned it.
         subprocess.run(["redis-cli", "DEL", f"fmi:direct:{comm}"], capture_output=True)
+    elif name == "DrainTCP":
+        # Its own registry prefix, plus the three keys the drain coordinator owns when the
+        # backend is configured with "drain": true. The event stream is the one that matters: a
+        # rank starts reading it from its tail, but a leftover `leaving` or `sealed` from an
+        # earlier run under the same name is exactly what a driver reading from the beginning
+        # would act on. See runbooks/drain-migration/.
+        host, port = params.get("registry_host", "127.0.0.1"), params.get("registry_port", 6379)
+        subprocess.run(["redis-cli", "-h", str(host), "-p", str(port), "DEL",
+                        f"fmi:drain:{comm}", f"fmi:drain:{comm}:members",
+                        f"fmi:drain:{comm}:events", f"fmi:drain:{comm}:batch"],
+                       capture_output=True)
     elif name == "Redis":
         host, port = params.get("host", "127.0.0.1"), params.get("port", 6379)
         # The registry key first: a Redis-plane job writes none, but the same comm_name may
@@ -380,7 +391,11 @@ def run(args, root):
         log = []
         procs = start_job(comm, npeers, args.rounds, args.ms, outdir)
 
-        n_ckpt = random.randint(1, args.max_checkpoints)
+        # 0 is the clean-run mode: launch the job, checkpoint nothing, and score it against the
+        # baseline anyway. That is how a new data plane's arithmetic is checked to agree with
+        # DirectTCP's before any freeze is asked of it (every trial then reports SKIP, which is
+        # the honest verdict — nothing about checkpointing was exercised).
+        n_ckpt = random.randint(1, args.max_checkpoints) if args.max_checkpoints > 0 else 0
         ok = True
         void = False
         checkpoints = []
