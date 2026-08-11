@@ -46,6 +46,8 @@
       "drain_signal_offset": 3,
       "drain_grace_ms": 5000,
       "migration_max_ms": 120000,
+      "establish_yield_ms": 2000,
+      "batch_lease_ms": 120000,
       "control_poll_interval_ms": 20
     }
   },

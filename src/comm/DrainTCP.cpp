@@ -1,7 +1,11 @@
 #include "../../include/comm/DrainTCP.h"
 
+#include "../../include/comm/DrainCoordinator.h"
 #include "../../include/comm/PeerRegistry.h"
 #include "../../include/comm/TcpEndpoint.h"
+#include "../../include/utils/MigrationTrigger.h"
+
+#include <boost/log/trivial.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -37,6 +41,10 @@ namespace {
 
     //! Accepts taken per readable-listener wake before the loop returns to its other duties.
     constexpr int accept_batch = 16;
+
+    //! Read size of the drain. Large enough that a socket buffer empties in a syscall or two,
+    //! small enough that the buffer is a stack-free allocation nobody notices.
+    constexpr std::size_t drain_chunk_bytes = 64u * 1024u;
 
     //! Move exactly @p len bytes over a non-blocking fd, bounded by @p deadline_ms and
     //! abandoned promptly when the channel is shutting down. Used for the 56-byte hello only;
@@ -131,6 +139,12 @@ FMI::Comm::DrainTCP::DrainTCP(std::map<std::string, std::string> params,
     drain_signal_offset = std::stoi(TcpEndpoint::param_or(params, "drain_signal_offset", "3"));
     drain_grace_ms = std::stol(TcpEndpoint::param_or(params, "drain_grace_ms", "5000"));
     migration_max_ms = std::stol(TcpEndpoint::param_or(params, "migration_max_ms", "120000"));
+    establish_yield_ms = std::stol(TcpEndpoint::param_or(params, "establish_yield_ms", "2000"));
+    batch_lease_ms = std::stol(TcpEndpoint::param_or(params, "batch_lease_ms", "120000"));
+    // Spelled out in the config rather than inferred from anything: turning a real CRIU stop
+    // into an in-place restore is exactly the difference between a dry run and a migration, and
+    // it must never be something a job acquires by accident.
+    rehearsal_only = TcpEndpoint::param_or(params, "drain_rehearsal_only", "false") == "true";
 
     bandwidth = std::stod(model_params.at("bandwidth"));
     overhead = std::stod(model_params.at("overhead"));
@@ -263,7 +277,7 @@ void FMI::Comm::DrainTCP::ensure_started() {
         TcpEndpoint::set_nonblocking(pipe_fds[1], true);
 
         links = std::move(table);
-        listen_fd = fd;
+        listen_fd.store(fd, std::memory_order_release);
         listen_port = ntohs(addr.sin_port);
         listener_nonce = TcpEndpoint::random_nonce();
         advertised_ip = TcpEndpoint::resolve_advertise_ip(advertise_host, registry_host,
@@ -271,14 +285,49 @@ void FMI::Comm::DrainTCP::ensure_started() {
         wake_pipe[0] = pipe_fds[0];
         wake_pipe[1] = pipe_fds[1];
         stopping.store(false, std::memory_order_release);
+        control_pause_request.store(false, std::memory_order_release);
+        control_parked.store(false, std::memory_order_release);
         // After this point the link table is read by two threads and must never be resized.
         // Starting the thread here is what publishes it safely: the launch is the release.
         control_thread = std::thread(&DrainTCP::control_loop, this);
         started.store(true, std::memory_order_release);
+
+        if (drain_enabled) {
+            // The arming point, and the first instant at which it is possible: a coordinator
+            // needs the communicator's name, and a member record needs the port and nonce the
+            // listener above has only just been given.
+            if (coordinator == nullptr) {
+                coordinator = std::make_unique<RedisDrainCoordinator>(
+                        registry_host, registry_port, comm_name, registry_ttl_s,
+                        static_cast<long>(max_timeout));
+            }
+            // From the tail, not from the beginning: events older than this rank's arrival
+            // describe a job it was not part of, and replaying them would drain links against
+            // migrations that finished before it existed.
+            last_stream_id = coordinator->tail_id();
+            coordinator->publish_member(peer_id, MemberRecord{
+                    Utils::MigrationTrigger::instance().epoch(), advertised_ip, listen_port,
+                    listener_nonce});
+            if (trigger != "none") {
+                Utils::TriggerConfig trigger_config;
+                trigger_config.signal_offset = drain_signal_offset;
+                trigger_config.control_poll_interval_ms = control_poll_interval_ms;
+                trigger_config.mode = trigger;
+                trigger_config.rehearsal_only = rehearsal_only;
+                Utils::MigrationTrigger::instance().attach(this, trigger_config);
+                attached_to_trigger = true;
+            }
+        }
     } catch (...) {
+        if (attached_to_trigger) {
+            Utils::MigrationTrigger::instance().detach(this);
+            attached_to_trigger = false;
+        }
+        started.store(false, std::memory_order_release);
+        stop_control_thread();
         undo();
         links.clear();
-        listen_fd = -1;
+        listen_fd.store(-1, std::memory_order_release);
         listen_port = 0;
         listener_nonce = 0;
         advertised_ip.clear();
@@ -286,6 +335,15 @@ void FMI::Comm::DrainTCP::ensure_started() {
         wake_pipe[1] = -1;
         throw;
     }
+}
+
+void FMI::Comm::DrainTCP::set_coordinator_for_testing(std::unique_ptr<DrainCoordinator> replacement) {
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex);
+    if (started.load(std::memory_order_acquire)) {
+        throw std::logic_error("DrainTCP::set_coordinator_for_testing: the channel has already "
+                               "armed; a control plane cannot be swapped underneath it");
+    }
+    coordinator = std::move(replacement);
 }
 
 void FMI::Comm::DrainTCP::set_incarnation(std::uint64_t value) {
@@ -591,7 +649,13 @@ void FMI::Comm::DrainTCP::file_link(Utils::peer_num peer, int fd, std::uint64_t 
 }
 
 FMI::Comm::DrainTCP::AcceptResult FMI::Comm::DrainTCP::accept_one() {
-    const int fd = ::accept(listen_fd, nullptr, nullptr);
+    const int listener = listen_fd.load(std::memory_order_acquire);
+    if (listener < 0) {
+        // The migration sequence took the listener away between the poll and here. Nothing is
+        // pending on a listener that does not exist.
+        return AcceptResult::Empty;
+    }
+    const int fd = ::accept(listener, nullptr, nullptr);
     if (fd < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return AcceptResult::Empty;
@@ -614,12 +678,77 @@ void FMI::Comm::DrainTCP::housekeeping() {
     if (published_at_ms.load(std::memory_order_acquire) < 0) {
         return;
     }
+    if (migration_active.load(std::memory_order_acquire)) {
+        // A republish would dial the registry, and this rank has just told the world it owns no
+        // sockets at all. The entry it would refresh is also about to be replaced wholesale by
+        // the restore leg.
+        return;
+    }
     try_publish(monotonic_ms() + control_housekeeping_tick_ms, false);
+}
+
+void FMI::Comm::DrainTCP::pause_control_thread(long deadline_ms) {
+    if (!control_thread.joinable()) {
+        return;
+    }
+    control_pause_request.store(true, std::memory_order_release);
+    if (wake_pipe[1] >= 0) {
+        const char byte = 1;
+        while (::write(wake_pipe[1], &byte, 1) < 0 && errno == EINTR) {
+        }
+    }
+    std::unique_lock<std::mutex> lock(control_pause_mutex);
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max<long>(deadline_ms - monotonic_ms(), 1));
+    if (!control_pause_cv.wait_until(lock, deadline, [this]() {
+            return control_parked.load(std::memory_order_acquire) ||
+                   stopping.load(std::memory_order_acquire);
+        })) {
+        // It is still holding something — most likely an accepted connection mid-hello. Dumping
+        // now would capture a socket this rank has promised does not exist, so say so instead.
+        throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) +
+                                 ": the control thread did not park within " +
+                                 std::to_string(drain_grace_ms) +
+                                 " ms; the migration cannot promise a socket-free image");
+    }
+}
+
+void FMI::Comm::DrainTCP::resume_control_thread() {
+    control_pause_request.store(false, std::memory_order_release);
+    if (wake_pipe[1] >= 0) {
+        const char byte = 1;
+        while (::write(wake_pipe[1], &byte, 1) < 0 && errno == EINTR) {
+        }
+    }
 }
 
 void FMI::Comm::DrainTCP::control_loop() {
     while (!stopping.load(std::memory_order_acquire)) {
-        struct pollfd pfds[2] = {{listen_fd, POLLIN, 0}, {wake_pipe[0], POLLIN, 0}};
+        if (control_pause_request.load(std::memory_order_acquire)) {
+            // Parked where it owns nothing: no listener, no half-accepted connection, only the
+            // wake pipe — which is a pipe and survives a checkpoint on any host.
+            {
+                std::lock_guard<std::mutex> lock(control_pause_mutex);
+                control_parked.store(true, std::memory_order_release);
+            }
+            control_pause_cv.notify_all();
+            while (control_pause_request.load(std::memory_order_acquire) &&
+                   !stopping.load(std::memory_order_acquire)) {
+                struct pollfd pfd{wake_pipe[0], POLLIN, 0};
+                ::poll(&pfd, 1, control_housekeeping_tick_ms);
+                char drain[64];
+                while (::read(wake_pipe[0], drain, sizeof(drain)) > 0) {
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(control_pause_mutex);
+                control_parked.store(false, std::memory_order_release);
+            }
+            control_pause_cv.notify_all();
+            continue;
+        }
+        struct pollfd pfds[2] = {{listen_fd.load(std::memory_order_acquire), POLLIN, 0},
+                                 {wake_pipe[0], POLLIN, 0}};
         const int pr = ::poll(pfds, 2, control_housekeeping_tick_ms);
         if (stopping.load(std::memory_order_acquire)) {
             break;
@@ -672,7 +801,7 @@ void FMI::Comm::DrainTCP::stop_control_thread() {
     control_thread.join();
 }
 
-void FMI::Comm::DrainTCP::ensure_link(Utils::peer_num peer) {
+void FMI::Comm::DrainTCP::ensure_link(Utils::peer_num peer, long deadline_ms) {
     if (peer == peer_id) {
         throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) +
                                  " cannot establish a link to itself");
@@ -687,9 +816,9 @@ void FMI::Comm::DrainTCP::ensure_link(Utils::peer_num peer) {
             return;
         }
     }
-    // Shared for the whole establishment. Stage 2's drain takes it exclusively, which is how
-    // "no connection may be built while this rank is being cut" stops being a comment.
-    std::shared_lock<std::shared_mutex> gate(establish_gate);
+    // Shared for the whole establishment; a drain takes it exclusively, which is how "no
+    // connection may be built while this rank is being cut" stops being a comment.
+    std::shared_lock<std::shared_timed_mutex> gate(establish_gate);
     {
         std::lock_guard<std::mutex> lock(l.mu);
         throw_if_unrecoverable(l, peer);
@@ -697,14 +826,30 @@ void FMI::Comm::DrainTCP::ensure_link(Utils::peer_num peer) {
             return;
         }
     }
-    const long deadline = monotonic_ms() + static_cast<long>(max_timeout);
     // Rank order decides direction, so both ends agree without negotiating: a rank dials every
     // peer below it and accepts from every peer above it.
     if (peer < peer_id) {
-        dial_peer(peer, deadline);
+        dial_peer(peer, deadline_ms);
     } else {
-        await_peer(peer, deadline);
+        await_peer(peer, deadline_ms);
     }
+}
+
+bool FMI::Comm::DrainTCP::yield_establishment_to_drain(Utils::peer_num peer) {
+    if (!drain_pending.load(std::memory_order_acquire)) {
+        return false;
+    }
+    // This rank's own migration is waiting for the gate this establishment holds. Letting go
+    // here — at a retry boundary, between two attempts, owning no half-built connection — is
+    // what keeps the drain's bound a bound instead of the establishment's deadline.
+    LinkState& l = link(peer);
+    std::lock_guard<std::mutex> lock(l.mu);
+    if (!l.draining) {
+        l.draining = true;
+        l.draining_since_ms = monotonic_ms();
+    }
+    l.back_up.notify_all();
+    return true;
 }
 
 void FMI::Comm::DrainTCP::dial_peer(Utils::peer_num peer, long deadline_ms) {
@@ -720,6 +865,9 @@ void FMI::Comm::DrainTCP::dial_peer(Utils::peer_num peer, long deadline_ms) {
             if (l.fd >= 0 || l.draining) {
                 return;   // the control thread accepted a dial that crossed ours
             }
+        }
+        if (yield_establishment_to_drain(peer)) {
+            return;
         }
         long now = monotonic_ms();
         if (now >= deadline_ms) {
@@ -766,6 +914,9 @@ void FMI::Comm::DrainTCP::await_peer(Utils::peer_num peer, long deadline_ms) {
     long next_publish = 0;
 
     while (true) {
+        if (yield_establishment_to_drain(peer)) {
+            return;
+        }
         long now = monotonic_ms();
         if (now >= deadline_ms) {
             throw Utils::Timeout();
@@ -793,6 +944,18 @@ void FMI::Comm::DrainTCP::wait_for_link(std::unique_lock<std::mutex>& lock, Link
     const bool suspended = l.draining;
     if (suspended) {
         const long elapsed = before - l.draining_since_ms;
+        if (l.drain_unconfirmed && elapsed >= drain_grace_ms) {
+            // The data path guessed a migration from a FIN, and no leave notice followed within
+            // the grace period. That is what an unplanned death looks like from here, and this
+            // protocol does not recover from one — so it is named rather than waited out to the
+            // much longer migration bound.
+            throw std::runtime_error(
+                    "DrainTCP: rank " + std::to_string(peer_id) + " <-> peer " +
+                    std::to_string(peer) + ": the connection died " + std::to_string(elapsed) +
+                    " ms ago and no migration notice followed within drain_grace_ms=" +
+                    std::to_string(drain_grace_ms) +
+                    " (an unplanned death is not recoverable in the drain protocol)");
+        }
         if (elapsed >= migration_max_ms) {
             throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) + ": peer " +
                                      std::to_string(peer) + " has been migrating for " +
@@ -813,9 +976,9 @@ void FMI::Comm::DrainTCP::wait_for_link(std::unique_lock<std::mutex>& lock, Link
 
 void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     ensure_started();
-    ensure_link(rcpt_id);
-    LinkState& l = link(rcpt_id);
     OperationClock clock{monotonic_ms(), static_cast<long>(max_timeout), 0};
+    ensure_link(rcpt_id, clock.deadline(monotonic_ms()));
+    LinkState& l = link(rcpt_id);
     std::size_t moved = 0;
 
     while (moved < buf.len) {
@@ -823,8 +986,16 @@ void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id)
         {
             std::unique_lock<std::mutex> lock(l.mu);
             throw_if_unrecoverable(l, rcpt_id);
-            if (l.fd < 0 || l.draining) {
+            if (l.draining) {
                 wait_for_link(lock, l, rcpt_id, clock);
+                continue;
+            }
+            if (l.fd < 0) {
+                // Re-established from here rather than waited for: after a migration the link
+                // is deliberately left closed, and this thread — parked at its offset with the
+                // rest of the message still to send — is the one that rebuilds it.
+                lock.unlock();
+                ensure_link(rcpt_id, clock.deadline(monotonic_ms()));
                 continue;
             }
             // Exactly one non-blocking syscall per acquisition of this lock. Everything that
@@ -842,6 +1013,15 @@ void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id)
             }
             if (err == EAGAIN || err == EWOULDBLOCK) {
                 wait_fd = l.fd;
+            } else if (drain_armed() && (err == EPIPE || err == ECONNRESET)) {
+                // With drain armed a FIN in the middle of an operation is more often a
+                // neighbour beginning its migration than a death: the peer's leave notice and
+                // its FIN travel over different media and neither is reliably first. So this is
+                // recorded as a migration this rank has not been told about yet, and the wait
+                // helper turns it into the loud unplanned-death error if no notice follows
+                // within drain_grace_ms.
+                begin_draining_locked(l, true);
+                continue;
             } else if (moved == 0 && (err == EPIPE || err == ECONNRESET)) {
                 // A peer that tore the connection down before a single byte of this message
                 // went out has abandoned the collective, which is what Timeout means. Past the
@@ -869,9 +1049,9 @@ void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id)
 
 void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_id) {
     ensure_started();
-    ensure_link(sender_id);
-    LinkState& l = link(sender_id);
     OperationClock clock{monotonic_ms(), static_cast<long>(max_timeout), 0};
+    ensure_link(sender_id, clock.deadline(monotonic_ms()));
+    LinkState& l = link(sender_id);
     std::size_t moved = 0;
 
     while (moved < buf.len) {
@@ -896,8 +1076,16 @@ void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_i
                 }
                 continue;
             }
-            if (l.fd < 0 || l.draining) {
+            if (l.draining) {
                 wait_for_link(lock, l, sender_id, clock);
+                continue;
+            }
+            if (l.fd < 0) {
+                // As in send_object: the thread that wants the link is the thread that rebuilds
+                // it, so a message parked across a migration resumes at its offset instead of
+                // waiting for a dial nobody was going to make.
+                lock.unlock();
+                ensure_link(sender_id, clock.deadline(monotonic_ms()));
                 continue;
             }
             const ssize_t n = ::recv(l.fd, buf.buf + moved, buf.len - moved, MSG_DONTWAIT);
@@ -905,11 +1093,17 @@ void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_i
                 moved += static_cast<std::size_t>(n);
                 // Advanced only once the bytes are in the application's buffer, never at any
                 // earlier point: the counter is what a reconnect cross-checks, so it must
-                // describe what this rank has actually taken delivery of.
+                // describe what this rank has actually taken delivery of. A drain advances it
+                // too, for the same reason — bytes it moves into `inbound` are in user memory
+                // and have been taken delivery of, they are simply not consumed yet.
                 l.bytes_received += static_cast<std::uint64_t>(n);
                 continue;
             }
             if (n == 0) {
+                if (drain_armed()) {
+                    begin_draining_locked(l, true);
+                    continue;
+                }
                 if (moved == 0) {
                     throw Utils::Timeout();   // abandonment, as in send_object
                 }
@@ -925,6 +1119,9 @@ void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_i
             }
             if (err == EAGAIN || err == EWOULDBLOCK) {
                 wait_fd = l.fd;
+            } else if (drain_armed() && (err == ECONNRESET || err == EPIPE)) {
+                begin_draining_locked(l, true);
+                continue;
             } else if (moved == 0 && err == ECONNRESET) {
                 throw Utils::Timeout();
             } else {
@@ -963,6 +1160,14 @@ double FMI::Comm::DrainTCP::get_price(Utils::peer_num producer, Utils::peer_num 
 }
 
 void FMI::Comm::DrainTCP::finalize() {
+    // Before the lifecycle lock, never under it: detaching joins the migration runtime's
+    // trigger thread, and that thread runs the restore leg, which needs this very lock. A
+    // finalize that held it while waiting for the join would deadlock against a migration that
+    // is halfway through coming back.
+    if (attached_to_trigger) {
+        Utils::MigrationTrigger::instance().detach(this);
+        attached_to_trigger = false;
+    }
     std::lock_guard<std::mutex> lifecycle(lifecycle_mutex);
     if (finalized) {
         return;
@@ -970,12 +1175,15 @@ void FMI::Comm::DrainTCP::finalize() {
     finalized = true;
     started.store(false, std::memory_order_release);
 
+    // Nothing can be waiting on the pause handshake any more; make sure the control thread is
+    // not parked in it, or its stop would have to wait out a tick that never comes.
+    control_pause_request.store(false, std::memory_order_release);
     // First, so nothing can file a link or touch a descriptor after this point.
     stop_control_thread();
 
-    if (listen_fd >= 0) {
-        ::close(listen_fd);
-        listen_fd = -1;
+    const int listener = listen_fd.exchange(-1, std::memory_order_acq_rel);
+    if (listener >= 0) {
+        ::close(listener);
     }
     listen_port = 0;
     listener_nonce = 0;
@@ -1001,24 +1209,658 @@ void FMI::Comm::DrainTCP::finalize() {
         }
         state->back_up.notify_all();
     }
+    if (coordinator) {
+        try {
+            // Its own entry only: a rank that leaves says so, and one that does not is left to
+            // the TTL. Nothing here deletes another rank's record.
+            coordinator->remove_member(peer_id);
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(warning) << "DrainTCP: rank " << peer_id
+                                       << " could not withdraw its member record: " << e.what();
+        }
+        coordinator->disconnect();
+    }
     if (registry) {
         registry->disconnect();
     }
 }
 
-void FMI::Comm::DrainTCP::quiesce_and_drain(const std::vector<Utils::peer_num>&) {
-    throw std::logic_error("DrainTCP::quiesce_and_drain: not yet implemented (Stage 2)");
+// ---------------------------------------------------------------------------------------------
+// The migration sequence. Everything below runs on the migration runtime's trigger thread (or,
+// for a rehearsal, on whichever thread asked for one) and never on an application thread.
+// ---------------------------------------------------------------------------------------------
+
+long FMI::Comm::DrainTCP::drain_budget_ms() const {
+    // The quiet budget re-arms on progress, so the absolute cap is what stops a peer that
+    // trickles bytes forever. It is the larger of the two numbers on purpose: a max_timeout
+    // below one quiet budget would make drain_grace_ms unreachable and silently redefine the
+    // seal's patience as the transport's.
+    return std::max<long>(static_cast<long>(max_timeout), drain_grace_ms);
+}
+
+void FMI::Comm::DrainTCP::take_readable_locked(LinkState& l, int fd) {
+    std::vector<char> chunk(drain_chunk_bytes);
+    while (true) {
+        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), MSG_DONTWAIT);
+        if (n > 0) {
+            l.inbound.insert(l.inbound.end(), chunk.data(), chunk.data() + n);
+            l.bytes_received += static_cast<std::uint64_t>(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        // EOF, EAGAIN or a reset: in all three there is nothing more the kernel is holding, and
+        // this must not wait for anything to arrive.
+        return;
+    }
+}
+
+void FMI::Comm::DrainTCP::begin_draining_locked(LinkState& l, bool unconfirmed) {
+    if (!l.draining) {
+        l.draining = true;
+        l.draining_since_ms = monotonic_ms();
+    }
+    if (unconfirmed) {
+        l.drain_unconfirmed = true;
+    }
+    if (l.fd >= 0) {
+        take_readable_locked(l, l.fd);
+        // Closed rather than half-closed: this end has decided the connection is over, and the
+        // FIN the close sends is what lets a migrating peer's own drain reach EOF.
+        ::close(l.fd);
+        l.fd = -1;
+        ++l.generation;
+    }
+    l.back_up.notify_all();
+}
+
+void FMI::Comm::DrainTCP::break_every_link(const std::string& reason) {
+    // A drain holds every link lock from the seal to the end of the restore leg; outside that
+    // window it holds none. Both callers of this are on that one thread, so which of the two it
+    // is decides whether the locks have to be taken here.
+    const bool locks_held = !drain_locks.empty();
+    for (auto& state : links) {
+        if (state == nullptr) {
+            continue;
+        }
+        if (locks_held) {
+            state->unrecoverable = reason;
+            state->back_up.notify_all();
+        } else {
+            std::lock_guard<std::mutex> lock(state->mu);
+            state->unrecoverable = reason;
+            state->back_up.notify_all();
+        }
+    }
+}
+
+bool FMI::Comm::DrainTCP::drain_one_locked(LinkState& l, int fd, Utils::peer_num, long deadline_ms) {
+    std::vector<char> chunk(drain_chunk_bytes);
+    long quiet_deadline = monotonic_ms() + drain_grace_ms;
+    while (true) {
+        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), MSG_DONTWAIT);
+        if (n > 0) {
+            // Appended at the END: these are bytes the application has not consumed, and the
+            // receive path takes `inbound` before it ever reads a socket again, so the stream
+            // stays in order across the cut.
+            l.inbound.insert(l.inbound.end(), chunk.data(), chunk.data() + n);
+            l.bytes_received += static_cast<std::uint64_t>(n);
+            quiet_deadline = monotonic_ms() + drain_grace_ms;
+            continue;
+        }
+        if (n == 0) {
+            return true;   // EOF: the peer half-closed, and this is the clean seal
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            // A reset is not a seal: bytes may have been dropped, and this protocol's whole
+            // claim is that none were.
+            return false;
+        }
+        const long now = monotonic_ms();
+        if (now >= quiet_deadline || now >= deadline_ms) {
+            return false;
+        }
+        struct pollfd pfd{fd, POLLIN, 0};
+        const long budget = std::min<long>({static_cast<long>(wait_slice_ms()),
+                                            quiet_deadline - now, deadline_ms - now});
+        ::poll(&pfd, 1, static_cast<int>(std::max<long>(budget, 0)));
+    }
+}
+
+void FMI::Comm::DrainTCP::seal_links(std::vector<Utils::peer_num>& targets) {
+    struct Pending {
+        Utils::peer_num peer;
+        int fd;
+    };
+    std::vector<Pending> pending;
+    for (const auto peer : targets) {
+        LinkState& l = link(peer);
+        if (l.fd >= 0) {
+            pending.push_back({peer, l.fd});
+        }
+    }
+    // Every one of them half-closed before any of them is read. Never one link at a time: two
+    // ranks migrating in the same batch are each other's peers, and each would wait for a FIN
+    // the other has not sent because it is waiting for the first one's.
+    for (const auto& p : pending) {
+        ::shutdown(p.fd, SHUT_WR);
+    }
+
+    const long absolute_deadline = monotonic_ms() + drain_budget_ms();
+    long quiet_deadline = monotonic_ms() + drain_grace_ms;
+    std::vector<char> chunk(drain_chunk_bytes);
+    std::vector<Pending> open = pending;
+    std::vector<Utils::peer_num> stuck;
+
+    while (!open.empty()) {
+        bool progress = false;
+        for (std::size_t i = 0; i < open.size();) {
+            LinkState& l = link(open[i].peer);
+            const ssize_t n = ::recv(open[i].fd, chunk.data(), chunk.size(), MSG_DONTWAIT);
+            if (n > 0) {
+                l.inbound.insert(l.inbound.end(), chunk.data(), chunk.data() + n);
+                l.bytes_received += static_cast<std::uint64_t>(n);
+                progress = true;
+                continue;   // same descriptor again: it may have more queued
+            }
+            if (n == 0) {
+                open.erase(open.begin() + static_cast<long>(i));
+                progress = true;
+                continue;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                stuck.push_back(open[i].peer);
+                open.erase(open.begin() + static_cast<long>(i));
+                progress = true;
+                continue;
+            }
+            i++;
+        }
+        if (open.empty()) {
+            break;
+        }
+        const long now = monotonic_ms();
+        if (progress) {
+            quiet_deadline = now + drain_grace_ms;
+        }
+        if (now >= quiet_deadline || now >= absolute_deadline) {
+            for (const auto& p : open) {
+                stuck.push_back(p.peer);
+            }
+            break;
+        }
+        std::vector<struct pollfd> pfds;
+        pfds.reserve(open.size());
+        for (const auto& p : open) {
+            pfds.push_back({p.fd, POLLIN, 0});
+        }
+        const long budget = std::min<long>({static_cast<long>(wait_slice_ms()),
+                                            quiet_deadline - now, absolute_deadline - now});
+        ::poll(pfds.data(), pfds.size(), static_cast<int>(std::max<long>(budget, 0)));
+    }
+
+    for (const auto& p : pending) {
+        LinkState& l = link(p.peer);
+        ::close(p.fd);
+        l.fd = -1;
+        ++l.generation;
+    }
+    if (!stuck.empty()) {
+        std::string peers;
+        for (const auto peer : stuck) {
+            peers += (peers.empty() ? "" : ", ") + std::to_string(peer);
+        }
+        // Never conflated with EOF, and never followed by a stop: a rank that could not account
+        // for every byte in flight must not be frozen, because nothing downstream would ever
+        // find out that it was not sealed.
+        throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) +
+                                 ": drain incomplete, peer(s) " + peers +
+                                 " never closed their side within drain_grace_ms=" +
+                                 std::to_string(drain_grace_ms) + " (cap " +
+                                 std::to_string(drain_budget_ms()) +
+                                 " ms); the migration is off and the channel is broken");
+    }
+}
+
+std::unique_lock<std::shared_timed_mutex> FMI::Comm::DrainTCP::take_establish_gate() {
+    std::unique_lock<std::shared_timed_mutex> gate(establish_gate, std::defer_lock);
+    if (!gate.try_lock_for(std::chrono::milliseconds(std::max<long>(establish_yield_ms, 1)))) {
+        throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) +
+                                 ": an establishment still holds the establish gate after " +
+                                 std::to_string(establish_yield_ms) +
+                                 " ms; the migration is off");
+    }
+    return gate;
+}
+
+void FMI::Comm::DrainTCP::quiesce_and_drain(const std::vector<Utils::peer_num>& targets) {
+    ensure_started();
+    // Held from here to the end of the restore leg, so a rehearsal running on an application
+    // thread and the trigger thread's event dispatch cannot be inside this state at once.
+    held_migration_lock = std::unique_lock<std::mutex>(migration_mutex);
+    if (!drain_locks.empty()) {
+        held_migration_lock = std::unique_lock<std::mutex>();
+        throw std::logic_error("DrainTCP: rank " + std::to_string(peer_id) +
+                               " is already sealed; a second migration cannot begin before the "
+                               "first one has restored");
+    }
+    const std::uint64_t my_epoch = Utils::MigrationTrigger::instance().epoch();
+    migration_active.store(true, std::memory_order_release);
+
+    // 1. The establish gate, exclusively. An establishment in flight either finishes or lets go
+    //    at its next retry boundary, which is what drain_pending tells it to do.
+    drain_pending.store(true, std::memory_order_release);
+    std::unique_lock<std::shared_timed_mutex> gate;
+    try {
+        gate = take_establish_gate();
+    } catch (...) {
+        drain_pending.store(false, std::memory_order_release);
+        migration_active.store(false, std::memory_order_release);
+        held_migration_lock = std::unique_lock<std::mutex>();
+        throw;
+    }
+    drain_pending.store(false, std::memory_order_release);
+
+    try {
+        if (batch_id.empty()) {
+            batch_id = comm_name + "|" + std::to_string(peer_id) + "@" + std::to_string(my_epoch);
+        }
+        if (coordinator != nullptr && !batch_lease_external && !holds_batch_lock) {
+            // One batch in flight per communicator. A rank that asks for itself takes the lease;
+            // a driver that asked for it holds the lease already and handed its own batch id
+            // down, in which case this rank must not try to take what it is running under.
+            if (!coordinator->try_batch_lock(batch_id, batch_lease_ms)) {
+                throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) +
+                                         ": another migration holds the batch lease of '" +
+                                         comm_name + "'; this one is off");
+            }
+            holds_batch_lock = true;
+        }
+
+        // 2. The leave notice, before a single socket is touched: it is what tells every peer to
+        //    half-close, and this rank's drain finishes only once they have.
+        if (coordinator != nullptr) {
+            DrainEvent leaving;
+            leaving.type = DrainEvent::Type::Leaving;
+            leaving.rank = peer_id;
+            leaving.epoch = my_epoch;
+            leaving.batch = batch_id;
+            // Which lineage of this rank is leaving. A survivor that reads this notice late —
+            // after this rank has restored and dialled it again — needs it to tell the
+            // migration it is being told about from the one that has already finished.
+            leaving.extra["incarnation"] =
+                    std::to_string(local_incarnation.load(std::memory_order_acquire));
+            coordinator->emit(leaving);
+        } else {
+            BOOST_LOG_TRIVIAL(warning)
+                    << "DrainTCP: rank " << peer_id
+                    << " is draining with no control plane; no peer will be told to half-close "
+                       "(this is only correct for a single-rank rehearsal)";
+        }
+
+        // 3. Stop accepting. The control thread parks where it owns no socket at all — not even
+        //    a connection it has accepted but not yet greeted — and the listener goes with it.
+        pause_control_thread(monotonic_ms() + drain_budget_ms());
+        const int listener = listen_fd.exchange(-1, std::memory_order_acq_rel);
+        if (listener >= 0) {
+            ::close(listener);
+        }
+        listen_port = 0;
+        listener_nonce = 0;
+        published_at_ms.store(-1, std::memory_order_release);
+
+        // 4. Every link lock, in ascending peer order, held from here through the stop.
+        std::vector<Utils::peer_num> to_seal;
+        if (targets.empty()) {
+            for (Utils::peer_num p = 0; p < links.size(); p++) {
+                if (p != peer_id) {
+                    to_seal.push_back(p);
+                }
+            }
+        } else {
+            to_seal = targets;
+            std::sort(to_seal.begin(), to_seal.end());
+        }
+        drain_locks.reserve(links.size());
+        for (Utils::peer_num p = 0; p < links.size(); p++) {
+            // All of them, not only the ones being sealed: an application thread parked on a
+            // link that was never established must also be held across the stop, and must wake
+            // onto the migration clock rather than the transport's.
+            drain_locks.emplace_back(links[p]->mu);
+        }
+        for (Utils::peer_num p = 0; p < links.size(); p++) {
+            if (p == peer_id) {
+                continue;
+            }
+            LinkState& l = *links[p];
+            if (!l.draining) {
+                l.draining = true;
+                l.draining_since_ms = monotonic_ms();
+            }
+            // This rank knows why it is draining; nothing here is a guess.
+            l.drain_unconfirmed = false;
+        }
+        seal_links(to_seal);
+        drained_peers = to_seal;
+
+        // 5. The seal, with the counters the driver cross-checks pairwise before it dumps.
+        if (coordinator != nullptr) {
+            DrainEvent sealed;
+            sealed.type = DrainEvent::Type::Sealed;
+            sealed.rank = peer_id;
+            sealed.epoch = my_epoch;
+            sealed.batch = batch_id;
+            sealed.extra["last_stream_id"] = last_stream_id;
+            for (const auto peer : to_seal) {
+                LinkState& l = *links[peer];
+                sealed.extra["sent." + std::to_string(peer)] = std::to_string(l.bytes_sent);
+                sealed.extra["received." + std::to_string(peer)] =
+                        std::to_string(l.bytes_received);
+            }
+            coordinator->emit(sealed);
+        }
+    } catch (const std::exception& e) {
+        // Loud, and left broken: every parked application thread now throws this text, which is
+        // how a migration that could not complete becomes a job that dies instead of a job that
+        // quietly carries on with a channel nobody drained.
+        BOOST_LOG_TRIVIAL(error) << "DrainTCP: rank " << peer_id << " could not seal: "
+                                 << e.what();
+        break_every_link(std::string("broken by a migration that could not complete: ") +
+                         e.what());
+        drain_locks.clear();
+        drained_peers.clear();
+        migration_active.store(false, std::memory_order_release);
+        resume_control_thread();
+        held_migration_lock = std::unique_lock<std::mutex>();
+        throw;
+    }
+    // The gate stays taken across the stop: it is released with the link locks at the very end
+    // of the restore leg, and until then no thread may build a connection on this rank.
+    held_establish_gate = std::move(gate);
 }
 
 void FMI::Comm::DrainTCP::release_transport_sockets() {
-    throw std::logic_error("DrainTCP::release_transport_sockets: not yet implemented (Stage 2)");
+    // The listener went in step 3 and the links in step 4, so these two are the last sockets
+    // this process owns. After this it owns none, which is the entire point: the image is
+    // host-agnostic and neither CRIU leg needs --tcp-close.
+    if (registry) {
+        registry->disconnect();
+    }
+    if (coordinator) {
+        coordinator->disconnect();
+    }
+    published_at_ms.store(-1, std::memory_order_release);
+}
+
+void FMI::Comm::DrainTCP::rebind_listener() {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        throw std::runtime_error("DrainTCP: socket() failed on the restore leg: " +
+                                 std::string(strerror(errno)));
+    }
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(0);
+    if (!TcpEndpoint::resolve_ipv4(bind_host, addr.sin_addr)) {
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
+    if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd);
+        throw std::runtime_error("DrainTCP: bind to " + bind_host + " failed on the restore leg: " +
+                                 std::string(strerror(errno)));
+    }
+    if (::listen(fd, SOMAXCONN) < 0) {
+        ::close(fd);
+        throw std::runtime_error("DrainTCP: listen failed on the restore leg: " +
+                                 std::string(strerror(errno)));
+    }
+    socklen_t len = sizeof(addr);
+    if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) < 0) {
+        ::close(fd);
+        throw std::runtime_error("DrainTCP: getsockname failed on the restore leg: " +
+                                 std::string(strerror(errno)));
+    }
+    TcpEndpoint::set_nonblocking(fd, true);
+
+    listen_port = ntohs(addr.sin_port);
+    // A fresh nonce with the fresh port: whatever else has been handed this ephemeral number in
+    // the meantime must not be able to pass itself off as this listener.
+    listener_nonce = TcpEndpoint::random_nonce();
+    // Re-resolved rather than remembered, which is what makes a restore on a different host
+    // correct by construction instead of by a boot-id check.
+    advertised_ip = TcpEndpoint::resolve_advertise_ip(advertise_host, registry_host, registry_port);
+    listen_fd.store(fd, std::memory_order_release);
 }
 
 void FMI::Comm::DrainTCP::resume_after_restore() noexcept {
-    // noexcept by contract, so this stage's placeholder has to be a no-op rather than a throw.
-    // Nothing calls it yet: the migration runtime that would is Stage 2.
+    // noexcept by contract: this runs on the trigger thread while every application thread is
+    // parked on link state this very function holds, so a throw here would take the process
+    // down with the locks held. Failures are recorded per link and raised on the application
+    // thread instead.
+    try {
+        const std::uint64_t incarnation =
+                local_incarnation.fetch_add(1, std::memory_order_acq_rel) + 1;
+        const std::uint64_t epoch = Utils::MigrationTrigger::instance().epoch();
+
+        rebind_listener();
+        if (!try_publish(monotonic_ms() + drain_budget_ms(), true)) {
+            throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) +
+                                     " could not re-advertise itself after the restore");
+        }
+        if (coordinator != nullptr) {
+            coordinator->publish_member(peer_id, MemberRecord{epoch, advertised_ip, listen_port,
+                                                              listener_nonce});
+            DrainEvent restored;
+            restored.type = DrainEvent::Type::Restored;
+            restored.rank = peer_id;
+            restored.epoch = epoch;
+            restored.batch = batch_id;
+            restored.extra["incarnation"] = std::to_string(incarnation);
+            coordinator->emit(restored);
+        }
+        // Accepting again, on the new listener, before any peer can dial it: the survivors that
+        // outrank this one learn the new address from the member record above.
+        resume_control_thread();
+
+        for (auto& state : links) {
+            if (state == nullptr) {
+                continue;
+            }
+            // Left at fd = -1 on purpose. Re-establishment is lazy and belongs to whichever
+            // thread next wants the link: the application threads parked here re-enter their
+            // own establish path the moment they wake, and a peer that is not talking to this
+            // rank right now costs nothing until it does.
+            state->draining = false;
+            state->drain_unconfirmed = false;
+            state->back_up.notify_all();
+        }
+        if (holds_batch_lock && coordinator != nullptr) {
+            coordinator->release_batch_lock(batch_id);
+        }
+        holds_batch_lock = false;
+        batch_lease_external = false;
+        batch_id.clear();
+        drained_peers.clear();
+        migration_active.store(false, std::memory_order_release);
+        BOOST_LOG_TRIVIAL(info) << "DrainTCP: rank " << peer_id << " of " << comm_name
+                                << " resumed at epoch " << epoch << ", incarnation "
+                                << incarnation << ", listening on " << advertised_ip << ":"
+                                << listen_port;
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "DrainTCP: rank " << peer_id
+                                 << " could not resume after its migration: " << e.what();
+        break_every_link(std::string("broken by a restore that could not complete: ") + e.what());
+        migration_active.store(false, std::memory_order_release);
+    }
+    // Released last, and in this order: the locks the application threads are parked on, then
+    // the gate that stops anyone building a connection. Until both are gone no thread can
+    // observe the half-restored channel that existed in between.
+    drain_locks.clear();
+    held_establish_gate = std::unique_lock<std::shared_timed_mutex>();
+    held_migration_lock = std::unique_lock<std::mutex>();
 }
 
-void FMI::Comm::DrainTCP::peer_is_leaving(Utils::peer_num, std::uint64_t) {
-    throw std::logic_error("DrainTCP::peer_is_leaving: not yet implemented (Stage 2)");
+void FMI::Comm::DrainTCP::peer_is_leaving(Utils::peer_num peer, std::uint64_t epoch) {
+    // No lineage in the notice: tear down whatever is there. This is the interface a control
+    // plane that carries no incarnation reaches, which in practice means a test's.
+    apply_leave_notice(peer, epoch, std::numeric_limits<std::uint64_t>::max());
+}
+
+void FMI::Comm::DrainTCP::apply_leave_notice(Utils::peer_num peer, std::uint64_t epoch,
+                                             std::uint64_t leaver_incarnation) {
+    if (peer == peer_id) {
+        return;   // this rank's own notice, read back off the stream
+    }
+    LinkState& l = link(peer);   // bounds-checked
+    std::unique_lock<std::mutex> lock(l.mu);
+    if (epoch < l.peer_epoch) {
+        BOOST_LOG_TRIVIAL(warning)
+                << "DrainTCP: rank " << peer_id << " dropped a leave notice from peer " << peer
+                << " at epoch " << epoch << "; it has already seen epoch " << l.peer_epoch;
+        return;
+    }
+    if (l.peer_incarnation > leaver_incarnation) {
+        // The connection this rank holds was built by a LATER lineage of that peer, so the
+        // migration this notice describes is already over and its reconnect has already
+        // happened. Acting on it would close a link both ends believe in. The notice is
+        // therefore treated as the confirmation it is — the peer did migrate, and it is back.
+        BOOST_LOG_TRIVIAL(info)
+                << "DrainTCP: rank " << peer_id << " dropped a leave notice from peer " << peer
+                << " written by incarnation " << leaver_incarnation
+                << "; it is already connected to incarnation " << l.peer_incarnation;
+        l.peer_epoch = epoch;
+        l.draining = false;
+        l.drain_unconfirmed = false;
+        l.back_up.notify_all();
+        return;
+    }
+    l.peer_epoch = epoch;
+    if (!l.draining) {
+        l.draining = true;
+        l.draining_since_ms = monotonic_ms();
+    }
+    // Confirmed by the control plane: whatever the data path guessed, this is the answer.
+    l.drain_unconfirmed = false;
+
+    if (l.fd >= 0) {
+        const int fd = l.fd;
+        ++l.generation;
+        // Half-close first, so everything this rank had queued for the migrating peer reaches
+        // it before its FIN does, and its drain can account for every byte.
+        ::shutdown(fd, SHUT_WR);
+        const bool clean = drain_one_locked(l, fd, peer, monotonic_ms() + drain_budget_ms());
+        ::close(fd);
+        l.fd = -1;
+        if (!clean) {
+            l.unrecoverable = "the drain of migrating peer " + std::to_string(peer) +
+                              " never reached EOF within drain_grace_ms=" +
+                              std::to_string(drain_grace_ms);
+            l.back_up.notify_all();
+            throw std::runtime_error("DrainTCP: rank " + std::to_string(peer_id) + ": " +
+                                     l.unrecoverable);
+        }
+    }
+    // Idempotent by construction: a second notice for the same migration finds fd = -1 and
+    // does nothing but re-affirm what is already true. At-least-once delivery is the only
+    // kind a stream offers.
+    l.back_up.notify_all();
+}
+
+void FMI::Comm::DrainTCP::peer_has_restored(Utils::peer_num peer, std::uint64_t epoch) {
+    if (peer == peer_id) {
+        return;
+    }
+    LinkState& l = link(peer);
+    std::lock_guard<std::mutex> lock(l.mu);
+    if (epoch < l.peer_epoch) {
+        BOOST_LOG_TRIVIAL(warning)
+                << "DrainTCP: rank " << peer_id << " dropped a restore notice from peer " << peer
+                << " at epoch " << epoch << "; it has already seen epoch " << l.peer_epoch;
+        return;
+    }
+    l.peer_epoch = epoch;
+    // Deliberately NOT pre-setting peer_incarnation to anything: the hello's monotonicity check
+    // is what admits the peer's new lineage and refuses a superseded one, and a value guessed
+    // here could only make that check refuse something legitimate.
+    l.draining = false;
+    l.drain_unconfirmed = false;
+    // Whoever is parked on this link retries at once. A parked operation on a LOWER-ranked peer
+    // re-dials it through the ordinary establish path; one on a HIGHER-ranked peer waits for
+    // that peer's dial, which the peer makes because it saw this same event.
+    l.back_up.notify_all();
+}
+
+bool FMI::Comm::DrainTCP::poll_control_events() {
+    if (!started.load(std::memory_order_acquire) || coordinator == nullptr) {
+        return false;
+    }
+    std::unique_lock<std::mutex> guard(migration_mutex, std::try_to_lock);
+    if (!guard.owns_lock()) {
+        // A migration of this rank is in flight. Its events are its own business and the stream
+        // keeps them; this comes back for them on the next tick.
+        return false;
+    }
+    // Non-blocking: the trigger thread owes its signal wait the next tick.
+    auto events = coordinator->read_after(last_stream_id, 0);
+    bool migrate_me = false;
+    for (auto& [id, event] : events) {
+        last_stream_id = id;
+        if (event.rank >= num_peers) {
+            continue;
+        }
+        if (event.rank == peer_id) {
+            if (event.type == DrainEvent::Type::Migrate) {
+                // Carried down so the seal and the restore are attributable to the batch that
+                // asked for them — and so this rank does not try to take a lease its driver
+                // already holds.
+                if (!event.batch.empty()) {
+                    batch_id = event.batch;
+                    batch_lease_external = true;
+                }
+                migrate_me = true;
+            }
+            continue;
+        }
+        switch (event.type) {
+            case DrainEvent::Type::Leaving: {
+                std::uint64_t leaver_incarnation = std::numeric_limits<std::uint64_t>::max();
+                auto it = event.extra.find("incarnation");
+                if (it != event.extra.end()) {
+                    try {
+                        leaver_incarnation = std::stoull(it->second);
+                    } catch (const std::exception&) {
+                        // A notice whose lineage cannot be read is treated as carrying none,
+                        // which is the conservative reading: act on it.
+                    }
+                }
+                apply_leave_notice(event.rank, event.epoch, leaver_incarnation);
+                break;
+            }
+            case DrainEvent::Type::Restored:
+                peer_has_restored(event.rank, event.epoch);
+                break;
+            case DrainEvent::Type::Migrate:
+            case DrainEvent::Type::Sealed:
+            case DrainEvent::Type::Unknown:
+            default:
+                // Not this rank's business: a migrate addressed to someone else, a seal that
+                // only a driver reads, or an event kind a newer build emits.
+                break;
+        }
+    }
+    return migrate_me;
+}
+
+void FMI::Comm::DrainTCP::rehearse_migration_in_place(long hold_ms) {
+    ensure_started();
+    Utils::MigrationTrigger::instance().run_migration(*this, true, hold_ms);
 }

@@ -245,12 +245,46 @@ The dependency direction is: user API → channel policy → channel → transpo
   answers connection attempts. The once-per-connection 56-byte hello
   (`include/comm/DrainProtocol.h`) carries the sender's incarnation plus cumulative
   per-direction byte counters, cross-checked at every (re)connect: a byte lost across a cut
-  fails loudly at the reconnect instead of desyncing the stream silently. Migration config keys
-  (`drain`, `trigger`, `drain_grace_ms`, `migration_max_ms`, ...) are parsed and stored; the
-  migration runtime itself (trigger, coordinator, drain/restore legs) is the next stage.
+  fails loudly at the reconnect instead of desyncing the stream silently.
   An *unplanned* connection death is a loud error by design — this protocol handles planned
   migration only, never fault tolerance. Example configs: `config/fmi_drain_tcp.json`
   (drain armed, one enabled backend on purpose), `config/fmi_draintcp_test.json`.
+  - **The migration itself** is `"drain": true` plus three pieces. `FMI::Utils::MigrationTrigger`
+    (`include/utils/MigrationTrigger.h`) is process-wide — one signal policy
+    (`SIGRTMIN + drain_signal_offset`, blocked before the trigger thread exists, plus a handler
+    as the safety net for threads that predate arming), one epoch (a restore counter that drops
+    a request queued for a lineage this process has left), one thread, one `pthread_atfork`
+    child handler that disarms. A **second armed drain channel in one process is a
+    `std::logic_error`**, so the supported topology is one rank per process.
+    `FMI::Comm::DrainCoordinator` (`include/comm/DrainCoordinator.h`) is the control plane: a
+    narrow interface (so tests fake the orderings Redis will not produce) over a members hash,
+    a Redis **stream** of `leaving`/`sealed`/`restored`/`migrate` events — a stream, because
+    pub/sub loses exactly the events a frozen rank needed — and a `SET NX PX` batch lease.
+  - The migrator sequence (`DrainTCP::quiesce_and_drain` + `resume_after_restore`): establish
+    gate exclusively (bounded by `establish_yield_ms`, an in-flight dial letting go at its next
+    retry boundary) → `leaving` → park the control thread where it owns no socket and close the
+    listener → every link lock in ascending order, **half-close all, then one poll loop reading
+    all to EOF** into each link's `inbound` → `sealed` with the per-peer counters → drop the
+    registry and coordinator connections → `malloc_trim` → `SIGSTOP`. The restore leg bumps the
+    epoch and the incarnation, binds a *fresh* listener and re-resolves the advertised address
+    before re-advertising (cross-host correct by construction), emits `restored`, and clears
+    every link — leaving fds closed, because re-establishment is lazy and belongs to whichever
+    application thread next wants the link. Link locks are held across the whole stop and
+    released last. `rehearse_migration_in_place([hold_ms])` runs all of it with the `SIGSTOP`
+    replaced by an immediate restore; it is the regression net and what `tests/drain_migration.cpp`
+    drives.
+  - Two orderings this had to be built for. A survivor's data path often sees the migrator's
+    FIN *before* the leave notice: with drain armed that is recorded as a tentative drain
+    (`drain_unconfirmed`) rather than the immediate loud error it is with drain off, and the
+    notice confirms it — or `drain_grace_ms` lapses and it becomes the loud unplanned-death
+    error naming the peer. Conversely a leave notice can arrive *after* the migrating peer has
+    restored and dialled back in, so every notice carries the leaver's incarnation and is
+    dropped when the link already belongs to a later lineage. Without that fence a late notice
+    tears down a healthy connection and both ends wait for each other forever (it did).
+  - A survivor's `max_timeout` is **suspended** while a peer migrates; `migration_max_ms` bounds
+    that instead and throws naming the peer. A drain-armed job therefore needs `trigger` to
+    include `control` on every rank: the migrator's drain finishes only once its peers have
+    half-closed, and they learn to from the coordinator, not from the application.
 
 - **Data & reductions**: `FMI::Comm::Data<T>` (`include/comm/Data.h`) flattens scalars or
   vectors into a raw byte buffer (`data()`, `size_in_bytes()`). `FMI::Utils::Function<T>`

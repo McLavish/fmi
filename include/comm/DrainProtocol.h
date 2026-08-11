@@ -111,6 +111,22 @@ namespace FMI::Comm {
         //! Survivor side: drain and park only the link to that peer.
         virtual void peer_is_leaving(Utils::peer_num peer, std::uint64_t epoch) = 0;
 
+        //! Take whatever the control plane has said since the last call and act on it.
+        /*!
+         * The dispatch lives behind the participant rather than in the migration runtime for
+         * the same reason the runtime lives in `utils`: the runtime owns the process — one
+         * signal, one epoch, one thread — and knows nothing about streams, ranks or links. What
+         * an event *means* is the channel's business.
+         *
+         * @return true when one of those events asks this rank to migrate. The caller runs the
+         *         migrator sequence, so the dispatch never re-enters it from inside itself.
+         *
+         * Must be non-blocking: the caller owes its signal wait the next tick. Implementations
+         * are idempotent and epoch-filtered, because a stream is at-least-once and a rank that
+         * was frozen resumes reading from where it left off.
+         */
+        virtual bool poll_control_events() = 0;
+
         virtual Utils::peer_num local_rank() const = 0;
         virtual const std::string& channel_comm_name() const = 0;
     };

@@ -69,7 +69,7 @@ endif()
 
 if(FMI_ENABLE_REDIS)
     find_package(hiredis REQUIRED)
-    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp src/comm/DrainTCP.cpp src/comm/PeerRegistry.cpp)
+    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp src/comm/DrainTCP.cpp src/comm/DrainCoordinator.cpp src/comm/PeerRegistry.cpp src/utils/MigrationTrigger.cpp)
     list(APPEND FMI_LINK_LIBS ${HIREDIS_LIBRARIES})
 endif()
 
