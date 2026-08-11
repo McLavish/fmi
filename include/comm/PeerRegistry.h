@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace FMI::Comm {
@@ -35,6 +36,43 @@ namespace FMI::Comm {
 
         //! Whole rank -> "ip:port:nonce" map in one round trip. Never one HGET per peer.
         std::map<FMI::Utils::peer_num, std::string> snapshot(const std::string& key, long timeout_ms);
+
+        //! Remove one field of a hash.
+        void hdel(const std::string& key, const std::string& field, long timeout_ms);
+
+        //! @name Stream and lock verbs, for the migration coordinator
+        //! @{
+        //! XADD @p key with a server-assigned id, plus a pipelined EXPIRE. Returns the id.
+        /*!
+         * A stream rather than pub/sub on purpose: pub/sub drops everything a subscriber was not
+         * connected for, and a rank that is being migrated is precisely a subscriber that
+         * disconnects. A stream id is a resumption point, so an event emitted while a rank was
+         * frozen is still there when it comes back.
+         */
+        std::string xadd(const std::string& key,
+                         const std::vector<std::pair<std::string, std::string>>& fields,
+                         unsigned int ttl_s, long timeout_ms);
+
+        //! Id of the last entry of @p key, or "0-0" when the stream is empty or absent.
+        //! XREVRANGE COUNT 1, so it costs one entry rather than a whole read.
+        std::string tail_id(const std::string& key, long timeout_ms);
+
+        //! XREAD everything after @p last_id. @p block_ms 0 returns immediately.
+        std::vector<std::pair<std::string, std::map<std::string, std::string>>> xread_after(
+                const std::string& key, const std::string& last_id, long block_ms, long timeout_ms);
+
+        //! SET key value NX PX. True when this caller is the one that took it.
+        bool set_nx_px(const std::string& key, const std::string& value, long px_ms,
+                       long timeout_ms);
+
+        //! DEL key, but only while it still holds @p value.
+        /*!
+         * Check-and-delete in one script, never GET-then-DEL: between those two commands the
+         * lease can expire and be taken by someone else, and the DEL would then release a lock
+         * this caller no longer owns.
+         */
+        void del_if_equal(const std::string& key, const std::string& value, long timeout_ms);
+        //! @}
 
     private:
         void close_locked();
