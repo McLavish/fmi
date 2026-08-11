@@ -281,10 +281,18 @@ The dependency direction is: user API → channel policy → channel → transpo
     restored and dialled back in, so every notice carries the leaver's incarnation and is
     dropped when the link already belongs to a later lineage. Without that fence a late notice
     tears down a healthy connection and both ends wait for each other forever (it did).
-  - A survivor's `max_timeout` is **suspended** while a peer migrates; `migration_max_ms` bounds
-    that instead and throws naming the peer. A drain-armed job therefore needs `trigger` to
-    include `control` on every rank: the migrator's drain finishes only once its peers have
-    half-closed, and they learn to from the coordinator, not from the application.
+  - `max_timeout` is **suspended** for the duration of a migration; `migration_max_ms` bounds a
+    survivor's wait instead and throws naming the peer. The suspension is accounted *per link*
+    (`LinkState::migration_ms_total`, banked by whichever path ends the window, compared against
+    the snapshot each operation takes at entry) rather than measured by the waiting thread —
+    because most of the threads it is owed to never get to wait: the migrating rank's own drain
+    holds every link lock from the seal to the end of the restore leg, so its application threads
+    spend the whole window blocked on a plain mutex, and `draining` is set and cleared entirely
+    inside the interval in which they cannot run. Credit the waiter and they wake onto an expired
+    transport deadline — a `Timeout`, terminal for the communicator, thrown immediately after a
+    migration that *succeeded*. A drain-armed job also needs `trigger` to include `control` on
+    every rank: the migrator's drain finishes only once its peers have half-closed, and they
+    learn to from the coordinator, not from the application.
 
 - **Data & reductions**: `FMI::Comm::Data<T>` (`include/comm/Data.h`) flattens scalars or
   vectors into a raw byte buffer (`data()`, `size_in_bytes()`). `FMI::Utils::Function<T>`

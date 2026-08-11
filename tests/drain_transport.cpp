@@ -511,6 +511,240 @@ BOOST_AUTO_TEST_CASE(a_hello_for_the_wrong_listener_is_refused) {
     BOOST_CHECK_MESSAGE(ok[1] == 1, "rank 1 did not receive the message sent after the refusal");
 }
 
+//! The counter cross-check, from the accepting side: everything about this hello is right except
+//! the counts, and the counts are what refuses it.
+/*!
+ * This is the whole safety story of a headerless stream. There is no per-message identity on the
+ * wire, so the only thing standing between a cut that lost or duplicated a byte and a permanently
+ * desynchronised link is the pair of cumulative counters each end asserts at every reconnect. A
+ * test that forges the nonce never reaches them — the nonce is checked first, on purpose — so the
+ * comparison has to be approached with the *right* nonce, taken from the target's own registry
+ * entry, and with a lineage and a link name that are equally correct.
+ *
+ * The refusal is deliberately not survivable for that link: it is recorded by the control thread
+ * and raised, naming all four counts, on the next application thread to touch it. What must
+ * survive is the rest of the channel, which is why there is a third rank here.
+ */
+BOOST_AUTO_TEST_CASE(a_hello_whose_counters_disagree_is_refused) {
+    constexpr int num_peers = 3;
+    const std::string name = unique_comm("counters");
+    int* ok = shared_flags(num_peers + 2);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    ok[peer_id] = 0;
+    if (peer_id == 0) {
+        ok[num_peers] = 0;       // was the hello refused
+        ok[num_peers + 1] = 0;   // did the failure name the counts
+    }
+
+    try {
+        auto ch = make_channel(peer_id, num_peers, name);
+        if (peer_id == 1) {
+            // Four bytes, so rank 0's bytes_received on this link is exactly 4 and its
+            // bytes_sent exactly 0 — the numbers the forged hello has to contradict.
+            int first = 11;
+            ch->send({reinterpret_cast<char*>(&first), sizeof(first)}, 0);
+            ok[1] = 1;
+        } else if (peer_id == 2) {
+            int later = 33;
+            ch->send({reinterpret_cast<char*>(&later), sizeof(later)}, 0);
+            ok[2] = 1;
+        } else {
+            int first = -1;
+            ch->recv({reinterpret_cast<char*>(&first), sizeof(first)}, 1);
+
+            // Rank 0's own advertisement, believed in full: the address, and the nonce that
+            // proves a dialer reached this listener incarnation rather than a recycled port.
+            PeerRegistry probe("127.0.0.1", 6379);
+            auto entries = probe.snapshot("fmi:drain:" + name, 2000);
+            if (entries.count(0) != 1) {
+                throw std::runtime_error("rank 0 published no address");
+            }
+            const std::string entry = entries[0];
+            const auto colon = entry.find(':');
+            const auto last = entry.rfind(':');
+            if (colon == std::string::npos || last == colon) {
+                throw std::runtime_error("malformed registry entry: " + entry);
+            }
+            const std::string ip = entry.substr(0, colon);
+            const int port = std::stoi(entry.substr(colon + 1, last - colon - 1));
+            const std::uint64_t nonce = std::stoull(entry.substr(last + 1));
+
+            int intruder = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (intruder < 0) {
+                throw std::runtime_error("could not open the intruder socket");
+            }
+            struct sockaddr_in dest{};
+            dest.sin_family = AF_INET;
+            dest.sin_port = htons(static_cast<std::uint16_t>(port));
+            if (::inet_pton(AF_INET, ip.c_str(), &dest.sin_addr) != 1 ||
+                ::connect(intruder, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest)) != 0) {
+                ::close(intruder);
+                throw std::runtime_error("could not reach rank 0's advertised listener");
+            }
+
+            ResumeRecord forged;
+            forged.sender_rank = 1;
+            forged.receiver_rank = 0;
+            forged.link_name_hash = TcpEndpoint::fnv1a64(link_name_of(name, 0, 1));
+            forged.nonce = nonce;             // the real one: nothing is refused before the counts
+            forged.sender_incarnation = 0;    // the lineage rank 0 has already seen
+            forged.bytes_received = 0;        // and this half is the truth
+            forged.bytes_sent = 7;            // three bytes that were never on this link
+            char wire[resume_record_bytes];
+            encode_resume(forged, wire);
+            if (::send(intruder, wire, resume_record_bytes, MSG_NOSIGNAL) !=
+                static_cast<ssize_t>(resume_record_bytes)) {
+                ::close(intruder);
+                throw std::runtime_error("could not write the forged hello");
+            }
+
+            // Refusal is a close: no reply record comes back.
+            struct pollfd pfd{intruder, POLLIN, 0};
+            const int pr = ::poll(&pfd, 1, 3000);
+            char reply[resume_record_bytes];
+            const ssize_t got = pr > 0 ? ::recv(intruder, reply, sizeof(reply), 0) : -2;
+            ::close(intruder);
+            ok[num_peers] = (got <= 0 && got != -2);
+
+            // Recorded by the control thread, raised on the application thread, naming both
+            // sides of both counts — the loud failure the design promises in place of a silent
+            // stream desynchronisation.
+            int ignored = 0;
+            try {
+                ch->send({reinterpret_cast<char*>(&ignored), sizeof(ignored)}, 1);
+            } catch (const std::runtime_error& e) {
+                const std::string text = e.what();
+                ok[num_peers + 1] = (text.find("peer sent 7") != std::string::npos &&
+                                     text.find("we received 4") != std::string::npos);
+            }
+
+            // ...and the refusal cost this channel nothing anywhere else: the link to rank 2 is
+            // a different link and still carries its message.
+            int later = -1;
+            ch->recv({reinterpret_cast<char*>(&later), sizeof(later)}, 2);
+            ok[0] = (first == 11 && later == 33);
+        }
+        ch->finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(ok[num_peers] == 1,
+                        "a hello whose counters disagree was answered instead of refused");
+    BOOST_CHECK_MESSAGE(ok[num_peers + 1] == 1,
+                        "the refusal did not reach the application naming both counts");
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "rank 0 lost an unrelated link across the refusal");
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "rank 1 did not send its message");
+    BOOST_CHECK_MESSAGE(ok[2] == 1, "rank 2 did not send its message");
+}
+
+//! The other half of the cross-check: the *dialer* asserts the reply's counters, and a reply that
+//! claims bytes this link never carried is a failure the application is told about, not a link.
+/*!
+ * Both directions have to be checked at both ends, because either end can be the one that lost
+ * the bytes. The far end here is hand-written — a listener standing where rank 0 would be, saying
+ * something a healthy peer never says.
+ */
+BOOST_AUTO_TEST_CASE(a_reply_whose_counters_disagree_is_refused) {
+    const std::string name = unique_comm("dialcounters");
+    // Rank 1 of 2: it dials rank 0, so the dialer's half of the hello is the half under test.
+    auto ch = make_channel(1, 2, name);
+
+    int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    BOOST_REQUIRE(listener >= 0);
+    int one = 1;
+    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(0);
+    ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    BOOST_REQUIRE(::bind(listener, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
+    BOOST_REQUIRE(::listen(listener, 4) == 0);
+    socklen_t len = sizeof(addr);
+    BOOST_REQUIRE(::getsockname(listener, reinterpret_cast<struct sockaddr*>(&addr), &len) == 0);
+    const int port = ntohs(addr.sin_port);
+    const std::uint64_t nonce = 0xC0FFEEull;
+
+    PeerRegistry registry("127.0.0.1", 6379);
+    registry.publish("fmi:drain:" + name, "0",
+                     "127.0.0.1:" + std::to_string(port) + ":" + std::to_string(nonce), 60, 2000);
+
+    std::string far_end_trouble;
+    std::thread far_end([&]() {
+        struct pollfd pfd{listener, POLLIN, 0};
+        if (::poll(&pfd, 1, 10000) <= 0) {
+            far_end_trouble = "nobody dialled";
+            return;
+        }
+        const int conn = ::accept(listener, nullptr, nullptr);
+        if (conn < 0) {
+            far_end_trouble = "accept failed";
+            return;
+        }
+        char wire[resume_record_bytes];
+        std::size_t moved = 0;
+        while (moved < resume_record_bytes) {
+            const ssize_t n = ::recv(conn, wire + moved, resume_record_bytes - moved, 0);
+            if (n <= 0) {
+                far_end_trouble = "no hello arrived";
+                ::close(conn);
+                return;
+            }
+            moved += static_cast<std::size_t>(n);
+        }
+        ResumeRecord theirs;
+        if (!decode_resume(wire, theirs)) {
+            far_end_trouble = "the hello did not decode";
+            ::close(conn);
+            return;
+        }
+        ResumeRecord mine;
+        mine.sender_rank = 0;
+        mine.receiver_rank = 1;
+        mine.link_name_hash = theirs.link_name_hash;   // right link
+        mine.nonce = 0;                                // right shape of answer
+        mine.sender_incarnation = 0;                   // right lineage
+        mine.bytes_sent = 5;                           // five bytes this link never carried
+        mine.bytes_received = 0;
+        char reply[resume_record_bytes];
+        encode_resume(mine, reply);
+        if (::send(conn, reply, resume_record_bytes, MSG_NOSIGNAL) !=
+            static_cast<ssize_t>(resume_record_bytes)) {
+            far_end_trouble = "could not write the reply";
+        }
+        // Left open until the case is done with it: closing here would let the dialer see a
+        // plain EOF and retry, which is a different refusal from the one under test.
+        struct pollfd wait_for_close{conn, POLLIN, 0};
+        ::poll(&wait_for_close, 1, 5000);
+        ::close(conn);
+    });
+
+    int value = 7;
+    std::string raised;
+    try {
+        ch->send({reinterpret_cast<char*>(&value), sizeof(value)}, 0);
+        raised = "(the send completed)";
+    } catch (const std::exception& e) {
+        raised = e.what();
+    }
+    far_end.join();
+    ::close(listener);
+
+    BOOST_CHECK_MESSAGE(far_end_trouble.empty(), "the far end could not play its part: "
+                                                         << far_end_trouble);
+    BOOST_CHECK_MESSAGE(raised.find("counters disagree") != std::string::npos &&
+                                raised.find("peer sent 5") != std::string::npos &&
+                                raised.find("we received 0") != std::string::npos,
+                        "the dialer reported '" << raised
+                                                << "', expected the counter disagreement naming "
+                                                   "all four counts");
+    ch->finalize();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 #endif // FMI_ENABLE_REDIS

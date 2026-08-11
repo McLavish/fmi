@@ -178,6 +178,19 @@ namespace FMI::Comm {
             //! link and migration_max_ms applies instead.
             bool draining = false;
             long draining_since_ms = 0;
+            //! Cumulative milliseconds this link has spent inside a *closed* migration window.
+            /*!
+             * The suspension of the application clock is accounted here rather than measured by
+             * the waiting thread, because most of the threads whose deadline has to be suspended
+             * never get to wait: a migration holds every link mutex from the seal to the end of
+             * the restore leg, so an application thread that was mid-message spends the whole
+             * window blocked on `mu` itself — not on `back_up`, and therefore nowhere it could
+             * time its own suspension. Every path that closes a window adds the window's length
+             * here (close_migration_window_locked), and every operation compares this counter
+             * against the value it snapshotted at entry. Whoever was blocked on the mutex is
+             * credited by the same arithmetic as whoever was parked on the condition variable.
+             */
+            std::uint64_t migration_ms_total = 0;
             //! Set when the *data path* inferred a migration from an unexpected FIN or reset,
             //! before the control plane confirmed one. The two orders both happen: a peer's FIN
             //! travels over TCP and its leave notice travels through Redis, and neither is
@@ -207,7 +220,24 @@ namespace FMI::Comm {
         struct OperationClock {
             long started_ms = 0;
             long budget_ms = 0;
+            //! Migration time already discounted from this operation.
             long suspended_ms = 0;
+            //! The link's `migration_ms_total` as of the last time it was folded into
+            //! `suspended_ms`. Everything the link accumulates past this belongs to this
+            //! operation and has not been credited yet.
+            std::uint64_t migration_baseline = 0;
+
+            //! Fold everything the link has recorded since the last fold. Caller holds l.mu.
+            /*!
+             * Idempotent and monotone, so it can be called at every point the clock is
+             * consulted without counting an interval twice. It is deliberately the *only*
+             * producer of `suspended_ms`: a waiting thread that also measured its own wait
+             * would count the same window once per producer.
+             */
+            void absorb(std::uint64_t link_migration_ms_total) {
+                suspended_ms += static_cast<long>(link_migration_ms_total - migration_baseline);
+                migration_baseline = link_migration_ms_total;
+            }
 
             [[nodiscard]] bool expired(long now_ms) const {
                 return now_ms - started_ms - suspended_ms >= budget_ms;
@@ -231,7 +261,12 @@ namespace FMI::Comm {
         enum class AcceptResult {
             Accepted,   //!< a connection was taken and filed against a peer
             Rejected,   //!< one was taken and dropped; there may be more behind it
-            Empty       //!< the backlog is empty
+            Empty,      //!< the backlog is empty
+            //! `accept()` itself failed for a reason that leaves the connection queued —
+            //! EMFILE, ENFILE, ENOBUFS, ENOMEM. Retrying at once is a spin at 100% of a core:
+            //! the listener stays readable, so poll() returns immediately every time and
+            //! nothing in this loop releases a descriptor. The caller backs off instead.
+            Fault
         };
 
         //! The link to @p p, bounds-checked. Throws rather than indexing past the vector: the
@@ -268,7 +303,14 @@ namespace FMI::Comm {
         void await_peer(Utils::peer_num peer, long deadline_ms);
 
         //! One bounded wait on the link's condition variable, with the lock released by the
-        //! wait itself. Charges the interval to the right clock and throws when it runs out.
+        //! wait itself.
+        /*!
+         * Decides which clock the caller is on before it waits, and throws when that clock runs
+         * out: the transport's patience while the link is merely slow, the migration bounds
+         * (`drain_grace_ms` for a drain nobody has confirmed, `migration_max_ms` for one that
+         * has) while the peer is migrating. It does not *measure* the migration: the window is
+         * banked on the link by whichever path ends it, and folded into the clock here.
+         */
         void wait_for_link(std::unique_lock<std::mutex>& lock, LinkState& l,
                            Utils::peer_num peer, OperationClock& clock);
 
@@ -278,8 +320,31 @@ namespace FMI::Comm {
          * after deciding that link is gone, and the hello it just passed proves it is that
          * peer on this communicator. Believing the local descriptor instead wedges both ends,
          * because a descriptor can still report ESTABLISHED with nothing on the far side.
+         *
+         * @param refuse_while_draining  what to do when a drain of this link began *during* the
+         *        establishment — the whole of which runs with `l.mu` released: registry lookup,
+         *        connect, two 56-byte moves. The answer differs by direction, and the asymmetry
+         *        is the protocol's, not an implementation detail:
+         *        - **Dialing (true).** A drain that started mid-dial means the peer really is
+         *          leaving: an application thread cannot even enter an establishment on a link
+         *          that is already draining, so the notice (or the FIN the data path inferred one
+         *          from) arrived after this dial began. `apply_leave_notice` has already taken
+         *          its "the fd is -1, nothing to close" branch and will not run again, so
+         *          installing would leave a live socket nothing will ever half-close while the
+         *          migrating peer's seal polls it for an EOF that never comes. Refusing —
+         *          and closing, which the caller does — is what delivers that EOF.
+         *        - **Accepting (false).** The only party that can dial a link this rank believes
+         *          is draining is that peer's *restored* lineage, arriving before this rank has
+         *          read the `restored` event: the migrating rank itself holds its establish gate
+         *          exclusively and has closed its listener, so it dials nobody. Refusing here
+         *          would leave the two ends disagreeing about whether the connection exists —
+         *          the dialer files it, this end drops it — which is worse than filing on a link
+         *          whose `draining` flag one control tick is about to clear.
+         * @return false when the connection was refused, in which case nothing is installed and
+         *         @p fd stays the caller's to close.
          */
-        void file_link(Utils::peer_num peer, int fd, std::uint64_t peer_incarnation);
+        [[nodiscard]] bool file_link(Utils::peer_num peer, int fd, std::uint64_t peer_incarnation,
+                                     bool refuse_while_draining);
 
         //! Throw whatever the control thread recorded against this link. Caller holds l.mu.
         static void throw_if_unrecoverable(const LinkState& l, Utils::peer_num peer);
@@ -327,6 +392,10 @@ namespace FMI::Comm {
         void control_loop();
 
         AcceptResult accept_one();
+
+        //! errno of the last `accept()` that failed with AcceptResult::Fault. Written and read
+        //! by the control thread alone, which is why it needs no synchronisation.
+        int last_accept_error = 0;
 
         //! Republish if half the registry TTL has elapsed. Failures are retried next tick: a
         //! briefly unreachable registry must not take the channel down.
@@ -384,6 +453,16 @@ namespace FMI::Comm {
 
         //! Mark the link migrating and drop its descriptor. Caller holds l.mu.
         void begin_draining_locked(LinkState& l, bool unconfirmed);
+
+        //! End the migration window on @p l and bank its length. Caller holds l.mu.
+        /*!
+         * The single place `draining` goes back to false, so that no path can end a window
+         * without paying the application threads for it. Doing this *before* the link locks are
+         * handed back is what lets a thread that spent the whole migration blocked on `mu` —
+         * never on `back_up`, never anywhere it could time itself — wake onto a deadline that
+         * has the migration subtracted from it.
+         */
+        static void close_migration_window_locked(LinkState& l, long now_ms);
 
         //! Take whatever is already readable on @p fd into l.inbound, without ever waiting.
         /*!

@@ -561,7 +561,13 @@ bool FMI::Comm::DrainTCP::exchange_hello_as_dialer(Utils::peer_num peer, int fd,
 
     TcpEndpoint::set_nonblocking(fd, false);
     apply_socket_options(fd);
-    file_link(peer, fd, theirs.sender_incarnation);
+    if (!file_link(peer, fd, theirs.sender_incarnation, /*refuse_while_draining=*/true)) {
+        // A drain of this link began while the hello was in flight. Reported as a failure a
+        // retry can fix, so the caller closes the socket — which is also what delivers the FIN
+        // the migrating peer's seal is waiting for — and goes back to its loop head, where
+        // `draining` sends it to park on the migration clock instead of dialling again.
+        return false;
+    }
     return true;
 }
 
@@ -629,13 +635,29 @@ bool FMI::Comm::DrainTCP::exchange_hello_as_acceptor(int fd) {
     }
     TcpEndpoint::set_nonblocking(fd, false);
     apply_socket_options(fd);
-    file_link(sender, fd, theirs.sender_incarnation);
+    // Filed even if this link is draining: the reply has gone out, the dialer will file its end,
+    // and the only dialer that can reach a draining link is the peer's restored lineage. The
+    // `leaving` notice that is still to be read is fenced by that lineage when it arrives.
+    if (!file_link(sender, fd, theirs.sender_incarnation, /*refuse_while_draining=*/false)) {
+        return false;
+    }
     return true;
 }
 
-void FMI::Comm::DrainTCP::file_link(Utils::peer_num peer, int fd, std::uint64_t peer_incarnation) {
+bool FMI::Comm::DrainTCP::file_link(Utils::peer_num peer, int fd, std::uint64_t peer_incarnation,
+                                    bool refuse_while_draining) {
     LinkState& l = link(peer);
     std::lock_guard<std::mutex> lock(l.mu);
+    if (refuse_while_draining && l.draining) {
+        // Re-checked here and not only at the top of the establishment: everything in between
+        // runs with this lock released, so a leave notice can be applied in the gap — and it has
+        // already taken its "the fd is -1, nothing to close" branch, which it will not take
+        // again for this migration. See the header for why only the dialing side refuses.
+        BOOST_LOG_TRIVIAL(info) << "DrainTCP: rank " << peer_id
+                                << " dropped a connection it had just dialled to peer " << peer
+                                << ": that link began draining while the hello was in flight";
+        return false;
+    }
     if (l.fd >= 0) {
         ::close(l.fd);
     }
@@ -646,6 +668,7 @@ void FMI::Comm::DrainTCP::file_link(Utils::peer_num peer, int fd, std::uint64_t 
     // path that sleeps out its slice after its link is back is the reference implementation's
     // reject-stall, one layer down.
     l.back_up.notify_all();
+    return true;
 }
 
 FMI::Comm::DrainTCP::AcceptResult FMI::Comm::DrainTCP::accept_one() {
@@ -660,7 +683,17 @@ FMI::Comm::DrainTCP::AcceptResult FMI::Comm::DrainTCP::accept_one() {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return AcceptResult::Empty;
         }
-        return AcceptResult::Rejected;   // EINTR, ECONNABORTED, EMFILE: there may be more behind
+        if (errno == EINTR || errno == ECONNABORTED) {
+            // The pending connection is gone (aborted) or nothing happened at all (interrupted);
+            // either way the backlog moved, so there may be more behind it and retrying costs
+            // one syscall.
+            return AcceptResult::Rejected;
+        }
+        // EMFILE, ENFILE, ENOBUFS, ENOMEM: the connection is still sitting in the accept queue,
+        // so the listener stays readable and an immediate retry is a busy loop with a bound
+        // written next to it. The caller backs off instead.
+        last_accept_error = errno;
+        return AcceptResult::Fault;
     }
     TcpEndpoint::set_nonblocking(fd, true);
     apply_socket_options(fd);
@@ -723,6 +756,19 @@ void FMI::Comm::DrainTCP::resume_control_thread() {
 }
 
 void FMI::Comm::DrainTCP::control_loop() {
+    // The descriptor-exhaustion backoff. `accept()` failing with EMFILE/ENFILE leaves the
+    // connection in the accept queue, so the listener stays readable and poll() returns
+    // immediately for as long as the condition lasts — nothing in this loop closes a descriptor,
+    // so without a backoff the "one dormant thread" of the steady state becomes a busy core.
+    // While the backoff runs the listener is left out of the poll set (and the poll timeout
+    // shortened to the remaining wait), which is what turns the spin into a sleep.
+    long accept_backoff_ms = 0;
+    long accept_backoff_until_ms = 0;
+    long last_accept_fault_log_ms = 0;
+    constexpr long accept_backoff_first_ms = 100;
+    constexpr long accept_backoff_max_ms = 2000;
+    constexpr long accept_fault_log_interval_ms = 5000;
+
     while (!stopping.load(std::memory_order_acquire)) {
         if (control_pause_request.load(std::memory_order_acquire)) {
             // Parked where it owns nothing: no listener, no half-accepted connection, only the
@@ -747,9 +793,19 @@ void FMI::Comm::DrainTCP::control_loop() {
             control_pause_cv.notify_all();
             continue;
         }
-        struct pollfd pfds[2] = {{listen_fd.load(std::memory_order_acquire), POLLIN, 0},
-                                 {wake_pipe[0], POLLIN, 0}};
-        const int pr = ::poll(pfds, 2, control_housekeeping_tick_ms);
+        const long loop_now = monotonic_ms();
+        // A negative descriptor is how poll() is told to ignore an entry, which is exactly what
+        // "do not look at the listener until the backoff is over" means here.
+        const bool listener_muted = loop_now < accept_backoff_until_ms;
+        int wait_ms = control_housekeeping_tick_ms;
+        if (listener_muted) {
+            wait_ms = static_cast<int>(std::clamp<long>(accept_backoff_until_ms - loop_now, 1,
+                                                        control_housekeeping_tick_ms));
+        }
+        struct pollfd pfds[2] = {
+                {listener_muted ? -1 : listen_fd.load(std::memory_order_acquire), POLLIN, 0},
+                {wake_pipe[0], POLLIN, 0}};
+        const int pr = ::poll(pfds, 2, wait_ms);
         if (stopping.load(std::memory_order_acquire)) {
             break;
         }
@@ -775,6 +831,32 @@ void FMI::Comm::DrainTCP::control_loop() {
                     // Nothing above this frame can report it, and the link's own state carries
                     // whatever the application needs to hear.
                     break;
+                }
+                if (result == AcceptResult::Fault) {
+                    // Escalating, and clamped: the condition is a property of the process (its
+                    // descriptor table) rather than of this connection, so the batch is over and
+                    // the listener is left alone until it may have cleared.
+                    accept_backoff_ms = accept_backoff_ms <= 0
+                                                ? accept_backoff_first_ms
+                                                : std::min(accept_backoff_ms * 2,
+                                                           accept_backoff_max_ms);
+                    const long now = monotonic_ms();
+                    accept_backoff_until_ms = now + accept_backoff_ms;
+                    if (now - last_accept_fault_log_ms >= accept_fault_log_interval_ms) {
+                        last_accept_fault_log_ms = now;
+                        BOOST_LOG_TRIVIAL(warning)
+                                << "DrainTCP: rank " << peer_id << " could not accept: "
+                                << strerror(last_accept_error) << "; the connection stays queued, "
+                                << "so the listener is left out of the poll for "
+                                << accept_backoff_ms << " ms rather than retried at once";
+                    }
+                    break;
+                }
+                if (result == AcceptResult::Accepted || result == AcceptResult::Empty) {
+                    // accept() itself worked, so whatever the descriptor table was short of, it
+                    // is not short of it now.
+                    accept_backoff_ms = 0;
+                    accept_backoff_until_ms = 0;
                 }
                 if (result == AcceptResult::Empty || stopping.load(std::memory_order_acquire)) {
                     break;
@@ -941,6 +1023,11 @@ void FMI::Comm::DrainTCP::await_peer(Utils::peer_num peer, long deadline_ms) {
 void FMI::Comm::DrainTCP::wait_for_link(std::unique_lock<std::mutex>& lock, LinkState& l,
                                         Utils::peer_num peer, OperationClock& clock) {
     const long before = monotonic_ms();
+    // Whatever migration time this link has banked since this operation last looked. The wait
+    // below is deliberately NOT measured here: a window is credited once, by the path that ends
+    // it, whether the thread it is owed to was parked on the condition variable or blocked on
+    // the mutex.
+    clock.absorb(l.migration_ms_total);
     const bool suspended = l.draining;
     if (suspended) {
         const long elapsed = before - l.draining_since_ms;
@@ -969,16 +1056,22 @@ void FMI::Comm::DrainTCP::wait_for_link(std::unique_lock<std::mutex>& lock, Link
     // wait_for releases the mutex for the whole wait, which is the property that matters: no
     // wait in this channel ever happens with a link lock held.
     l.back_up.wait_for(lock, std::chrono::milliseconds(wait_slice_ms()));
-    if (suspended) {
-        clock.suspended_ms += monotonic_ms() - before;
-    }
+    // Anything the window banked while this thread was inside wait_for is picked up by the
+    // absorb at the top of the next call, or by the one the operation loops do before they
+    // compute an establishment deadline.
 }
 
 void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     ensure_started();
-    OperationClock clock{monotonic_ms(), static_cast<long>(max_timeout), 0};
+    LinkState& l = link(rcpt_id);   // bounds-checked; peer >= num_peers throws here
+    OperationClock clock{monotonic_ms(), static_cast<long>(max_timeout), 0, 0};
+    {
+        // Where this link's migration clock stood when the operation began. Everything it banks
+        // from here on is time this operation is owed back.
+        std::lock_guard<std::mutex> lock(l.mu);
+        clock.migration_baseline = l.migration_ms_total;
+    }
     ensure_link(rcpt_id, clock.deadline(monotonic_ms()));
-    LinkState& l = link(rcpt_id);
     std::size_t moved = 0;
 
     while (moved < buf.len) {
@@ -994,8 +1087,15 @@ void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id)
                 // Re-established from here rather than waited for: after a migration the link
                 // is deliberately left closed, and this thread — parked at its offset with the
                 // rest of the message still to send — is the one that rebuilds it.
+                //
+                // The deadline is computed under the lock, because this is the wake-up path of a
+                // thread that spent the migration blocked on that very lock: the migration it
+                // slept through is on the link, and reading it anywhere else would hand the
+                // establishment a deadline that has already passed.
+                clock.absorb(l.migration_ms_total);
+                const long deadline = clock.deadline(monotonic_ms());
                 lock.unlock();
-                ensure_link(rcpt_id, clock.deadline(monotonic_ms()));
+                ensure_link(rcpt_id, deadline);
                 continue;
             }
             // Exactly one non-blocking syscall per acquisition of this lock. Everything that
@@ -1012,6 +1112,12 @@ void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id)
                 continue;
             }
             if (err == EAGAIN || err == EWOULDBLOCK) {
+                // Both under the lock: the link is the only place the migration credit lives,
+                // and the check that spends the budget must see the credit that pays for it.
+                clock.absorb(l.migration_ms_total);
+                if (clock.expired(monotonic_ms())) {
+                    throw Utils::Timeout();
+                }
                 wait_fd = l.fd;
             } else if (drain_armed() && (err == EPIPE || err == ECONNRESET)) {
                 // With drain armed a FIN in the middle of an operation is more often a
@@ -1036,9 +1142,6 @@ void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id)
                         " (an unplanned death is not recoverable in the drain protocol)");
             }
         }
-        if (clock.expired(monotonic_ms())) {
-            throw Utils::Timeout();
-        }
         // Polling a descriptor read under the lock and released since: the generation check on
         // the next acquisition is what makes a replacement visible, and the slice bounds how
         // long a stale wait can last.
@@ -1049,9 +1152,19 @@ void FMI::Comm::DrainTCP::send_object(channel_data buf, Utils::peer_num rcpt_id)
 
 void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_id) {
     ensure_started();
-    OperationClock clock{monotonic_ms(), static_cast<long>(max_timeout), 0};
-    ensure_link(sender_id, clock.deadline(monotonic_ms()));
-    LinkState& l = link(sender_id);
+    LinkState& l = link(sender_id);   // bounds-checked; peer >= num_peers throws here
+    OperationClock clock{monotonic_ms(), static_cast<long>(max_timeout), 0, 0};
+    {
+        std::lock_guard<std::mutex> lock(l.mu);
+        clock.migration_baseline = l.migration_ms_total;
+    }
+    // No establishment here, deliberately. A drain moves everything the peer sent before its FIN
+    // into `inbound`, where it is already delivered as far as the counters are concerned; a
+    // message those bytes satisfy in full needs no connection at all. Establishing first would
+    // gate it behind a peer that has no reason to dial — and for a higher-ranked sender, dialling
+    // is the only thing that ever ends the wait, so the message would time out with itself
+    // sitting in local memory. The loop below establishes at the first moment it actually needs
+    // a socket: `inbound` spent and bytes still owed.
     std::size_t moved = 0;
 
     while (moved < buf.len) {
@@ -1083,9 +1196,12 @@ void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_i
             if (l.fd < 0) {
                 // As in send_object: the thread that wants the link is the thread that rebuilds
                 // it, so a message parked across a migration resumes at its offset instead of
-                // waiting for a dial nobody was going to make.
+                // waiting for a dial nobody was going to make. Reached only once `inbound` is
+                // spent, which is what keeps a fully drained message off the wire entirely.
+                clock.absorb(l.migration_ms_total);
+                const long deadline = clock.deadline(monotonic_ms());
                 lock.unlock();
-                ensure_link(sender_id, clock.deadline(monotonic_ms()));
+                ensure_link(sender_id, deadline);
                 continue;
             }
             const ssize_t n = ::recv(l.fd, buf.buf + moved, buf.len - moved, MSG_DONTWAIT);
@@ -1118,6 +1234,10 @@ void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_i
                 continue;
             }
             if (err == EAGAIN || err == EWOULDBLOCK) {
+                clock.absorb(l.migration_ms_total);
+                if (clock.expired(monotonic_ms())) {
+                    throw Utils::Timeout();
+                }
                 wait_fd = l.fd;
             } else if (drain_armed() && (err == ECONNRESET || err == EPIPE)) {
                 begin_draining_locked(l, true);
@@ -1132,9 +1252,6 @@ void FMI::Comm::DrainTCP::recv_object(channel_data buf, Utils::peer_num sender_i
                         strerror(err) +
                         " (an unplanned death is not recoverable in the drain protocol)");
             }
-        }
-        if (clock.expired(monotonic_ms())) {
-            throw Utils::Timeout();
         }
         struct pollfd pfd{wait_fd, POLLIN, 0};
         ::poll(&pfd, 1, wait_slice_ms());
@@ -1273,6 +1390,17 @@ void FMI::Comm::DrainTCP::begin_draining_locked(LinkState& l, bool unconfirmed) 
         ++l.generation;
     }
     l.back_up.notify_all();
+}
+
+void FMI::Comm::DrainTCP::close_migration_window_locked(LinkState& l, long now_ms) {
+    if (l.draining) {
+        const long elapsed = now_ms - l.draining_since_ms;
+        if (elapsed > 0) {
+            l.migration_ms_total += static_cast<std::uint64_t>(elapsed);
+        }
+        l.draining = false;
+    }
+    l.drain_unconfirmed = false;
 }
 
 void FMI::Comm::DrainTCP::break_every_link(const std::string& reason) {
@@ -1671,6 +1799,7 @@ void FMI::Comm::DrainTCP::resume_after_restore() noexcept {
         // outrank this one learn the new address from the member record above.
         resume_control_thread();
 
+        const long window_end = monotonic_ms();
         for (auto& state : links) {
             if (state == nullptr) {
                 continue;
@@ -1679,8 +1808,14 @@ void FMI::Comm::DrainTCP::resume_after_restore() noexcept {
             // thread next wants the link: the application threads parked here re-enter their
             // own establish path the moment they wake, and a peer that is not talking to this
             // rank right now costs nothing until it does.
-            state->draining = false;
-            state->drain_unconfirmed = false;
+            //
+            // The window is banked here, while this function still holds every link lock. The
+            // application threads it is owed to are the ones blocked on those locks — they never
+            // saw `draining` at all, because it was set and cleared entirely inside the interval
+            // in which they could not run. Crediting the link rather than the waiter is what
+            // makes them wake onto the migration clock instead of onto a transport deadline that
+            // expired while they were held.
+            close_migration_window_locked(*state, window_end);
             state->back_up.notify_all();
         }
         if (holds_batch_lock && coordinator != nullptr) {
@@ -1738,8 +1873,7 @@ void FMI::Comm::DrainTCP::apply_leave_notice(Utils::peer_num peer, std::uint64_t
                 << " written by incarnation " << leaver_incarnation
                 << "; it is already connected to incarnation " << l.peer_incarnation;
         l.peer_epoch = epoch;
-        l.draining = false;
-        l.drain_unconfirmed = false;
+        close_migration_window_locked(l, monotonic_ms());
         l.back_up.notify_all();
         return;
     }
@@ -1791,8 +1925,11 @@ void FMI::Comm::DrainTCP::peer_has_restored(Utils::peer_num peer, std::uint64_t 
     // Deliberately NOT pre-setting peer_incarnation to anything: the hello's monotonicity check
     // is what admits the peer's new lineage and refuses a superseded one, and a value guessed
     // here could only make that check refuse something legitimate.
-    l.draining = false;
-    l.drain_unconfirmed = false;
+    //
+    // Everything from the leave notice to here is migration time, and it is banked on the link
+    // for whichever application threads were waiting it out — including the ones that spent it
+    // blocked on this very mutex while the survivor's own drain held it.
+    close_migration_window_locked(l, monotonic_ms());
     // Whoever is parked on this link retries at once. A parked operation on a LOWER-ranked peer
     // re-dials it through the ordinary establish path; one on a HIGHER-ranked peer waits for
     // that peer's dial, which the peer makes because it saw this same event.

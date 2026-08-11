@@ -44,6 +44,35 @@ namespace {
                 .count();
     }
 
+    //! Forget every drain request this process is holding but nobody asked for.
+    /*!
+     * Two places a request can be waiting when nothing is armed: the handler's flag, set by a
+     * signal that reached a thread which does not block it, and the kernel's pending set, where
+     * a signal blocked on every live thread simply sits. Neither is cleared by disarming, and
+     * both are consumed by the *next* arming — a migration nobody requested, which seals every
+     * link and raises SIGSTOP with no checkpointer on the other end of it. The epoch fence
+     * cannot catch it either: a request written for the epoch this process is already at passes.
+     *
+     * @param blocked_signal  the drain signal, which must be blocked on the calling thread —
+     *        sigtimedwait can only dequeue what the caller blocks — or -1 to clear the flag only.
+     *
+     * A signal made pending on a *different* thread with pthread_kill cannot be dequeued from
+     * here; nothing in this protocol sends one that way (drivers address the process).
+     */
+    void discard_pending_requests(int blocked_signal) {
+        if (blocked_signal > 0) {
+            sigset_t set;
+            sigemptyset(&set);
+            sigaddset(&set, blocked_signal);
+            struct timespec zero{};
+            // Zero timeout: this asks what is already pending and never waits for more.
+            while (::sigtimedwait(&set, nullptr, &zero) > 0) {
+            }
+        }
+        pending_request.store(false, std::memory_order_release);
+        pending_epoch.store(0, std::memory_order_release);
+    }
+
     bool mode_includes(const std::string& mode, const char* what) {
         if (mode == "none") {
             return false;
@@ -157,6 +186,11 @@ void FMI::Utils::MigrationTrigger::attach(Comm::DrainParticipant* new_participan
         signal_armed = true;
     }
 
+    // Before the trigger thread exists, and after the signal is blocked here: whatever request
+    // is left over from a window in which nothing was armed belongs to nobody, and the thread
+    // started below would otherwise consume it as this participant's own migration order.
+    discard_pending_requests(signal_armed ? signal_number : -1);
+
     stopping.store(false, std::memory_order_release);
     running.store(true, std::memory_order_release);
     thread = std::thread(&MigrationTrigger::trigger_loop, this);
@@ -197,6 +231,10 @@ void FMI::Utils::MigrationTrigger::detach(Comm::DrainParticipant* leaving) noexc
     }
     running.store(false, std::memory_order_release);
     std::lock_guard<std::mutex> lock(mutex);
+    // Nothing is armed from here on, so a request that is still in flight has no addressee. It
+    // is dropped at both ends of the window — here, so it does not sit in the process for the
+    // life of the job, and again at the next arm, which is the one that would have honoured it.
+    discard_pending_requests(signal_armed ? signal_number : -1);
     signal_number = -1;
     signal_armed = false;
 }
