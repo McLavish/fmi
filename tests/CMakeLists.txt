@@ -3,7 +3,7 @@ find_package (Boost REQUIRED COMPONENTS unit_test_framework)
 find_package(OpenMP REQUIRED)
 include_directories (${Boost_INCLUDE_DIRS})
 
-set(FMI_TEST_SOURCES channels.cpp communicator.cpp link_layer.cpp operation_identity.cpp framed_transport.cpp protocol_validation.cpp protocol_edge_cases.cpp protocol_fuzz.cpp link_recovery.cpp transport_recovery.cpp link_incarnations.cpp link_liveness.cpp checkpoint_freeze_points.cpp clientserver_recovery.cpp s3_backend.cpp)
+set(FMI_TEST_SOURCES channels.cpp communicator.cpp link_layer.cpp operation_identity.cpp framed_transport.cpp protocol_validation.cpp protocol_edge_cases.cpp protocol_fuzz.cpp link_recovery.cpp transport_recovery.cpp link_incarnations.cpp link_liveness.cpp checkpoint_freeze_points.cpp clientserver_recovery.cpp s3_backend.cpp drain_transport.cpp)
 
 add_executable (Boost_Tests_run ${FMI_TEST_SOURCES})
 target_link_libraries (Boost_Tests_run ${Boost_LIBRARIES} FMI OpenMP::OpenMP_CXX)

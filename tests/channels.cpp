@@ -88,6 +88,31 @@ std::map<std::string, std::string> direct_tcp_test_model_params = {
         {"include_infrastructure_costs", "true"}
 };
 
+// The drain backend's steady state is a raw TCP byte stream — the same wire DirectTCP puts on
+// the socket — so it belongs in this suite under the same parameters, and the whole collective
+// surface runs over it. No drain flag: Stage 1 arms no migration, and the suite must exercise
+// the configuration whose per-message cost is meant to be zero.
+std::map<std::string, std::string> drain_tcp_test_params = {
+        {"registry_host", "127.0.0.1"},
+        {"registry_port", "6379"},
+        {"bind_host", "127.0.0.1"},
+        {"advertise_host", "127.0.0.1"},
+        {"max_timeout", "3000"},
+        {"registry_poll_interval_ms", "2"},
+        {"connect_retry_interval_ms", "5"},
+        {"registry_ttl_s", "120"},
+        {"control_poll_interval_ms", "20"}
+};
+
+std::map<std::string, std::string> drain_tcp_test_model_params = {
+        {"bandwidth", "250.0"},
+        {"overhead", "0.20"},
+        {"transfer_price", "0.0"},
+        {"vm_price", "0.0134"},
+        {"requests_per_hour", "1000"},
+        {"include_infrastructure_costs", "true"}
+};
+
 std::map< std::string, std::pair< std::map<std::string, std::string>, std::map<std::string, std::string> > > backends = {
         //{"S3", {s3_test_params, s3_test_model_params}},
        // {"Redis", {redis_test_params, redis_test_model_params}},
@@ -96,6 +121,7 @@ std::map< std::string, std::pair< std::map<std::string, std::string>, std::map<s
 #endif
 #if FMI_ENABLE_REDIS
         {"DirectTCP", {direct_tcp_test_params, direct_tcp_test_model_params}},
+        {"DrainTCP", {drain_tcp_test_params, drain_tcp_test_model_params}},
 #endif
 };
 
