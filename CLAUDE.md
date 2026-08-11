@@ -123,11 +123,11 @@ cd build/tests
 ./Boost_Tests_run --list_content                   # list all suites/cases
 ```
 
-Fifteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
+Sixteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
 `Channels`, `Communicator`, `LinkLayer`, `LinkRecovery`, `LinkLiveness`, `LinkIncarnations`,
 `FramedTransport`, `TransportRecovery`, `OperationIdentity`, `ProtocolValidation`,
 `ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`, `ClientServerRecovery`,
-`S3Backend`.
+`S3Backend`, `DrainTransport`.
 (`tests/client.cpp` is a standalone sample, not a suite, and is not compiled into the binary.)
 `S3Backend` only exists in an `FMI_ENABLE_S3=ON` build, and splits in two: the cases that need a
 working store skip green unless `FMI_S3_TEST_BUCKET` names one (plus optional
@@ -232,6 +232,25 @@ The dependency direction is: user API → channel policy → channel → transpo
   - Note `ChannelPolicy` breaks ties by `std::map` order, so `Direct` beats `DirectTCP`
     alphabetically at equal modelled cost — `model.DirectTCP.overhead` is set below `Direct`'s
     to reflect its cheaper connection setup, which is also what makes the policy pick it.
+
+- **`DrainTCP`** (`include/comm/DrainTCP.h`) is the third TCP backend and the steady-state half
+  of the **neighborhood-drain migration protocol** — the coordinated alternative to the
+  sequenced-link retention/replay above, with the opposite trade-off: a headerless raw byte
+  stream (no frames, no acks, no retention — zero added bytes per message) whose per-link
+  mutexes are held for exactly one non-blocking syscall per chunk with every wait outside the
+  lock, so a migration-time drain can cut in *between* chunks and a criu image taken after a
+  drain contains zero sockets. Discovery mirrors DirectTCP over its own registry hash
+  `fmi:drain:<comm_name>` (a rank dials lower ids, accepts higher), but accepts run on a
+  per-channel **control thread** — the library's only thread — so a compute-bound rank still
+  answers connection attempts. The once-per-connection 56-byte hello
+  (`include/comm/DrainProtocol.h`) carries the sender's incarnation plus cumulative
+  per-direction byte counters, cross-checked at every (re)connect: a byte lost across a cut
+  fails loudly at the reconnect instead of desyncing the stream silently. Migration config keys
+  (`drain`, `trigger`, `drain_grace_ms`, `migration_max_ms`, ...) are parsed and stored; the
+  migration runtime itself (trigger, coordinator, drain/restore legs) is the next stage.
+  An *unplanned* connection death is a loud error by design — this protocol handles planned
+  migration only, never fault tolerance. Example configs: `config/fmi_drain_tcp.json`
+  (drain armed, one enabled backend on purpose), `config/fmi_draintcp_test.json`.
 
 - **Data & reductions**: `FMI::Comm::Data<T>` (`include/comm/Data.h`) flattens scalars or
   vectors into a raw byte buffer (`data()`, `size_in_bytes()`). `FMI::Utils::Function<T>`

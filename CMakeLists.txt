@@ -24,6 +24,8 @@ if (hasParent)
 endif()
 
 find_package(Boost COMPONENTS log REQUIRED)
+# DrainTCP runs a control thread per channel; every backend links against the same library.
+find_package(Threads REQUIRED)
 
 if(NOT FMI_USE_STATIC_BOOST)
     add_compile_definitions(BOOST_LOG_DYN_LINK BOOST_ALL_DYN_LINK)
@@ -51,6 +53,7 @@ set(FMI_SOURCES
 set(FMI_LINK_LIBS
     ${Boost_Libraries}
     Boost::log
+    Threads::Threads
 )
 
 if(FMI_ENABLE_TCPUNCH)
@@ -66,7 +69,7 @@ endif()
 
 if(FMI_ENABLE_REDIS)
     find_package(hiredis REQUIRED)
-    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp src/comm/PeerRegistry.cpp)
+    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp src/comm/DrainTCP.cpp src/comm/PeerRegistry.cpp)
     list(APPEND FMI_LINK_LIBS ${HIREDIS_LIBRARIES})
 endif()
 
