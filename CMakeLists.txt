@@ -45,6 +45,7 @@ set(FMI_SOURCES
     src/comm/OperationScope.cpp
     src/comm/SequencedLink.cpp
     src/comm/TcpChannelBase.cpp
+    src/comm/TcpEndpoint.cpp
 )
 
 set(FMI_LINK_LIBS
@@ -65,7 +66,7 @@ endif()
 
 if(FMI_ENABLE_REDIS)
     find_package(hiredis REQUIRED)
-    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp)
+    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp src/comm/PeerRegistry.cpp)
     list(APPEND FMI_LINK_LIBS ${HIREDIS_LIBRARIES})
 endif()
 

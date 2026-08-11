@@ -186,7 +186,7 @@ std::string FMI::Comm::Redis::last_failure() const {
  * dial is the expensive part, and the budget the caller is counting against pays for it. The
  * quiet window connect() sets is the other half of that accounting.
  *
- * The pid check is the fork guard, mirroring DirectTCP::Registry (src/comm/DirectTCP.cpp:131):
+ * The pid check is the fork guard, mirroring PeerRegistry (src/comm/PeerRegistry.cpp):
  * an inherited connection must not be shared, because two processes reading one RESP stream
  * steal each other's replies. That helper stays separate deliberately — it pipelines batches,
  * treats an error reply as fatal and is called from several threads, none of which holds for a

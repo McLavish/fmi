@@ -9,6 +9,8 @@
 #include <string>
 
 namespace FMI::Comm {
+    class PeerRegistry;
+
     //! Peer-to-peer TCP channel for platforms where peers can reach each other directly.
     /*!
      * Direct exists because some serverless platforms put ranks behind NAT, and it pays a
@@ -79,8 +81,6 @@ namespace FMI::Comm {
         void close_transport_state() override;
 
     private:
-        class Registry;
-
         //! Address a peer published for itself.
         struct PeerAddr {
             std::string ip;
@@ -104,9 +104,6 @@ namespace FMI::Comm {
          * it. One pipelined round trip, on the cold path only.
          */
         void publish_self(long deadline_ms);
-
-        //! Resolve the address peers should dial this rank on.
-        std::string resolve_advertise_ip() const;
 
         void build_mesh(Utils::peer_num target, long deadline_ms);
         //! Adopt accepted-but-unheld pending connections, except @p exclude.
@@ -166,7 +163,7 @@ namespace FMI::Comm {
         //! the base's sockets vector, which check_socket alone owns.
         std::map<Utils::peer_num, int> pending_links;
 
-        std::unique_ptr<Registry> registry;
+        std::unique_ptr<PeerRegistry> registry;
     };
 }
 

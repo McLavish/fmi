@@ -1,12 +1,9 @@
 #include "../../include/comm/DirectTCP.h"
 
-#include "../../include/utils/Signals.h"
-
-#include <hiredis/hiredis.h>
+#include "../../include/comm/PeerRegistry.h"
+#include "../../include/comm/TcpEndpoint.h"
 
 #include <arpa/inet.h>
-#include <fcntl.h>
-#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -21,8 +18,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
-#include <mutex>
-#include <random>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -40,281 +35,25 @@ namespace {
     constexpr std::uint32_t HELLO_MAGIC = 0x464D4931; // 'FMI1'
     constexpr std::uint32_t HELLO_VERSION = 1;
     constexpr std::size_t HELLO_SIZE = 32;
-
-    void put32(char* p, std::uint32_t v) {
-        for (int i = 0; i < 4; i++) {
-            p[i] = static_cast<char>((v >> (8 * (3 - i))) & 0xFF);
-        }
-    }
-
-    std::uint32_t get32(const char* p) {
-        std::uint32_t v = 0;
-        for (int i = 0; i < 4; i++) {
-            v = (v << 8) | static_cast<unsigned char>(p[i]);
-        }
-        return v;
-    }
-
-    void put64(char* p, std::uint64_t v) {
-        for (int i = 0; i < 8; i++) {
-            p[i] = static_cast<char>((v >> (8 * (7 - i))) & 0xFF);
-        }
-    }
-
-    std::uint64_t get64(const char* p) {
-        std::uint64_t v = 0;
-        for (int i = 0; i < 8; i++) {
-            v = (v << 8) | static_cast<unsigned char>(p[i]);
-        }
-        return v;
-    }
-
-    std::uint64_t fnv1a64(const std::string& s) {
-        std::uint64_t hash = 1469598103934665603ULL;
-        for (unsigned char c : s) {
-            hash ^= c;
-            hash *= 1099511628211ULL;
-        }
-        return hash;
-    }
-
-    std::uint64_t random_nonce() {
-        std::random_device rd;
-        std::mt19937_64 gen(((static_cast<std::uint64_t>(rd()) << 32) ^ rd()) ^
-                            static_cast<std::uint64_t>(::getpid()));
-        std::uniform_int_distribution<std::uint64_t> dist(1, UINT64_MAX);
-        return dist(gen);
-    }
-
-    void set_nonblocking(int fd, bool on) {
-        int flags = ::fcntl(fd, F_GETFL, 0);
-        if (flags < 0) {
-            return;
-        }
-        ::fcntl(fd, F_SETFL, on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK));
-    }
-
-    //! Resolve a host that may be a literal IPv4 address or a name.
-    bool resolve_ipv4(const std::string& host, struct in_addr& out) {
-        if (::inet_pton(AF_INET, host.c_str(), &out) == 1) {
-            return true;
-        }
-        struct addrinfo hints{};
-        struct addrinfo* res = nullptr;
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        if (::getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
-            return false;
-        }
-        out = reinterpret_cast<struct sockaddr_in*>(res->ai_addr)->sin_addr;
-        ::freeaddrinfo(res);
-        return true;
-    }
-
-    std::string param_or(std::map<std::string, std::string>& params, const std::string& key,
-                         const std::string& fallback) {
-        auto it = params.find(key);
-        if (it == params.end() || it->second.empty()) {
-            return fallback;
-        }
-        return it->second;
-    }
 }
-
-//! Minimal Redis client for the peer registry.
-/*!
- * Commands go out through redisCommandArgv with explicit argument lengths, and a dead context
- * is reconnected and the batch retried once. Deliberately NOT built like the Redis channel,
- * which concatenates commands into a string and passes it as a printf format — a comm_name
- * containing '%' or a space corrupts those.
- */
-class FMI::Comm::DirectTCP::Registry {
-public:
-    Registry(std::string host, int port) : host(std::move(host)), port(port) {
-        // Here, not at connect time: the first command after a criu restore is issued on the
-        // context the checkpoint captured, whose socket the restore already dropped. That
-        // write happens *before* any reconnect, so a disposition installed on the reconnect
-        // path would arrive one dead write too late.
-        FMI::Utils::suppress_sigpipe();
-    }
-
-    ~Registry() { disconnect(); }
-
-    void disconnect() {
-        std::lock_guard<std::mutex> lock(mutex);
-        close_locked();
-    }
-
-    //! HSET + EXPIRE pipelined into a single round trip.
-    void publish(const std::string& key, const std::string& field, const std::string& value,
-                 unsigned int ttl_s, long timeout_ms) {
-        std::lock_guard<std::mutex> lock(mutex);
-        set_timeout_locked(timeout_ms);
-        std::vector<std::vector<std::string>> batch{{"HSET", key, field, value}};
-        if (ttl_s > 0) {
-            batch.push_back({"EXPIRE", key, std::to_string(ttl_s)});
-        }
-        pipeline_locked(batch);
-    }
-
-    //! Whole rank -> "ip:port:nonce" map in one round trip. Never one HGET per peer.
-    std::map<FMI::Utils::peer_num, std::string> snapshot(const std::string& key, long timeout_ms) {
-        std::lock_guard<std::mutex> lock(mutex);
-        set_timeout_locked(timeout_ms);
-        auto replies = pipeline_locked({{"HGETALL", key}});
-        std::map<FMI::Utils::peer_num, std::string> out;
-        redisReply* reply = replies.front();
-        if (reply->type != REDIS_REPLY_ARRAY) {
-            return out;
-        }
-        for (std::size_t i = 0; i + 1 < reply->elements; i += 2) {
-            redisReply* field = reply->element[i];
-            redisReply* value = reply->element[i + 1];
-            if (field->str == nullptr || value->str == nullptr) {
-                continue;
-            }
-            try {
-                out[static_cast<FMI::Utils::peer_num>(std::stoul(std::string(field->str, field->len)))] =
-                        std::string(value->str, value->len);
-            } catch (const std::exception&) {
-                // A field that is not a rank number is not ours; ignore it rather than failing
-                // the whole discovery pass.
-            }
-        }
-        return out;
-    }
-
-private:
-    void close_locked() {
-        for (auto* reply : owned) {
-            freeReplyObject(reply);
-        }
-        owned.clear();
-        if (context != nullptr) {
-            redisFree(context);
-            context = nullptr;
-        }
-    }
-
-    //! Clamp every subsequent connect and command to what is left of the caller's deadline.
-    /*!
-     * Without this, redisConnect and redisGetReply block on the socket with no timeout at all,
-     * so an unreachable or wedged registry hangs establishment indefinitely — the mesh deadline
-     * is only ever checked between calls, never inside one.
-     */
-    void set_timeout_locked(long timeout_ms) {
-        long clamped = std::max<long>(timeout_ms, 1);
-        io_timeout.tv_sec = clamped / 1000;
-        io_timeout.tv_usec = (clamped % 1000) * 1000;
-        if (context != nullptr && !context->err) {
-            redisSetTimeout(context, io_timeout);
-        }
-    }
-
-    void connect_locked() {
-        close_locked();
-        context = redisConnectWithTimeout(host.c_str(), port, io_timeout);
-        if (context == nullptr || context->err) {
-            std::string error = "DirectTCP: could not connect to the peer registry at " + host +
-                                ":" + std::to_string(port);
-            if (context != nullptr && context->errstr != nullptr) {
-                error += ": ";
-                error += context->errstr;
-            }
-            if (context != nullptr) {
-                redisFree(context);
-                context = nullptr;
-            }
-            throw std::runtime_error(error);
-        }
-        redisSetTimeout(context, io_timeout);
-        owner_pid = ::getpid();
-    }
-
-    //! Issue a batch and collect its replies. Retries the whole batch once on a dead context —
-    //! including after a fork, where the inherited connection must not be reused (two processes
-    //! reading one RESP stream steal each other's replies).
-    std::vector<redisReply*> pipeline_locked(const std::vector<std::vector<std::string>>& batch) {
-        for (auto* reply : owned) {
-            freeReplyObject(reply);
-        }
-        owned.clear();
-
-        for (int attempt = 0; attempt < 2; attempt++) {
-            if (context == nullptr || context->err || owner_pid != ::getpid()) {
-                connect_locked();
-            }
-            bool ok = true;
-            for (const auto& args : batch) {
-                std::vector<const char*> argv;
-                std::vector<std::size_t> argvlen;
-                argv.reserve(args.size());
-                argvlen.reserve(args.size());
-                for (const auto& arg : args) {
-                    argv.push_back(arg.data());
-                    argvlen.push_back(arg.size());
-                }
-                if (redisAppendCommandArgv(context, static_cast<int>(argv.size()), argv.data(),
-                                           argvlen.data()) != REDIS_OK) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) {
-                for (std::size_t i = 0; i < batch.size(); i++) {
-                    void* raw = nullptr;
-                    if (redisGetReply(context, &raw) != REDIS_OK || raw == nullptr) {
-                        ok = false;
-                        break;
-                    }
-                    owned.push_back(reinterpret_cast<redisReply*>(raw));
-                }
-            }
-            if (ok && owned.size() == batch.size()) {
-                for (auto* reply : owned) {
-                    if (reply->type == REDIS_REPLY_ERROR) {
-                        std::string error = reply->str == nullptr ? "unknown Redis error" : reply->str;
-                        throw std::runtime_error("DirectTCP: registry error: " + error);
-                    }
-                }
-                return owned;
-            }
-            for (auto* reply : owned) {
-                freeReplyObject(reply);
-            }
-            owned.clear();
-            close_locked();
-        }
-        throw std::runtime_error("DirectTCP: peer registry command failed");
-    }
-
-    std::string host;
-    int port;
-    redisContext* context = nullptr;
-    //! Connect and command timeout; reset from the caller's remaining deadline before each op.
-    struct timeval io_timeout{1, 0};
-    pid_t owner_pid = -1;
-    std::vector<redisReply*> owned;
-    std::mutex mutex;
-};
 
 FMI::Comm::DirectTCP::DirectTCP(std::map<std::string, std::string> params,
                                 std::map<std::string, std::string> model_params) {
     transport_tag = "DirectTCP";
     eof_before_data_is_timeout = true;
-    registry_host = param_or(params, "registry_host", "127.0.0.1");
-    registry_port = std::stoi(param_or(params, "registry_port", "6379"));
-    bind_host = param_or(params, "bind_host", "0.0.0.0");
-    advertise_host = param_or(params, "advertise_host", "");
-    registry_poll_interval_ms = std::stoi(param_or(params, "registry_poll_interval_ms", "5"));
-    connect_retry_interval_ms = std::stoi(param_or(params, "connect_retry_interval_ms", "10"));
-    registry_ttl_s = std::stoi(param_or(params, "registry_ttl_s", "3600"));
+    registry_host = TcpEndpoint::param_or(params, "registry_host", "127.0.0.1");
+    registry_port = std::stoi(TcpEndpoint::param_or(params, "registry_port", "6379"));
+    bind_host = TcpEndpoint::param_or(params, "bind_host", "0.0.0.0");
+    advertise_host = TcpEndpoint::param_or(params, "advertise_host", "");
+    registry_poll_interval_ms = std::stoi(TcpEndpoint::param_or(params, "registry_poll_interval_ms", "5"));
+    connect_retry_interval_ms = std::stoi(TcpEndpoint::param_or(params, "connect_retry_interval_ms", "10"));
+    registry_ttl_s = std::stoi(TcpEndpoint::param_or(params, "registry_ttl_s", "3600"));
     parse_tcp_params(params);
     parse_tcp_model_params(model_params);
     // Constructed but not connected: peer_id/num_peers/comm_name are pushed in after
     // construction, and in the forked test harness the connection must be opened by the
     // process that will use it.
-    registry = std::make_unique<Registry>(registry_host, registry_port);
+    registry = std::make_unique<PeerRegistry>(registry_host, registry_port);
 }
 
 FMI::Comm::DirectTCP::~DirectTCP() {
@@ -335,47 +74,6 @@ std::string FMI::Comm::DirectTCP::registry_key() const {
     return "fmi:direct:" + comm_name;
 }
 
-std::string FMI::Comm::DirectTCP::resolve_advertise_ip() const {
-    if (!advertise_host.empty()) {
-        return advertise_host;
-    }
-    // Ask the kernel which local address it would route to the registry from. A UDP connect
-    // sends no packets, and the registry is reachable from every rank by construction, so the
-    // interface that reaches it is the one peers can most plausibly reach us on. Beats
-    // enumerating interfaces, which picks docker0/veth on any machine that has run a container.
-    int probe = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (probe >= 0) {
-        struct sockaddr_in dest{};
-        dest.sin_family = AF_INET;
-        dest.sin_port = htons(static_cast<std::uint16_t>(registry_port));
-        if (resolve_ipv4(registry_host, dest.sin_addr) &&
-            ::connect(probe, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest)) == 0) {
-            struct sockaddr_in local{};
-            socklen_t len = sizeof(local);
-            if (::getsockname(probe, reinterpret_cast<struct sockaddr*>(&local), &len) == 0) {
-                char buf[INET_ADDRSTRLEN];
-                if (::inet_ntop(AF_INET, &local.sin_addr, buf, sizeof(buf)) != nullptr) {
-                    ::close(probe);
-                    return buf;
-                }
-            }
-        }
-        ::close(probe);
-    }
-
-    char hostname[256];
-    if (::gethostname(hostname, sizeof(hostname)) == 0) {
-        struct in_addr addr{};
-        if (resolve_ipv4(hostname, addr) && addr.s_addr != htonl(INADDR_LOOPBACK)) {
-            char buf[INET_ADDRSTRLEN];
-            if (::inet_ntop(AF_INET, &addr, buf, sizeof(buf)) != nullptr) {
-                return buf;
-            }
-        }
-    }
-    return "127.0.0.1";
-}
-
 void FMI::Comm::DirectTCP::ensure_listener() {
     if (listen_fd < 0) {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -388,7 +86,7 @@ void FMI::Comm::DirectTCP::ensure_listener() {
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(0); // let the kernel pick a free port
-        if (!resolve_ipv4(bind_host, addr.sin_addr)) {
+        if (!TcpEndpoint::resolve_ipv4(bind_host, addr.sin_addr)) {
             addr.sin_addr.s_addr = htonl(INADDR_ANY);
         }
         if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -413,12 +111,13 @@ void FMI::Comm::DirectTCP::ensure_listener() {
         listen_port = ntohs(addr.sin_port);
         // Non-blocking: the event loop only accepts on a poll() hit, but a SYN withdrawn
         // between the poll and the accept would otherwise block the loop indefinitely.
-        set_nonblocking(fd, true);
+        TcpEndpoint::set_nonblocking(fd, true);
         listen_fd = fd;
         // Fresh per listener incarnation: this is what lets a peer tell a live listener from a
         // recycled ephemeral port belonging to some earlier run under the same comm_name.
-        listener_nonce = random_nonce();
-        advertised_ip = resolve_advertise_ip();
+        listener_nonce = TcpEndpoint::random_nonce();
+        advertised_ip = TcpEndpoint::resolve_advertise_ip(advertise_host, registry_host,
+                                                          registry_port);
     }
 }
 
@@ -436,12 +135,12 @@ void FMI::Comm::DirectTCP::publish_self(long deadline_ms) {
 std::string FMI::Comm::DirectTCP::frame_for(Utils::peer_num partner_id,
                                             std::uint64_t nonce) const {
     std::string buf(HELLO_SIZE, '\0');
-    put32(&buf[0], HELLO_MAGIC);
-    put32(&buf[4], HELLO_VERSION);
-    put32(&buf[8], static_cast<std::uint32_t>(peer_id));
-    put32(&buf[12], static_cast<std::uint32_t>(partner_id));
-    put64(&buf[16], fnv1a64(link_name(partner_id, true)));
-    put64(&buf[24], nonce);
+    TcpEndpoint::put32(&buf[0], HELLO_MAGIC);
+    TcpEndpoint::put32(&buf[4], HELLO_VERSION);
+    TcpEndpoint::put32(&buf[8], static_cast<std::uint32_t>(peer_id));
+    TcpEndpoint::put32(&buf[12], static_cast<std::uint32_t>(partner_id));
+    TcpEndpoint::put64(&buf[16], TcpEndpoint::fnv1a64(link_name(partner_id, true)));
+    TcpEndpoint::put64(&buf[24], nonce);
     return buf;
 }
 
@@ -492,20 +191,21 @@ bool FMI::Comm::DirectTCP::read_frame(int fd, Utils::peer_num& sender,
         got += static_cast<std::size_t>(n);
     }
 
-    if (get32(buf) != HELLO_MAGIC || get32(buf + 4) != HELLO_VERSION) {
+    if (TcpEndpoint::get32(buf) != HELLO_MAGIC ||
+        TcpEndpoint::get32(buf + 4) != HELLO_VERSION) {
         return false;
     }
-    auto claimed = static_cast<Utils::peer_num>(get32(buf + 8));
-    auto receiver = static_cast<Utils::peer_num>(get32(buf + 12));
+    auto claimed = static_cast<Utils::peer_num>(TcpEndpoint::get32(buf + 8));
+    auto receiver = static_cast<Utils::peer_num>(TcpEndpoint::get32(buf + 12));
     if (receiver != peer_id || claimed >= num_peers || claimed == peer_id) {
         return false;
     }
     // The link hash carries the comm_name, so a connector belonging to a different
     // communicator cannot pass itself off as the legitimate party for this one.
-    if (get64(buf + 16) != fnv1a64(link_name(claimed, false))) {
+    if (TcpEndpoint::get64(buf + 16) != TcpEndpoint::fnv1a64(link_name(claimed, false))) {
         return false;
     }
-    if (get64(buf + 24) != expect_nonce) {
+    if (TcpEndpoint::get64(buf + 24) != expect_nonce) {
         return false;
     }
     sender = claimed;
@@ -526,7 +226,7 @@ std::vector<FMI::Utils::peer_num> FMI::Comm::DirectTCP::connect_batch(
     std::vector<Utils::peer_num> remaining;
 
     auto finish = [&](int fd, Utils::peer_num rank, std::uint64_t nonce) {
-        set_nonblocking(fd, false);
+        TcpEndpoint::set_nonblocking(fd, false);
         apply_socket_options(fd);
         // The hello goes out now, but the link is not usable until the peer acknowledges it:
         // this connect may have landed on a recycled port owned by someone else entirely.
@@ -549,7 +249,7 @@ std::vector<FMI::Utils::peer_num> FMI::Comm::DirectTCP::connect_batch(
         struct sockaddr_in dest{};
         dest.sin_family = AF_INET;
         dest.sin_port = htons(static_cast<std::uint16_t>(it->second.port));
-        if (!resolve_ipv4(it->second.ip, dest.sin_addr)) {
+        if (!TcpEndpoint::resolve_ipv4(it->second.ip, dest.sin_addr)) {
             remaining.push_back(rank);
             continue;
         }
@@ -558,7 +258,7 @@ std::vector<FMI::Utils::peer_num> FMI::Comm::DirectTCP::connect_batch(
             remaining.push_back(rank);
             continue;
         }
-        set_nonblocking(fd, true);
+        TcpEndpoint::set_nonblocking(fd, true);
         int rc = ::connect(fd, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
         if (rc == 0) {
             finish(fd, rank, it->second.nonce);
