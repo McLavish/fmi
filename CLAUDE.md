@@ -297,6 +297,15 @@ The dependency direction is: user API → channel policy → channel → transpo
     migration that *succeeded*. A drain-armed job also needs `trigger` to include `control` on
     every rank: the migrator's drain finishes only once its peers have half-closed, and they
     learn to from the coordinator, not from the application.
+  - **Cross-host restore is verified**, sequential and batch (whole-machine and two-machine
+    single cuts), by the 4-machine campaign driven from
+    `runbooks/drain-migration/multihost_drain.py` — evidence in that runbook's README. One
+    environmental requirement: cross-host criu must run privileged (sudo or
+    `CAP_SYS_ADMIN`) so the restore lands in a time namespace preserving
+    `CLOCK_MONOTONIC`; `--unprivileged` silently skips the namespace, the restored rank
+    inherits the destination's clock, and a forward jump expires every absolute deadline at
+    once. Same-host restores are unaffected; deadline re-basing that would lift the
+    requirement is future work (see the spec doc §9).
 
 - **Data & reductions**: `FMI::Comm::Data<T>` (`include/comm/Data.h`) flattens scalars or
   vectors into a raw byte buffer (`data()`, `size_in_bytes()`). `FMI::Utils::Function<T>`

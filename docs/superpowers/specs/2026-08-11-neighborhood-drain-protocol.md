@@ -264,8 +264,10 @@ thread, `noexcept`:
 
 1. Bump the epoch and the incarnation.
 2. Bind a fresh listener (new port, new nonce) **before** re-advertising; re-resolve the
-   advertise address. This is why cross-host restore is correct by construction: the
-   restore leg runs code, unlike the sequenced protocol's restore, which runs none.
+   advertise address. This is why cross-host restore works: the restore leg runs code,
+   unlike the sequenced protocol's restore, which runs none. (Verified across four
+   machines — see §9; the one environmental requirement is monotonic-clock preservation,
+   the clock note in §9.)
 3. Republish the member record at the new epoch and emit `restored`. The registry and
    coordinator connections come back lazily inside those calls (the client redials when its
    context is gone); the stream cursor is simply the member variable the image preserved,
@@ -355,7 +357,7 @@ The mechanism follows GapRunner's `DirectCheckpoint` (per-chunk lock, offset res
 | message identity checked | every frame | no (counters at reconnect only) |
 | unplanned connection death | replayed from retention | loud failure |
 | image | contains sockets; `--tcp-close` both legs | socketless; no TCP flags; host-agnostic |
-| cross-host restore | unbacked on this branch | re-advertises by construction |
+| cross-host restore | unbacked on this branch | measured: 100+ cross-host migrations, sequential and batch (privileged criu — see the clock note in §9) |
 | request → dump latency | ≈ 0 | one drain (measured: ~1 ms seal on loopback) |
 
 Neither dominates. The benchmark that decides between them per workload is future work.
@@ -384,10 +386,36 @@ Neither dominates. The benchmark that decides between them per workload is futur
   as predicted. `crit` inspection of an image (no socket entries at all) was done by hand
   and recorded in that README.
 
-Not yet verified: cross-host restore (correct by construction, untested); multi-rank
-batches; the control-plane trigger path end to end (no test emits a `migrate` event — the
-signal path and direct rehearsals carry all coverage today); TLA model checking of the
-drain ordering (the existing modules cover the sequenced protocol only).
+- The 4-machine cluster campaign (evidence in the same README): **cross-host restore is
+  measured, not asserted** — 47 sequential cross-host migrations (chains of one rank over
+  three machines, whole-node sequential evacuation, mid-message cuts, 12 ranks), then
+  **single-cut batch evacuations** through the `migrate`-event path with a driver-held
+  lease: 28 cuts, 60 ranks moved between machines, including one machine's ranks to one
+  survivor and to a spread, k=3 at 12 ranks, and two machines emptied in one k=4 cut. All
+  sealed before anything is dumped; 41 pairwise counter cross-checks between co-migrating
+  peers, none disagree; every image socket-free; drain time unchanged by k (0–20 ms). The
+  `peer_migrating` fence was verified at the network level: zero TCP resets on evacuated
+  nodes while restored ranks waited out frozen co-members. The capstone is LULESH (a real
+  application, unmodified): 23 cross-host migrations across the same four machines —
+  sequential, whole-machine cuts, and two-machine k=4 cuts — every trial ending in the
+  bit-identical `Final Origin Energy`, with the drain itself at 1–20 ms regardless of k
+  and of tens of MB in flight per link.
+
+**Cross-host restore and the clock.** One environmental requirement the cluster campaign
+established: the library's deadlines and migration accounting use `CLOCK_MONOTONIC`, which
+differs between machines by their uptime gap. criu preserves it by restoring the process
+into a time namespace — which requires privilege (`CAP_SYS_ADMIN`; run criu under sudo or
+grant the file capability). `--unprivileged` criu cannot create the namespace and does not
+warn: the restored rank lands on the destination's clock, and a forward jump expires every
+absolute deadline at once (measured: a 74-hour uptime gap threw `Timeout` immediately
+after an otherwise successful migration; the same cut under privileged criu passed with a
+756 ms window). Same-host restores are unaffected. Re-basing the library's deadlines
+across a restore — which would lift the privilege requirement — is future work.
+
+Not yet verified: TLA model checking of the drain ordering (the existing modules cover the
+sequenced protocol only); a dedicated neighborhood-stop rate measurement (survivor logs
+and job wall-clocks show no disturbance, but the per-rank round-rate harness is future
+work).
 
 ## 10. Configuration
 
@@ -409,6 +437,13 @@ Backend block `DrainTCP` (see `config/fmi_drain_tcp.json`):
 | `batch_lease_ms` | 120000 | batch lease PX |
 | `control_poll_interval_ms` | 20 | wait slice: data-path polls, cv waits, trigger tick |
 | `drain_rehearsal_only` | false | both trigger paths rehearse instead of stopping (tests) |
+| `drain_hold_ms` | 0 | hold between seal and restore for an event- or signal-driven rehearsal (tests; `rehearse_migration_in_place`'s argument covers direct calls) |
+
+One deliberate asymmetry, documented rather than fixed: a `migrate` event addressed to
+this rank carries no epoch fence (the signal path's payload does). It needs none — the
+stream cursor advances past a dispatched migrate and is carried inside the image across
+the stop, so a stale migrate cannot be redelivered; the drivers still write the true
+epoch for the evidence trail.
 
 Constraints: enable exactly one backend in a config used for sweeps (the cost model would
 route around DrainTCP otherwise); one drain-armed channel per process; unique `comm_name`
@@ -418,12 +453,18 @@ per run.
 
 - `inbound` has no size cap; a peer that streams gigabytes during a drain grows it without
   bound. Acceptable for planned migrations of cooperating ranks; a cap is future work.
-- Overlapping migration requests are refused by the lease, not queued. Batching policy
-  (spot evictions are per-instance but correlated) is a Stage-3 question.
-- Stage 3: multi-rank batches, whole-host evacuation, the multihost driver, and the
-  neighborhood-stop measurement (unaffected ranks' round rate across the window).
+- Overlapping migration requests are refused by the lease, not queued; a driver batches
+  its own cuts under one lease (verified: back-to-back cuts, and a refused intruder).
+  A queueing policy for correlated spot evictions remains open.
+- Stage 3 is done: multi-rank batches, whole-host and two-host evacuation, and the
+  multihost driver (`runbooks/drain-migration/{cluster,node_helper,multihost_drain}.py`)
+  are built and measured. Still open from it: the dedicated neighborhood-stop rate
+  measurement (survivor logs and wall-clocks show no disturbance; a per-rank round-rate
+  harness would make it a number).
 - Stage 4: the steady-state and migration-frequency benchmark against the sequenced links
   and raw DirectTCP, and a TLA model of the drain ordering (no-loss at the stop,
   close-only-after-FIN, socketless-at-stop, the neighborhood property).
+- Deadline re-basing across a restore, so cross-host works under unprivileged criu
+  (today: privileged criu for the time namespace — the clock note in §9).
 - Restoring into environments without inbound connectivity (Lambda) needs a TCPunch-style
   rendezvous on the reconnect path; the establishment seam is where it would land.

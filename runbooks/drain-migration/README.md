@@ -688,6 +688,134 @@ verdict reads logs after the ranks exited; the one softer read is the pre-migrat
 snapshot, which can undercount and makes the progressed-after-restore check conservative in the
 trial's favour.
 
+## Phase D — LULESH across four machines
+
+The capstone: the same cuts, on a **real application** instead of the synthetic subject. LULESH
+2.0 (LLNL's Sedov shock-hydrodynamics proxy) ported to FMI — `McLavish/LULESH_FMI`, upstream
+LULESH sources unchanged, all FMI integration in the `lulesh-fmi.{h,cc}` MPI shim — 8 ranks,
+2 per machine, `-s 30`, run to completion at 2031 cycles. Every cycle is one global `dt`
+allreduce plus three 26-neighbour halo exchanges, so the traffic being cut is a real
+application's, in the tens of megabytes per link by the time a cut lands (`sent.1=47859281` in
+the D4b trail below), not a shape written to be cut.
+
+Its oracle is stronger than a checksum: rank 0's `Final Origin Energy` is bit-deterministic for
+a given (binary, size, rank count), so a migration that lost or duplicated a single halo byte
+moves it. The number to match is the **single-host golden `7.130703e+05`** from the port's
+earlier validation, and the four-machine clean run reproduces it exactly — which is what makes
+every migrated trial below a statement about the migration and not about the cluster.
+
+The driver is `LULESH_FMI/lulesh-multihost-drain.py`. It **imports** `cluster.py` for ssh, criu,
+the lease and the events, and `multihost_drain.py` for the orchestration itself — `migrate_one`,
+`evacuate`, and every stage they are made of (`await_seal`, `check_seal_state`,
+`cross_check_counters`, `dump_all`, `reap_all`, `restore_all`, `await_restored`,
+`check_event_trail`) — so a phase D verdict is produced by the same code as a phase B or C one.
+What it adds is only LULESH: the four FMI parameters arrive through the environment
+(`FMI_RANK`, `FMI_WORLD_SIZE`, `FMI_CONFIG`, `FMI_COMM_NAME`) rather than argv, `stdbuf -oL` so
+the per-cycle counter is readable while the job runs, and rank 0's `cycle = N` line replaces the
+subject's per-rank round counter as the progress reading (LULESH is globally synchronised once
+per cycle, so rank 0 at cycle N is a statement about all eight ranks).
+
+**11 trials, 11 passed, 0 failed, 0 skipped, 0 void — 23 cross-host migrations, 9 of them by
+signal in sequential steps and 14 inside 5 single cuts, every one dumped on one machine and
+restored on another. Every `criu dump` and `criu restore` returned 0 with no `--tcp-close`, no
+`--tcp-established` and no `--shell-job`; every migrated rank scanned `fds=5 sockets=0` at state
+`T`; none of the 23 image directories contains `inetsk.img`, `unixsk.img`, `tcp-stream.img`,
+`sk-queues.img`, `packetsk.img` or `netlinksk.img`; all 15 pairwise sealed-counter cross-checks
+inside cuts agreed; every event of every migration carried the expected batch id — the library's
+`comm|rank@epoch` for the 9 signalled ones, the driver's `comm|cutN` for the 14 batched; and all
+eleven runs — the clean one and the ten migrated ones — printed `Final Origin Energy =
+7.130703e+05` and `Iteration count = 2031`.**
+
+2026-08-14, FMI tree `91b3b31`, `lulesh2.0` sha256 `8545f08e…7bfe` (Release, `-O3`,
+`WITH_OPENMP=OFF`), config `fmi-lulesh-drain-multihost.json` (DrainTCP alone, `drain: true`,
+`trigger: both`, registry `10.164.0.3:6380`, `advertise_host: ""`, `migration_max_ms` 120000).
+Placement is `block` — r0,r1@T r2,r3@N2 r4,r5@N1 r6,r7@N3 — and since LULESH's 2×2×2
+decomposition makes every rank every other's neighbour, that leaves 24 of the 28 links crossing
+a machine boundary.
+
+| scenario | what it moves | energy | cycles | migrations | dump/restore rc | socket verdicts | max(leaving→restored) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| D0 clean, 4 machines | nothing | `7.130703e+05` **== single-host golden** | 2031 | — | — | — | — |
+| D1a one rank, N2→N3 | r3 | `7.130703e+05` | 2031 | 1 | 0 / 0 | none | 978 ms |
+| D1b one rank, N3→T | r6 | `7.130703e+05` | 2031 | 1 | 0 / 0 | none | 971 ms |
+| D1c one rank, T→N1 — **rank 0 itself** | r0 | `7.130703e+05` | 2031 | 1 | 0 / 0 | none | 1060 ms |
+| D2a three sequential, three ranks (r2 N2→T, r5 N1→N2, r7 N3→N1) | 3 ranks | `7.130703e+05` | 2031 | 3 | 0 / 0 | none | 958 ms |
+| D2b three sequential, rank 0 first (r0 T→N3, r3 N2→N1, r6 N3→T) | 3 ranks | `7.130703e+05` | 2031 | 3 | 0 / 0 | none | 1041 ms |
+| D3a single cut, N2 evacuated → spread (T, N1) | 2 ranks | `7.130703e+05` | 2031 | 2 | 0 / 0 | none | 1921 ms |
+| D3b single cut, N1 evacuated → spread (T, N2) | 2 ranks | `7.130703e+05` | 2031 | 2 | 0 / 0 | none | 1937 ms |
+| D3c single cut, **T** evacuated → spread (N2, N1) | 2 ranks | `7.130703e+05` | 2031 | 2 | 0 / 0 | none | 2043 ms |
+| D4a **two machines, k=4, one cut**: N1+N3 → T, N2 | 4 ranks | `7.130703e+05` | 2031 | 4 | 0 / 0 | none | 3786 ms |
+| D4b **two machines, k=4, one cut**: T+N2 → N1, N3 | 4 ranks | `7.130703e+05` | 2031 | 4 | 0 / 0 | none | 3875 ms |
+
+Rank 0 is migrated in three of the ten (D1c by signal, D2b as the first of three, D3c inside a
+cut) — the rank that owns the energy oracle, prints the progress counter and is dialled by every
+other rank. D3c and D4b evacuate criu-testing, the machine the driver itself runs on.
+
+**Wall clock**, over the 23 migrations, and indistinguishable from the synthetic subject's:
+
+| | |
+| --- | --- |
+| `leaving → restored`, per rank | min 937 ms, median 1695 ms, max 3875 ms |
+| `leaving → sealed`, the drain itself | **1–20 ms, median 16 ms** — unchanged by a real application's traffic, and unchanged by k |
+| the whole cut, first `sealed` → last `restored` | 928–1044 ms at k=1 (9), 1902–2029 ms at k=2 (3), **3786–3857 ms at k=4** (2) |
+| `criu dump` | 0.2 s, every one of the 23 |
+| `criu restore` | 0.2–0.3 s |
+| the job | 26 s clean; 27–41 s migrated (see below — the difference is placement, not the protocol) |
+
+The per-cut span is the same ~930 ms per additional rank as phase C, for the same reason (the
+driver dumps and restores serially over ssh). What LULESH adds to that reading is that the
+*drain* is unmoved by the workload: 1–20 ms to half-close 7 links carrying tens of megabytes
+each and read them to EOF, exactly the range the synthetic subject produced.
+
+**The job's own elapsed time is a placement effect, not a migration cost.** LULESH is
+bulk-synchronous, so it runs at the speed of its most loaded machine, and a migration changes
+how many ranks share a node's cores. Sorting the ten runs by the busiest node's ranks-per-core
+after the moves: 0.5 → 26–29 s (D0, D1b, D2a), 0.75 → 35–39 s (D1a, D1c, D2b, D3a, D3b, D3c),
+1.0 → 41 s (D4a, D4b, which end with four ranks on one 4-core machine). The migration windows
+themselves are ~1 s each and are already counted in those totals.
+
+The D4b trail, read from the stream — four `migrate` events under the driver's lease, four
+`leaving`, four `sealed` **before any** `restored`, every event carrying the driver's batch id:
+
+```
+migrate  r0 e0 batch=lul-D4b-1390975|cut0     migrate  r1 …    migrate  r2 …    migrate  r3 …
+leaving  r3 e0 inc=0   leaving r1   leaving r0   leaving r2      (all four, +5…11 ms)
+sealed   r1 e0  sent.0=47859281 received.0=23549825 …            (all four, +18 ms, one ms apart)
+restored r0 e1 inc=1   restored r1 (+328 ms)   restored r2 (+756 ms)   restored r3 (+1186 ms)
+```
+
+and the machine-level evidence for the same cut, from the criu logs themselves — `dump.log` says
+`Running on criu-testing` / `criu-node-2`, `restore.log` says `criu-node-1` / `criu-node-3`, per
+rank, for all 23 migrations.
+
+Evidence: `/scratch/LULESH_FMI/drain-runs/mh*/` (rank logs, `events.log`, `results.json`, and the
+23 image directories with both criu logs). Invocations:
+
+```bash
+cd /scratch/LULESH_FMI
+python3 lulesh-multihost-drain.py --nodes 10.164.0.3 10.164.0.4 10.164.0.5 10.164.0.6 --dry-run
+python3 lulesh-multihost-drain.py --nodes … --only D0 --keep                 # the golden
+python3 lulesh-multihost-drain.py --nodes … --only D1b,D1c,D2a,D2b \
+        --golden-energy 7.130703e+05 --keep
+python3 lulesh-multihost-drain.py --nodes … --only D3a,D3b,D3c --golden-energy 7.130703e+05 --keep
+python3 lulesh-multihost-drain.py --nodes … --only D4a,D4b   --golden-energy 7.130703e+05 --keep
+```
+
+Three things this phase needed that the synthetic campaign did not, all of them in the driver:
+
+* **`pkill` cannot be scoped to a communicator.** Every LULESH rank has an identical command
+  line and the communicator is in the environment, so `cluster.kill_all`'s
+  `<subject> .* <comm> ` pattern has nothing to match. Phase D kills on `[l]ulesh2.0` alone
+  (bracketed for the same reason), which is correct only because the campaign runs one job at a
+  time — and it is also the pattern the end-of-run orphan check greps for.
+* **Only rank 0 prints anything.** In a healthy run ranks 1–7 write zero bytes, so "the rank
+  finished" cannot be read from a log; it is one `node_helper.py wait-gone` per rank, which is
+  also what guarantees the log data has been flushed and written back over NFS before the
+  energy is read.
+* **`stdbuf -oL`.** LULESH ends its progress line with `"\n"`, not `std::endl`, so against a
+  redirected stdout the cycle counter would only appear in 4 KiB blocks. `stdbuf` execs the
+  target, so `$!` is still LULESH itself and the launch hygiene is unchanged.
+
 ## Interpreting failures
 
 | symptom | meaning |
@@ -704,10 +832,12 @@ trial's favour.
 
 Backed by real `criu` dumps and restores: single host, one rank per migration by `SIGRTMIN+3`
 (43 migrations, the first half of this file); **cross-host restore**, one rank at a time (phase
-B, 47 migrations, dumped on one machine and restored on another); and **single-cut batch
+B, 47 migrations, dumped on one machine and restored on another); **single-cut batch
 evacuation** by `migrate` event under a driver-held lease (phase C, 60 migrations in 28 cuts, up
-to k=4 and up to two machines emptied at once). Cross-host restore and batches are no longer
-design claims — they are the two evidence tables above.
+to k=4 and up to two machines emptied at once); and both of those under a **real application**
+(phase D, LULESH 2.0 on 8 ranks over the four machines, 23 migrations, the physics oracle
+bit-identical to the single-host golden every time). Cross-host restore and batches are no
+longer design claims — they are the three evidence tables above.
 
 Still not covered here: more than one rank per *process* (a second armed drain channel in one
 process is a `std::logic_error` by design), unplanned failure of any kind (this protocol handles
