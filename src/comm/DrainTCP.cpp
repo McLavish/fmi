@@ -145,6 +145,9 @@ FMI::Comm::DrainTCP::DrainTCP(std::map<std::string, std::string> params,
     // into an in-place restore is exactly the difference between a dry run and a migration, and
     // it must never be something a job acquires by accident.
     rehearsal_only = TcpEndpoint::param_or(params, "drain_rehearsal_only", "false") == "true";
+    // Only a rehearsal has a hold to configure: a real migration stays sealed for exactly as
+    // long as the checkpointer keeps the process stopped.
+    drain_hold_ms = std::stol(TcpEndpoint::param_or(params, "drain_hold_ms", "0"));
 
     bandwidth = std::stod(model_params.at("bandwidth"));
     overhead = std::stod(model_params.at("overhead"));
@@ -314,6 +317,7 @@ void FMI::Comm::DrainTCP::ensure_started() {
                 trigger_config.control_poll_interval_ms = control_poll_interval_ms;
                 trigger_config.mode = trigger;
                 trigger_config.rehearsal_only = rehearsal_only;
+                trigger_config.hold_ms = drain_hold_ms;
                 Utils::MigrationTrigger::instance().attach(this, trigger_config);
                 attached_to_trigger = true;
             }
@@ -1403,6 +1407,25 @@ void FMI::Comm::DrainTCP::close_migration_window_locked(LinkState& l, long now_m
     l.drain_unconfirmed = false;
 }
 
+void FMI::Comm::DrainTCP::release_batch_state() noexcept {
+    if (holds_batch_lock && coordinator != nullptr) {
+        try {
+            // Check-and-delete on the far side, so a lease that has already expired and been
+            // taken by the next batch is not deleted out from under it.
+            coordinator->release_batch_lock(batch_id);
+        } catch (const std::exception& e) {
+            // Nothing above this can act on it — this runs on the trigger thread, in the failure
+            // path of a migration that is already loud — and the lease expires on its own.
+            BOOST_LOG_TRIVIAL(warning) << "DrainTCP: rank " << peer_id
+                                       << " could not give the batch lease back: " << e.what();
+        }
+    }
+    holds_batch_lock = false;
+    batch_lease_external = false;
+    batch_id.clear();
+    drained_peers.clear();
+}
+
 void FMI::Comm::DrainTCP::break_every_link(const std::string& reason) {
     // A drain holds every link lock from the seal to the end of the restore leg; outside that
     // window it holds none. Both callers of this are on that one thread, so which of the two it
@@ -1703,7 +1726,10 @@ void FMI::Comm::DrainTCP::quiesce_and_drain(const std::vector<Utils::peer_num>& 
         break_every_link(std::string("broken by a migration that could not complete: ") +
                          e.what());
         drain_locks.clear();
-        drained_peers.clear();
+        // The batch goes back here and not only on the way out of a successful restore: this rank
+        // has touched nothing a driver is waiting for, and a lease it keeps would refuse every
+        // migration of this communicator until it expired.
+        release_batch_state();
         migration_active.store(false, std::memory_order_release);
         resume_control_thread();
         held_migration_lock = std::unique_lock<std::mutex>();
@@ -1816,15 +1842,24 @@ void FMI::Comm::DrainTCP::resume_after_restore() noexcept {
             // makes them wake onto the migration clock instead of onto a transport deadline that
             // expired while they were held.
             close_migration_window_locked(*state, window_end);
+            if (state->peer_migrating) {
+                // A co-member of this batch that has not come back yet. Its window is closed and
+                // banked above — the threads this rank held are paid for the part of it that was
+                // this rank's migration — and immediately reopened, because from here on the wait
+                // is the *peer's* migration and belongs on the peer's clock: its registry entry
+                // still names the address it left, and re-establishing against that would spend
+                // the transport's whole patience on a rank that cannot answer, then throw a
+                // Timeout, which is terminal for the communicator. The peer's own `restored`
+                // closes this second window through peer_has_restored, which banks it correctly
+                // because `draining` is true again.
+                state->draining = true;
+                state->draining_since_ms = window_end;
+                // Nothing about this is a guess: the peer said so on the control plane.
+                state->drain_unconfirmed = false;
+            }
             state->back_up.notify_all();
         }
-        if (holds_batch_lock && coordinator != nullptr) {
-            coordinator->release_batch_lock(batch_id);
-        }
-        holds_batch_lock = false;
-        batch_lease_external = false;
-        batch_id.clear();
-        drained_peers.clear();
+        release_batch_state();
         migration_active.store(false, std::memory_order_release);
         BOOST_LOG_TRIVIAL(info) << "DrainTCP: rank " << peer_id << " of " << comm_name
                                 << " resumed at epoch " << epoch << ", incarnation "
@@ -1834,6 +1869,10 @@ void FMI::Comm::DrainTCP::resume_after_restore() noexcept {
         BOOST_LOG_TRIVIAL(error) << "DrainTCP: rank " << peer_id
                                  << " could not resume after its migration: " << e.what();
         break_every_link(std::string("broken by a restore that could not complete: ") + e.what());
+        // Whatever this rank could not finish, holding the batch is not part of it: the events it
+        // emitted already say where it got to, and a lease nobody releases refuses the migrations
+        // that come after this job's, not only this one's.
+        release_batch_state();
         migration_active.store(false, std::memory_order_release);
     }
     // Released last, and in this order: the locks the application threads are parked on, then
@@ -1873,6 +1912,8 @@ void FMI::Comm::DrainTCP::apply_leave_notice(Utils::peer_num peer, std::uint64_t
                 << " written by incarnation " << leaver_incarnation
                 << "; it is already connected to incarnation " << l.peer_incarnation;
         l.peer_epoch = epoch;
+        // Not migrating: it is back, and this rank is talking to the lineage that came back.
+        l.peer_migrating = false;
         close_migration_window_locked(l, monotonic_ms());
         l.back_up.notify_all();
         return;
@@ -1884,6 +1925,9 @@ void FMI::Comm::DrainTCP::apply_leave_notice(Utils::peer_num peer, std::uint64_t
     }
     // Confirmed by the control plane: whatever the data path guessed, this is the answer.
     l.drain_unconfirmed = false;
+    // And it stays true across this rank's own migration, if one follows: the restore leg closes
+    // every link's window, and this is what tells it which of them to open again.
+    l.peer_migrating = true;
 
     if (l.fd >= 0) {
         const int fd = l.fd;
@@ -1922,6 +1966,8 @@ void FMI::Comm::DrainTCP::peer_has_restored(Utils::peer_num peer, std::uint64_t 
         return;
     }
     l.peer_epoch = epoch;
+    // The peer is back, so a restore leg of this rank's own has nothing left to hold open here.
+    l.peer_migrating = false;
     // Deliberately NOT pre-setting peer_incarnation to anything: the hello's monotonicity check
     // is what admits the peer's new lineage and refuses a superseded one, and a value guessed
     // here could only make that check refuse something legitimate.
@@ -1950,51 +1996,71 @@ bool FMI::Comm::DrainTCP::poll_control_events() {
     auto events = coordinator->read_after(last_stream_id, 0);
     bool migrate_me = false;
     for (auto& [id, event] : events) {
-        last_stream_id = id;
-        if (event.rank >= num_peers) {
-            continue;
-        }
-        if (event.rank == peer_id) {
-            if (event.type == DrainEvent::Type::Migrate) {
-                // Carried down so the seal and the restore are attributable to the batch that
-                // asked for them — and so this rank does not try to take a lease its driver
-                // already holds.
-                if (!event.batch.empty()) {
-                    batch_id = event.batch;
-                    batch_lease_external = true;
-                }
+        try {
+            if (dispatch_control_event(event)) {
                 migrate_me = true;
             }
-            continue;
+        } catch (const std::exception& e) {
+            // Loud, and the cursor stays where it is: this event has not been acted on. Leaving
+            // it unread is what keeps a failure from consuming the events behind it — under a
+            // batch this tick routinely also carries this rank's own migrate order, and dropping
+            // that would freeze a rank the driver is waiting to dump. Redelivery is safe because
+            // every handler is idempotent; the one failure that repeats — a drain that never
+            // reached EOF — has already closed the descriptor, so its second delivery does
+            // nothing at all.
+            BOOST_LOG_TRIVIAL(error) << "DrainTCP: rank " << peer_id << " of " << comm_name
+                                     << " could not act on a " << to_string(event.type)
+                                     << " event of rank " << event.rank << ": " << e.what();
+            break;
         }
-        switch (event.type) {
-            case DrainEvent::Type::Leaving: {
-                std::uint64_t leaver_incarnation = std::numeric_limits<std::uint64_t>::max();
-                auto it = event.extra.find("incarnation");
-                if (it != event.extra.end()) {
-                    try {
-                        leaver_incarnation = std::stoull(it->second);
-                    } catch (const std::exception&) {
-                        // A notice whose lineage cannot be read is treated as carrying none,
-                        // which is the conservative reading: act on it.
-                    }
-                }
-                apply_leave_notice(event.rank, event.epoch, leaver_incarnation);
-                break;
-            }
-            case DrainEvent::Type::Restored:
-                peer_has_restored(event.rank, event.epoch);
-                break;
-            case DrainEvent::Type::Migrate:
-            case DrainEvent::Type::Sealed:
-            case DrainEvent::Type::Unknown:
-            default:
-                // Not this rank's business: a migrate addressed to someone else, a seal that
-                // only a driver reads, or an event kind a newer build emits.
-                break;
-        }
+        last_stream_id = id;
     }
     return migrate_me;
+}
+
+bool FMI::Comm::DrainTCP::dispatch_control_event(const DrainEvent& event) {
+    if (event.rank >= num_peers) {
+        return false;
+    }
+    if (event.rank == peer_id) {
+        if (event.type == DrainEvent::Type::Migrate) {
+            // Carried down so the seal and the restore are attributable to the batch that asked
+            // for them — and so this rank does not try to take a lease its driver already holds.
+            if (!event.batch.empty()) {
+                batch_id = event.batch;
+                batch_lease_external = true;
+            }
+            return true;
+        }
+        return false;
+    }
+    switch (event.type) {
+        case DrainEvent::Type::Leaving: {
+            std::uint64_t leaver_incarnation = std::numeric_limits<std::uint64_t>::max();
+            auto it = event.extra.find("incarnation");
+            if (it != event.extra.end()) {
+                try {
+                    leaver_incarnation = std::stoull(it->second);
+                } catch (const std::exception&) {
+                    // A notice whose lineage cannot be read is treated as carrying none, which is
+                    // the conservative reading: act on it.
+                }
+            }
+            apply_leave_notice(event.rank, event.epoch, leaver_incarnation);
+            break;
+        }
+        case DrainEvent::Type::Restored:
+            peer_has_restored(event.rank, event.epoch);
+            break;
+        case DrainEvent::Type::Migrate:
+        case DrainEvent::Type::Sealed:
+        case DrainEvent::Type::Unknown:
+        default:
+            // Not this rank's business: a migrate addressed to someone else, a seal that only a
+            // driver reads, or an event kind a newer build emits.
+            break;
+    }
+    return false;
 }
 
 void FMI::Comm::DrainTCP::rehearse_migration_in_place(long hold_ms) {

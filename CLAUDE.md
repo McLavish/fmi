@@ -272,7 +272,11 @@ The dependency direction is: user API → channel policy → channel → transpo
     application thread next wants the link. Link locks are held across the whole stop and
     released last. `rehearse_migration_in_place([hold_ms])` runs all of it with the `SIGSTOP`
     replaced by an immediate restore; it is the regression net and what `tests/drain_migration.cpp`
-    drives.
+    drives. `drain_hold_ms` is the same hold for a rehearsal nobody called that function for — a
+    signalled or `migrate`-event one — and in a **batch** the restore leg keeps the window open on
+    every link whose peer is itself still migrating (`LinkState::peer_migrating`, set by that
+    peer's leave notice and cleared by its `restored`), because a rank that came back first would
+    otherwise spend `max_timeout` dialling the address a frozen co-member left behind.
   - Two orderings this had to be built for. A survivor's data path often sees the migrator's
     FIN *before* the leave notice: with drain armed that is recorded as a tentative drain
     (`drain_unconfirmed`) rather than the immediate loud error it is with drain off, and the

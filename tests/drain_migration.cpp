@@ -150,8 +150,18 @@ namespace {
 
         std::string emit(const DrainEvent& event) override {
             std::lock_guard<std::mutex> lock(mutex);
+            if (event.type == refused_kind) {
+                // A control plane that cannot be reached during a migration is a loud failure by
+                // design, and this is the cheapest way to produce one at a chosen step.
+                throw std::runtime_error("fake control plane: refusing to emit a " +
+                                         std::string(to_string(event.type)));
+            }
             const std::string id = std::to_string(++sequence) + "-0";
             entries.emplace_back(id, event);
+            // When each kind of event was first appended. The migrator sequence is only visible
+            // from outside as the events it emits, so the wall clock between two of them is the
+            // only way a test can measure a window the rank spent sealed.
+            first_seen_ms.emplace(event.type, now_ms());
             return id;
         }
 
@@ -177,6 +187,10 @@ namespace {
 
         bool try_batch_lock(const std::string& owner, long) override {
             std::lock_guard<std::mutex> lock(mutex);
+            // Every attempt is recorded, taken or refused: whether a rank tried to lease anything
+            // at all is the difference between running under its own batch and running under a
+            // driver's, and a test can see it nowhere else.
+            lock_owners.push_back(owner);
             if (lease_held) {
                 return false;
             }
@@ -204,13 +218,50 @@ namespace {
          *        on it" — the hand-driven control plane's reading.
          */
         void inject(DrainEvent::Type type, FMI::Utils::peer_num rank, std::uint64_t epoch,
-                    std::map<std::string, std::string> extra = {}) {
+                    std::map<std::string, std::string> extra = {}, std::string batch = "") {
             DrainEvent event;
             event.type = type;
             event.rank = rank;
             event.epoch = epoch;
+            event.batch = std::move(batch);
             event.extra = std::move(extra);
             emit(event);
+        }
+
+        //! Every event kind that has been appended, in order. What the migrator sequence looks
+        //! like from the outside.
+        std::vector<DrainEvent::Type> emitted_types() {
+            std::lock_guard<std::mutex> lock(mutex);
+            std::vector<DrainEvent::Type> out;
+            out.reserve(entries.size());
+            for (const auto& entry : entries) {
+                out.push_back(entry.second.type);
+            }
+            return out;
+        }
+
+        //! When @p type was first appended, or -1 if it never was.
+        long first_seen(DrainEvent::Type type) {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto it = first_seen_ms.find(type);
+            return it == first_seen_ms.end() ? -1 : it->second;
+        }
+
+        //! Refuse to emit events of @p type; Unknown turns the refusal off.
+        void fail_emit_of(DrainEvent::Type type) {
+            std::lock_guard<std::mutex> lock(mutex);
+            refused_kind = type;
+        }
+
+        //! Every owner token a lease was attempted with, in order.
+        std::vector<std::string> lease_attempts() {
+            std::lock_guard<std::mutex> lock(mutex);
+            return lock_owners;
+        }
+
+        bool lease_free() {
+            std::lock_guard<std::mutex> lock(mutex);
+            return !lease_held;
         }
 
         std::atomic<int> disconnects{0};
@@ -219,6 +270,9 @@ namespace {
         std::mutex mutex;
         std::map<FMI::Utils::peer_num, MemberRecord> member_records;
         std::vector<std::pair<std::string, DrainEvent>> entries;
+        std::map<DrainEvent::Type, long> first_seen_ms;
+        std::vector<std::string> lock_owners;
+        DrainEvent::Type refused_kind = DrainEvent::Type::Unknown;
         std::uint64_t sequence = 0;
         bool lease_held = false;
         std::string lease_owner;
@@ -1491,6 +1545,343 @@ BOOST_AUTO_TEST_CASE(a_queued_signal_migrates_once_and_a_stale_one_not_at_all) {
                                                << " after arming a second communicator; a request "
                                                   "delivered while nothing was armed was honoured "
                                                   "by the next arming");
+}
+
+//! The other way a migration is asked for: an event on the control plane, honoured by the trigger
+//! thread, holding its seal for as long as the configuration says.
+/*!
+ * The signal path has its own case above; this is its sibling, and it is the path every *batch*
+ * runs through — a driver takes the lease, names a batch and addresses one migrate event per rank
+ * it wants moved. `drain_hold_ms` is what makes it observable: an event-driven migration has no
+ * caller to pass a hold to, so without a configured one the seal is over before anything outside
+ * the rank could look at it, and the orderings a batch is made of cannot be staged at all.
+ *
+ * The batch on the event is a driver's, so the rank must run under it rather than lease anything
+ * of its own — and the three events it emits have to come out in the one order that describes a
+ * migration: gone, sealed, back.
+ */
+BOOST_AUTO_TEST_CASE(a_migrate_event_runs_a_rehearsal_that_holds_its_seal) {
+    constexpr long hold_ms = 500;
+    const std::string name = unique_comm("migrateevent");
+    auto params = drain_params("control", 20000, 2000, 30000);
+    params["drain_rehearsal_only"] = "true";
+    params["drain_hold_ms"] = std::to_string(hold_ms);
+    auto ch = make_drain_channel(0, 2, name, params);
+    auto* fake = new FakeDrainCoordinator();
+    ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
+    // Arms the channel and starts the trigger thread; nothing in this case calls the migrator
+    // sequence itself.
+    ch->set_incarnation(0);
+
+    fake->inject(DrainEvent::Type::Migrate, 0, 0, {}, "batch-of-the-driver");
+
+    const long deadline = now_ms() + 20000;
+    while (fake->first_seen(DrainEvent::Type::Restored) < 0 && now_ms() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // Many more trigger ticks than one, so a migrate event that was honoured twice would show up
+    // as a second leave notice rather than as a case that happened to end first.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto types = fake->emitted_types();
+    const auto index_of = [&types](DrainEvent::Type type) {
+        for (std::size_t i = 0; i < types.size(); i++) {
+            if (types[i] == type) {
+                return static_cast<long>(i);
+            }
+        }
+        return -1L;
+    };
+    const auto count_of = [&types](DrainEvent::Type type) {
+        long n = 0;
+        for (const auto seen : types) {
+            n += (seen == type);
+        }
+        return n;
+    };
+
+    BOOST_REQUIRE_MESSAGE(index_of(DrainEvent::Type::Restored) >= 0,
+                          "the migrate event was never honoured: the rank emitted "
+                                  << types.size() << " event(s) in 20 s");
+    BOOST_CHECK_MESSAGE(index_of(DrainEvent::Type::Leaving) > index_of(DrainEvent::Type::Migrate) &&
+                                index_of(DrainEvent::Type::Sealed) >
+                                        index_of(DrainEvent::Type::Leaving) &&
+                                index_of(DrainEvent::Type::Restored) >
+                                        index_of(DrainEvent::Type::Sealed),
+                        "the migration's events did not come out as migrate -> leaving -> sealed "
+                        "-> restored");
+    BOOST_CHECK_MESSAGE(count_of(DrainEvent::Type::Leaving) == 1,
+                        "one migrate event produced " << count_of(DrainEvent::Type::Leaving)
+                                                      << " migrations");
+
+    const long sealed_for =
+            fake->first_seen(DrainEvent::Type::Restored) - fake->first_seen(DrainEvent::Type::Sealed);
+    BOOST_CHECK_MESSAGE(sealed_for >= hold_ms,
+                        "the rank stayed sealed for " << sealed_for << " ms, and drain_hold_ms is "
+                                                      << hold_ms
+                                                      << "; an event-driven rehearsal has no other "
+                                                         "way to hold a batch ordering open");
+    ch->finalize();
+}
+
+//! Two ranks cut in one batch: the one that comes back first must wait for the one still frozen,
+//! not spend its transport patience dialling the address that peer left behind.
+/*!
+ * The sequential migrations every other case here runs are the easy shape — when a rank restores,
+ * every peer it has is up. Inside a batch they are not: the co-members are sealed, their registry
+ * entries still name the addresses they left, and their links are exactly the ones this rank's
+ * restore leg has just declared "no longer migrating". A restored rank that believes that
+ * re-establishes against a frozen peer, burns `max_timeout` against a rank that cannot answer and
+ * throws a `Timeout` — terminal for the communicator — immediately after a migration that
+ * succeeded.
+ *
+ * Staged deterministically through the stream rather than by sleeping: this test is the driver, it
+ * holds the batch lease exactly as `multihost_drain.py` does, and it emits the second migrate only
+ * once the first rank's `leaving` is on the stream. Rank 1 then stays sealed for 2 s while rank 0's
+ * whole migration and restore run inside that window against a patience of 1 s.
+ */
+BOOST_AUTO_TEST_CASE(a_restored_rank_waits_out_a_co_member_still_migrating) {
+    constexpr int num_peers = 2;
+    constexpr int rounds = 120;
+    const std::string name = unique_comm("batchcut");
+    // [0],[1] rank verdicts (1 = all rounds, 2 = a Timeout, 3 = another failure, 4 = wrong values);
+    // [2],[3] each rank has completed a round, so the driver knows both are armed and linked.
+    int* state = shared_flags(4);
+    for (int i = 0; i < 4; i++) {
+        state[i] = 0;
+    }
+
+    ForkedRankGuard rank_guard;
+    // Three roles for two ranks: the guard's own process is the *driver* a batch needs — it takes
+    // the lease and addresses one migrate event per rank, which is what makes concurrent
+    // migrations legal — and the two children are ranks 0 and 1 of the job.
+    int& role = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers + 1);
+    const int peer_id = role - 1;   // -1 in the driver
+
+    const auto wait_for_flag = [state](int slot, long budget_ms) {
+        const long deadline = now_ms() + budget_ms;
+        while (state[slot] != 1 && now_ms() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return state[slot] == 1;
+    };
+
+    if (peer_id >= 0) {
+        try {
+            // rank 0's patience is 1 s and rank 1 stays sealed for 2 s: the only way rank 0 gets
+            // through this is by not charging the peer's migration to that clock at all.
+            auto params = drain_params("control", peer_id == 0 ? 1000 : 20000, 5000, 30000);
+            params["drain_rehearsal_only"] = "true";
+            if (peer_id == 1) {
+                params["drain_hold_ms"] = "2000";
+            }
+            auto ch = make_drain_channel(peer_id, num_peers, name, params);
+            int failures = 0;
+            for (int r = 0; r < rounds; r++) {
+                if (peer_id == 0) {
+                    int out = r;
+                    ch->send({reinterpret_cast<char*>(&out), sizeof(out)}, 1);
+                    int back = -1;
+                    ch->recv({reinterpret_cast<char*>(&back), sizeof(back)}, 1);
+                    if (back != r + 1000) {
+                        failures++;
+                    }
+                } else {
+                    int got = -1;
+                    ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+                    if (got != r) {
+                        failures++;
+                    }
+                    int reply = got + 1000;
+                    ch->send({reinterpret_cast<char*>(&reply), sizeof(reply)}, 0);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                }
+                state[2 + peer_id] = 1;
+            }
+            state[peer_id] = (failures == 0) ? 1 : 4;
+            ch->finalize();
+        } catch (const FMI::Utils::Timeout&) {
+            state[peer_id] = 2;
+            std::fprintf(stderr, "[rank %d] Timeout\n", peer_id);
+        } catch (const std::exception& e) {
+            state[peer_id] = 3;
+            std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+        }
+        rank_guard.reap_ranks();
+        return;
+    }
+
+    // The driver. Its coordinator is built after the fork, because a hiredis context belongs to
+    // the process that opened it.
+    bool drove = false;
+    bool lease_still_ours = false;
+    const std::string batch = "batch-" + std::to_string(::getpid());
+    {
+        RedisDrainCoordinator driver("127.0.0.1", 6379, name, 60, 2000);
+        if (wait_for_flag(2, 30000) && wait_for_flag(3, 30000)) {
+            std::string cursor = driver.tail_id();
+            if (driver.try_batch_lock(batch, 120000)) {
+                DrainEvent migrate;
+                migrate.type = DrainEvent::Type::Migrate;
+                migrate.epoch = 0;
+                migrate.batch = batch;
+                migrate.rank = 1;
+                driver.emit(migrate);
+                // The ordering the whole case rests on, taken from the stream rather than from a
+                // sleep: rank 0 is told to go only once rank 1 has announced that it is going.
+                const long deadline = now_ms() + 30000;
+                bool saw_leaving = false;
+                while (!saw_leaving && now_ms() < deadline) {
+                    for (auto& [id, event] : driver.read_after(cursor, 50)) {
+                        cursor = id;
+                        if (event.type == DrainEvent::Type::Leaving && event.rank == 1) {
+                            saw_leaving = true;
+                        }
+                    }
+                }
+                if (saw_leaving) {
+                    migrate.rank = 0;
+                    driver.emit(migrate);
+                    drove = true;
+                }
+            }
+        }
+        rank_guard.reap_ranks();
+        // A rank must never release a lease it did not take: the driver is still dumping the batch
+        // when its members come back, and a lease given away here is the next batch starting on
+        // top of this one.
+        lease_still_ours = !driver.try_batch_lock("a-batch-of-someone-else's", 5000);
+        driver.release_batch_lock(batch);
+    }
+
+    BOOST_REQUIRE_MESSAGE(drove, "the driver could not stage the batch (lease, or rank 1's leave "
+                                 "notice never reached the stream)");
+    BOOST_CHECK_MESSAGE(state[1] == 1, "rank 1 did not complete its rounds across the batch (" <<
+                                       state[1] << ")");
+    BOOST_CHECK_MESSAGE(state[0] == 1,
+                        "rank 0 came out of its own migration with " << state[0]
+                                << " (1 = all rounds, 2 = a Timeout against the co-member that "
+                                   "was still sealed, 3 = another failure, 4 = wrong values)");
+    BOOST_CHECK_MESSAGE(lease_still_ours,
+                        "a rank released the batch lease its driver was holding");
+}
+
+//! One tick, two events: a co-member's leave notice that fails, and this rank's own migrate order
+//! behind it. The failure must not swallow the order.
+/*!
+ * A single event per tick is the sequential shape. Under a batch a tick routinely carries several,
+ * and the dispatch has a documented way to fail: a leave notice whose drain never reaches EOF is
+ * an unplanned death and throws. With the cursor advanced before the dispatch, that throw leaves
+ * the stream read past an order this rank never carried out — the driver waits for a seal that
+ * will never be emitted, and nothing anywhere says why. So the cursor advances only past an event
+ * that was acted on, the failure is loud, and what the tick had already established stands.
+ *
+ * The second poll is the other half of the same rule: redelivery must be safe. The notice is
+ * handed over again and does nothing, and the migrate — which *was* acted on — is not repeated.
+ */
+BOOST_AUTO_TEST_CASE(a_failed_event_does_not_swallow_the_migrate_behind_it) {
+    const std::string name = unique_comm("dispatch");
+    // A tight drain budget on purpose: the peer below is connected and silent, so the notice's
+    // drain runs out rather than reaching an EOF.
+    auto ch = make_drain_channel(0, 2, name, drain_params("none", 300, 200, 20000));
+    auto* fake = new FakeDrainCoordinator();
+    ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
+
+    const MemberRecord me = arm_and_locate(ch, *fake, 0);
+    WiredPeer peer;
+    peer.greet(me, name, 1, 0, 0, 0, 0);   // and never closes its side
+
+    fake->inject(DrainEvent::Type::Migrate, 0, 0, {}, "batch-of-the-driver");
+    fake->inject(DrainEvent::Type::Leaving, 1, 0);
+
+    bool migrate_me = false;
+    BOOST_REQUIRE_NO_THROW(migrate_me = ch->poll_control_events());
+    BOOST_CHECK_MESSAGE(migrate_me,
+                        "the migrate order was lost with the leave notice that failed behind it");
+
+    // The failure itself is not softened by any of this: the link is broken, and the application
+    // is told so by name.
+    char ignored[4];
+    std::string raised;
+    try {
+        ch->recv({ignored, sizeof(ignored)}, 1);
+    } catch (const std::exception& e) {
+        raised = e.what();
+    }
+    BOOST_CHECK_MESSAGE(raised.find("never reached EOF") != std::string::npos,
+                        "the application was told '" << raised
+                                                     << "', expected the drain that never ended");
+
+    bool again = true;
+    BOOST_REQUIRE_NO_THROW(again = ch->poll_control_events());
+    BOOST_CHECK_MESSAGE(!again, "the migrate event was delivered a second time; a rank would have "
+                                "migrated twice for one order");
+    peer.close_now();
+    ch->finalize();
+}
+
+//! A migration that could not start hands its batch back — the lease it took, and the identity of
+//! the batch it was running under.
+/*!
+ * The failure path of a drain is loud and leaves the channel broken, which is the policy; what it
+ * must not leave behind is state that belongs to a batch that never happened. Three things leak
+ * separately and none of them is visible at the time: a lease this rank took itself refuses every
+ * migration of this communicator until `batch_lease_ms` expires; a `batch_id` inherited by the
+ * next migration files its events under a batch that is over; and the "a driver holds the lease"
+ * flag, inherited, is a later migration — a signalled one, with no driver behind it — running with
+ * no lease at all, which is exactly the overlap the lease exists to prevent.
+ *
+ * So the case runs three migrations through the same channel: one under a lease of its own that
+ * fails, one under a driver's batch that fails the same way, and one that is allowed to work. The
+ * last one is only reachable, and only correct, if the first two gave everything back.
+ */
+BOOST_AUTO_TEST_CASE(a_drain_that_could_not_start_gives_the_batch_back) {
+    const std::string name = unique_comm("leaseback");
+    auto ch = make_drain_channel(0, 2, name, drain_params("none", 2000, 2000, 20000));
+    auto* fake = new FakeDrainCoordinator();
+    ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
+    ch->set_incarnation(0);
+
+    // 1. Its own batch, refused at the leave notice — after the lease has been taken.
+    fake->fail_emit_of(DrainEvent::Type::Leaving);
+    BOOST_CHECK_THROW(ch->rehearse_migration_in_place(), std::exception);
+    BOOST_REQUIRE_MESSAGE(fake->lease_attempts().size() == 1,
+                          "the first migration made " << fake->lease_attempts().size()
+                                                      << " lease attempts, expected one");
+    BOOST_CHECK_MESSAGE(fake->lease_free(),
+                        "a migration that never got past its leave notice kept the batch lease");
+
+    // 2. The same failure under a driver's batch. The rank leases nothing here — and must not be
+    //    left believing that for the next migration either.
+    fake->inject(DrainEvent::Type::Migrate, 0, 0, {}, "batch-of-the-driver");
+    BOOST_REQUIRE(ch->poll_control_events());
+    BOOST_CHECK_THROW(ch->rehearse_migration_in_place(), std::exception);
+    BOOST_CHECK_MESSAGE(fake->lease_attempts().size() == 1,
+                        "the rank leased something of its own while running under a driver's batch");
+    BOOST_CHECK_MESSAGE(fake->lease_free(), "the rank released a lease it never took");
+
+    // 3. And now one that is allowed to complete: a second lease attempt, under an identity of
+    //    this rank's own rather than the driver's, and a full migration behind it.
+    fake->fail_emit_of(DrainEvent::Type::Unknown);
+    BOOST_CHECK_NO_THROW(ch->rehearse_migration_in_place());
+
+    const auto attempts = fake->lease_attempts();
+    BOOST_REQUIRE_MESSAGE(attempts.size() == 2,
+                          "the third migration made " << (attempts.size() - 1)
+                                  << " lease attempt(s) of its own, expected one: a rank that "
+                                     "inherited 'a driver holds the lease' migrates leaseless");
+    BOOST_CHECK_MESSAGE(attempts.back() != "batch-of-the-driver",
+                        "the third migration ran under '" << attempts.back()
+                                << "', the batch of a driver that asked for the second one");
+    BOOST_CHECK_MESSAGE(attempts.back().find(name) != std::string::npos,
+                        "the third migration's batch id, '" << attempts.back()
+                                << "', does not name this communicator");
+    BOOST_CHECK_MESSAGE(fake->first_seen(DrainEvent::Type::Restored) >= 0,
+                        "the third migration did not restore");
+    BOOST_CHECK_MESSAGE(fake->lease_free(),
+                        "the migration that worked did not give its own lease back");
+    ch->finalize();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

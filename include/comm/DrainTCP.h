@@ -18,6 +18,7 @@
 
 namespace FMI::Comm {
     class DrainCoordinator;
+    struct DrainEvent;
     class PeerRegistry;
 
     //! Raw-TCP peer-to-peer channel whose links can be evicted between chunks.
@@ -198,6 +199,19 @@ namespace FMI::Comm {
             //! not confirmed within drain_grace_ms is what an unplanned death looks like — at
             //! which point the application thread raises it, naming the peer.
             bool drain_unconfirmed = false;
+            //! The peer announced a migration and has not announced its restore yet.
+            /*!
+             * Distinct from `draining`, which is this link's pause whoever caused it — a peer
+             * migrating, this rank migrating, an establishment yielding to a drain — and which
+             * the restore leg therefore closes for every link at once. That is wrong for a link
+             * whose peer is *also* mid-migration, which is the ordinary state inside a batch: the
+             * peer is still frozen, its registry entry still points at the address it left, and a
+             * restored rank that dials it burns the transport's whole patience against a rank
+             * that cannot answer. This flag is what tells the two apart, so the restore leg can
+             * reopen the window it just closed for exactly those links. Cleared by the peer's
+             * `restored`, and by a notice that turns out to describe a lineage already replaced.
+             */
+            bool peer_migrating = false;
             //! Highest epoch this rank has seen the peer announce. A `leaving` from below it was
             //! queued before a restore and describes a process that no longer exists.
             std::uint64_t peer_epoch = 0;
@@ -492,6 +506,34 @@ namespace FMI::Comm {
         //! A peer is back at @p epoch: clear the pause on its link and let parked work retry.
         void peer_has_restored(Utils::peer_num peer, std::uint64_t epoch);
 
+        //! Act on one event of the control plane. @return true when it orders this rank to migrate.
+        /*!
+         * Separated from the read loop so that the loop can advance its cursor past an event it
+         * has *acted on* rather than past one it has merely read. A tick carries more than one
+         * event as soon as a batch is in flight — a co-member's leave notice and this rank's own
+         * migrate arrive together — and a handler that throws must not take the events behind it
+         * down with it. Every handler here is idempotent, which is what makes leaving the cursor
+         * where it is the right answer: the event is delivered again on the next tick.
+         */
+        bool dispatch_control_event(const DrainEvent& event);
+
+        //! Give back everything this migration was holding of its batch. Never throws.
+        /*!
+         * The one place a batch is let go of, so that the three paths out of a migration — a drain
+         * that could not start, a restore that could not finish, and a migration that worked —
+         * cannot disagree about what is released. What leaks otherwise is not nothing: a lease
+         * this rank took and did not give back refuses every migration of this communicator until
+         * it expires (`batch_lease_ms`, two minutes by default); a `batch_id` left behind is
+         * inherited by the next migration and misattributes its events to a batch that is over;
+         * and a `batch_lease_external` left behind is a *later* migration, asked for by a signal
+         * with no driver behind it, running with no lease at all.
+         *
+         * Only a lease this rank took itself is released. A driver's lease is the driver's: it is
+         * still dumping the batch when its members come back, and a lease given away here is the
+         * next batch starting on top of this one.
+         */
+        void release_batch_state() noexcept;
+
         //! Record @p reason against every link and wake everyone parked on one.
         //! The control and trigger threads never throw at an application; they leave this.
         void break_every_link(const std::string& reason);
@@ -534,6 +576,15 @@ namespace FMI::Comm {
         //! ends in an in-place restore instead of a SIGSTOP. For tests and dry runs, never for
         //! a job a checkpointer is actually driving.
         bool rehearsal_only = false;
+        //! How long a rehearsal stays sealed before it restores.
+        /*!
+         * The configured counterpart of `rehearse_migration_in_place(hold_ms)`, and the only way
+         * to hold the seal of a migration nobody called that function for: a signalled or
+         * event-driven rehearsal runs on the trigger thread, which takes its hold from the
+         * TriggerConfig this value fills in. Inert without `drain_rehearsal_only`, since a real
+         * migration's hold is however long the checkpointer keeps the process stopped.
+         */
+        long drain_hold_ms = 0;
         //! Lease taken before a migration and released after it, so overlapping requests
         //! serialise through the coordinator rather than overlapping in the neighbourhood.
         long batch_lease_ms = 120000;
