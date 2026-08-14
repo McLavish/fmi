@@ -429,21 +429,35 @@ as a **setup error** and is never reported as a protocol verdict.
 
 ### Evidence
 
-**EVIDENCE-PENDING** — the driver is committed before the campaign runs; this table is filled
-from the run logs, and until it is, cross-host restore and batch evacuation remain design
-claims here exactly as the "Scope" section says.
+**Phase B is done and is the evidence below.** Phase C (the `cut` rows) has not been run and
+stays EVIDENCE-PENDING: single-cut batch evacuation remains a design claim exactly as the
+"Scope" section says.
+
+Cluster: four Rocky 9.8 machines — criu-testing `10.164.0.3` (T, 8c), criu-node-2 `.4` (N2),
+criu-node-1 `.5` (N1), criu-node-3 `.6` (N3), all 4c except T — one shared `/scratch/fmi` (xfs
+on T, NFS on the other three), cluster Redis on `10.164.0.3:6380`, criu 3.19 under `sudo`,
+kernel `5.14.0-687.24.1+2.1.el9_8`. Tree at `571df5f`, subject sha256 `314ce035…d660`, verified
+identical on all four nodes by `preflight` before every invocation. 2026-08-14.
+
+**32 trials, 32 passed, 0 failed, 0 skipped, 0 void — and 47 real cross-host `criu dump` /
+`criu restore` pairs (46 with a complete `leaving → sealed → restored` trail), every one of them
+dumped on one machine and restored on another.
+Every dump and every restore returned 0 with no `--tcp-close`, no `--tcp-established` and no
+`--shell-job`; no image contained a socket; every rank of every trial finished with the
+four-machine baseline checksums.** The four-machine baselines are themselves bit-identical to
+single-host runs of the same (shape, peers, rounds, payload) — see the B0 row.
 
 | scenario | what it moves | trials | migrations | dump/restore rc | socket verdicts | checksums | max(leaving→restored) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| B0 clean, 8 shapes | nothing | | | — | — | | — |
-| B1 one rank N2→N3 | 1 rank | | | | | | |
-| B2 chained N2→N3→N1→N2 | 1 rank ×3 | | | | | | |
-| B3 two ranks in sequence | 2 ranks | | | | | | |
-| B4 rank 0 (baseline, p2p_ring) | 1 rank | | | | | | |
-| B5 8 ranks, N1 evacuated sequentially | 2 ranks | | | | | | |
-| B6 mid-message (variable_payloads) | 1 rank | | | | | | |
-| B7 deep_rounds / uneven / mixed | 1 rank | | | | | | |
-| B8 12 ranks (optional) | 1 rank | | | | | | |
+| B0 clean, 8 shapes | nothing | 8/8 clean | — | — | — | all 8 shapes **identical to the single-host oracle**, rank for rank | — |
+| B1 one rank N2→N3 | 1 rank | 6/6 | 6 | 0 / 0 | none | == 4-machine baseline | 954 ms |
+| B2 chained N2→N3→N1→N2 | 1 rank ×3, epochs 0,1,2 | 3/3 | 10 | 0 / 0 | none | == 4-machine baseline | 914 ms |
+| B3 two ranks in sequence (r0 T→N3, r2 N1→T) | 2 ranks | 4/4 | 8 | 0 / 0 | none | == 4-machine baseline | 1030 ms |
+| B4 rank 0 — the rank everyone dials (baseline, p2p_ring) | 1 rank | 6/6 | 6 | 0 / 0 | none | == 4-machine baseline | **1036 ms** |
+| B5 8 ranks, N1 evacuated sequentially onto two survivors | 2 ranks | 3/3 | 6 | 0 / 0 | none | == 4-machine baseline | 976 ms |
+| B6 mid-message, 8 ranks (variable_payloads, 4096 ints) | 1 rank | 3/3 | 3 | 0 / 0 | none | == 4-machine baseline | 940 ms |
+| B7 deep_rounds / uneven_participation / mixed_p2p_collective | 1 rank ×3 shapes | 6/6 | 6 | 0 / 0 | none | == 4-machine baseline | 948 ms |
+| B8 12 ranks, 3 per machine (optional) | 1 rank | 1/1 | 1 | 0 / 0 | none | == 4-machine baseline | 935 ms |
 | C0 batch of one | 1 rank | | | | | | |
 | C1 evacuate N1 k=2 → one survivor | 2 ranks | | | | | | |
 | C2 evacuate N1 k=2 → spread | 2 ranks | | | | | | |
@@ -454,9 +468,112 @@ claims here exactly as the "Scope" section says.
 | C7 two cuts back to back | 4 ranks | | | | | | |
 | C8 negative: second batch refused | 2 ranks | | | | | | |
 
-Wall-clock records to fill in with it: per-link `max(leaving → restored)`, dump and restore
-times, and the migration window — the numbers the Stage-4 benchmark will want, and the input to
-the rule that `migration_max_ms` must be at least 10× the observed maximum.
+B2's ten and B3's eight are the honest counts: B2 ran one further trial whose first leg
+migrated cleanly and whose second leg the driver then aborted as a **setup error** — its own pid-band
+assertion was wrong, not the cluster (see "What the first run of this driver got wrong"), so
+that trial is excluded from the trial column and its completed migration is not. B3's fourth
+trial is a re-verification after the `dump.log` permission fix below.
+
+### Wall clock
+
+| | |
+| --- | --- |
+| `leaving → restored`, the migration window | **min 812 ms, median 940 ms, max 1036 ms** over all 46 |
+| `leaving → sealed`, the drain itself | 0–20 ms; the median is 13 ms |
+| `criu dump` | 0.2 s, every one of the 46 |
+| `criu restore` | 0.2–0.3 s |
+| the rank's own view | `MigrationTrigger … is back at epoch 1 after 622 ms` (B1 trial 0) |
+| what a migration costs the job | clean 72.7 s vs 73.0–74.1 s with one migration at 4 ranks; B2's three migrations in one job cost 76 s against the same 72.7 s baseline |
+
+`migration_max_ms` is 120000 in `fmi_drain_multihost.json` against an observed maximum of
+**1036 ms** — a factor of 116, comfortably past the plan's rule that it be at least 10× the
+observed maximum before Phase C.
+
+### The cross-host claim, measured
+
+The thing this phase existed to settle. Rank 1 of B1 trial 0 was dumped on criu-node-2 and
+restored on criu-node-3, and came back saying so:
+
+```
+[15:59:04.500138] MigrationTrigger: rank 1 … begins a real migration at epoch 0
+[15:59:05.434393] DrainTCP: rank 1 … resumed at epoch 1, incarnation 1, listening on 10.164.0.6:37713
+[15:59:05.434432] MigrationTrigger: rank 1 … is back at epoch 1 after 622 ms
+```
+
+`10.164.0.6` is criu-node-3 — the machine it woke up on, not the one whose image it carries.
+`resolve_advertise_ip` re-ran on the restore leg and re-advertised into the shared registry, and
+the three survivors re-established to the new address with **nothing in their logs at all**: no
+drain notice handling, no error, no reconnect chatter. Rank 1 logged round 23750 (the round it
+was frozen on) and then 23775 through 50000, and all four ranks finished with the four-machine
+baseline checksums. That was `advertise_host: ""` doing exactly what the design said it would;
+until this run it had never been executed.
+
+Its image, read on the destination side: `files.img` and the directory listing carry `REG` and
+`PIPE` entries, `timens-0.img`, and **no `inetsk.img`, `unixsk.img`, `tcp-stream.img`,
+`sk-queues.img`, `packetsk.img` or `netlinksk.img`** — swept across all 47 image directories of
+the phase, zero hits of any of the six. Every migration also passed the state-`T` fd scan, which
+is what `node_helper.py seal-wait` exits 4 on and the driver turns into an immediate socket
+verdict; the 40 scans recorded in the matrix logs all read exactly `fds=5 sockets=0` —
+`0 → /dev/null`, `1,2 →` the rank log, and the control thread's self-pipe pair.
+
+One image-level curiosity worth knowing before someone audits a directory and worries: seven of
+the 47 images carry no `timens-0.img`, and they are exactly the **second and third legs of B2's
+chained migrations** — a rank that is already inside a time namespace criu made for it on the
+previous restore. All seven restored rc 0, and B2's windows (812–914 ms) and checksums are
+indistinguishable from every other scenario's, so it is a criu detail about repeated time
+namespaces and not a clock problem. The clock problem the `sudo` in `cluster.CRIU` exists to
+avoid looks completely different: a `Timeout` thrown immediately after a migration that
+succeeded. It did not occur once in this phase.
+
+### What the first run of this driver got wrong
+
+This was the driver's first real execution and it had five defects; all five are harness bugs,
+none is in the library, and the campaign was re-run past each. Recorded because the next person
+to stand this up will hit them in the same order.
+
+1. **`git` is not installed on the worker nodes**, so the shared-tree HEAD gate failed on three
+   of four machines. `node_helper.py head` now resolves `.git/HEAD` and the ref it names by
+   reading them, which is what the gate actually asserts — every node seeing the same tree at
+   the same path — without putting an unpinned package on the machines the gate is about.
+2. **The pid-band assertion used the wrong band.** `assert_restored_pid` compared a restored pid
+   against the band of the machine the move started FROM. criu restores a pid verbatim, so the
+   pid belongs to the band of the machine the rank was **launched** on, for its whole life —
+   after one migration those differ, and B2's second leg aborted as a setup error on a cluster
+   that was fine. The same function also refused a rank returning to its launch node, where the
+   pid is inside the destination's band by construction. Both fixed; the assertion still catches
+   a genuinely out-of-band pid.
+3. **An unreadable `dump.log` read as a clean one.** criu runs under `sudo` and writes its log
+   mode 0600 as root. On the three nodes where `/scratch` is NFS the export's
+   `all_squash anonuid=1000` turns that into `luca` and the log is readable; on criu-testing,
+   which is the NFS *server* and sees `/scratch` as local xfs, it stays root-only. `socket_lines`
+   answers `([], 0)` for a log it cannot open — indistinguishable from a clean one — so
+   acceptance criterion 2 passed **vacuously** for the nine migrations dumped on that one
+   machine. The criu legs now `chmod 0644` their logs (criu's exit status preserved across it)
+   and `dump_all` refuses an unreadable log as a setup error rather than scoring it. The nine
+   affected logs were re-read as root afterwards and are clean, and a fresh B3 trial confirms the
+   check now actually runs: 1444 lines read, 0 socket hits.
+4. **`--trials` and `--rounds` were inert.** They were folded into the campaign's `defaults`,
+   which `field()` reads *after* the scenario — and every scenario names its own `trials`, so
+   `--trials 1` ran the scenario's three. Command-line sizing now outranks the file.
+5. **Two smaller ones**: a baseline's directory name did not include `rounds`/`payload_ints`
+   while its cache key did, so two baselines of one shape at different sizes would have shared a
+   directory and the second would have read the first's stale `DONE` lines; and the setup-error
+   abort path saved the event stream but left the trial's four Redis keys behind.
+
+A sixth thing that is not a bug: `--dry-run` printed the criu invocation without the `sudo` it
+actually uses. The printed plan is reviewed as if it were the invocation, so it now is one.
+
+### Sizing
+
+The shapes differ ~70× in cost per round cross-host, so one `rounds` cannot size a scenario that
+names a list of shapes; `campaign.json` grew a `by_shape` block and the measured per-round costs
+are recorded in its `_sizing` note. Measured here at 4 ranks, one per machine, `ms=1`: a job
+costs ~0.7 s of fixed overhead plus, in ms/round, baseline 1.44, p2p_ring 1.10,
+collectives_sweep 1.55, mixed_p2p_collective 1.35, noncommutative 1.23, deep_rounds 41.8,
+variable_payloads 44, uneven_participation 102. Cross-host is 5.5× single-host on `deep_rounds`
+and 1.1× on `baseline` — the latency-bound shapes pay the network and the throughput-bound ones
+barely notice, which is why the single-host round counts could not simply be reused. Every
+scenario is sized for a ~75 s job; the eight B0 runs came in at 70.2–76.5 s.
 
 ### Multi-host wrinkles
 
