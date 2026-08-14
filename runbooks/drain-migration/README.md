@@ -313,8 +313,7 @@ python3 /tmp/critpkg/usr/bin/crit show <img>/files.img | grep -c inetsk    # 0
 Everything above is one machine. `multihost_drain.py` is the same acceptance criterion across a
 cluster: ranks spread over several machines, a rank dumped on one and restored on **another**,
 and — behind `--allow-batch` — several ranks drained in **one cut** under a driver-held batch
-lease. The evidence table at the end of this section is empty on purpose: until it is filled,
-the "Scope" section below still describes what is actually backed.
+lease. Both are run and both are in the evidence tables at the end of this section.
 
 Four files, all in this directory:
 
@@ -375,9 +374,11 @@ python3 multihost_drain.py --nodes $NODES --config /scratch/fmi/runbooks/drain-m
 # one scenario, three seeds
 for s in 1 2 3; do python3 multihost_drain.py --nodes $NODES --only B5 --seed $s; done
 
-# phase C — single-cut batches. REFUSED without --allow-batch until the C-1..C-3 library
-# fixes land; the refusal names all three defects.
-python3 multihost_drain.py --nodes $NODES --phase C --allow-batch --seed 1 --keep
+# phase C — single-cut batches. --allow-batch is required: the C-1..C-3 library fixes they
+# need landed at 63382da, and the flag now acknowledges batch mode rather than overriding a
+# known-red path. One scenario at a time is how the evidence below was taken, so that a
+# verdict stops exactly one block.
+python3 multihost_drain.py --nodes $NODES --only C4 --allow-batch --seed 2 --keep
 ```
 
 The driver takes a **four-machine clean baseline per (shape, peers, rounds, payload_ints)**
@@ -429,23 +430,28 @@ as a **setup error** and is never reported as a protocol verdict.
 
 ### Evidence
 
-**Phase B is done and is the evidence below.** Phase C (the `cut` rows) has not been run and
-stays EVIDENCE-PENDING: single-cut batch evacuation remains a design claim exactly as the
-"Scope" section says.
+**Phases B and C are both done and are the evidence below** — sequential cross-host migration
+first, then single-cut batch evacuation, the two claims this cluster existed to settle.
 
 Cluster: four Rocky 9.8 machines — criu-testing `10.164.0.3` (T, 8c), criu-node-2 `.4` (N2),
 criu-node-1 `.5` (N1), criu-node-3 `.6` (N3), all 4c except T — one shared `/scratch/fmi` (xfs
 on T, NFS on the other three), cluster Redis on `10.164.0.3:6380`, criu 3.19 under `sudo`,
-kernel `5.14.0-687.24.1+2.1.el9_8`. Tree at `571df5f`, subject sha256 `314ce035…d660`, verified
-identical on all four nodes by `preflight` before every invocation. 2026-08-14.
+kernel `5.14.0-687.24.1+2.1.el9_8`, verified identical on all four nodes by `preflight` before
+every invocation. 2026-08-14. **Phase B ran against tree `571df5f`, subject sha256
+`314ce035…d660`; phase C against `63382da`, subject `e762cd9e…0c92`** — the C-1..C-3 library
+fixes landed between the two blocks, so the subject sha changes on purpose and each block's runs
+record their own.
 
-**32 trials, 32 passed, 0 failed, 0 skipped, 0 void — and 47 real cross-host `criu dump` /
-`criu restore` pairs (46 with a complete `leaving → sealed → restored` trail), every one of them
-dumped on one machine and restored on another.
-Every dump and every restore returned 0 with no `--tcp-close`, no `--tcp-established` and no
-`--shell-job`; no image contained a socket; every rank of every trial finished with the
-four-machine baseline checksums.** The four-machine baselines are themselves bit-identical to
-single-host runs of the same (shape, peers, rounds, payload) — see the B0 row.
+**Phase B: 32 trials, 32 passed, 0 failed, 0 skipped, 0 void — and 47 real cross-host `criu
+dump` / `criu restore` pairs (46 with a complete `leaving → sealed → restored` trail), every one
+of them dumped on one machine and restored on another.
+Phase C: 26 trials, 26 passed, 0 failed, 0 skipped, 0 void — 28 cuts, 60 migrated ranks, every
+one of the 60 dumped on one machine and restored on another, and 41 pairwise sealed-counter
+cross-checks inside batches with 0 disagreements.
+Across both, every dump and every restore returned 0 with no `--tcp-close`, no
+`--tcp-established` and no `--shell-job`; no image contained a socket; every rank of every trial
+finished with the four-machine baseline checksums.** The four-machine baselines are themselves
+bit-identical to single-host runs of the same (shape, peers, rounds, payload) — see the B0 row.
 
 | scenario | what it moves | trials | migrations | dump/restore rc | socket verdicts | checksums | max(leaving→restored) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -458,15 +464,72 @@ single-host runs of the same (shape, peers, rounds, payload) — see the B0 row.
 | B6 mid-message, 8 ranks (variable_payloads, 4096 ints) | 1 rank | 3/3 | 3 | 0 / 0 | none | == 4-machine baseline | 940 ms |
 | B7 deep_rounds / uneven_participation / mixed_p2p_collective | 1 rank ×3 shapes | 6/6 | 6 | 0 / 0 | none | == 4-machine baseline | 948 ms |
 | B8 12 ranks, 3 per machine (optional) | 1 rank | 1/1 | 1 | 0 / 0 | none | == 4-machine baseline | 935 ms |
-| C0 batch of one | 1 rank | | | | | | |
-| C1 evacuate N1 k=2 → one survivor | 2 ranks | | | | | | |
-| C2 evacuate N1 k=2 → spread | 2 ranks | | | | | | |
-| C3 12 ranks, k=3 spread | 3 ranks | | | | | | |
-| C4 two machines, k=4, one cut | 4 ranks | | | | | | |
-| C5 k=2 mid-message | 2 ranks | | | | | | |
-| C6 ring neighbours, mutual seal | 2 ranks | | | | | | |
-| C7 two cuts back to back | 4 ranks | | | | | | |
-| C8 negative: second batch refused | 2 ranks | | | | | | |
+| C0 batch of one | 1 rank ×3 | 3/3 | 3 | 0 / 0 | none | == 4-machine baseline | 949 ms |
+| C1 evacuate N1 k=2 → one survivor | 2 ranks ×3 | 3/3 | 6 | 0 / 0 | none | == 4-machine baseline | 1921 ms |
+| C2 evacuate N1 k=2 → spread | 2 ranks ×5 | 5/5 | 10 | 0 / 0 | none | == 4-machine baseline | 1918 ms |
+| C3 12 ranks, k=3 spread | 3 ranks ×3 | 3/3 | 9 | 0 / 0 | none | == 4-machine baseline | 2845 ms |
+| C4 two machines, k=4, one cut | 4 ranks ×2 | 2/2 | 8 | 0 / 0 | none | == 4-machine baseline | **3744 ms** |
+| C5 k=2 mid-message (variable_payloads, 4096 ints) | 2 ranks ×3 | 3/3 | 6 | 0 / 0 | none | == 4-machine baseline | 1926 ms |
+| C6 ring neighbours, mutual seal (p2p_ring / mixed) | 2 ranks ×2 shapes ×2 | 4/4 | 8 | 0 / 0 | none | == 4-machine baseline | 1938 ms |
+| C7 two cuts back to back (N1, then N3) | 2 ranks ×2 cuts ×2 | 2/2 | 8 | 0 / 0 | none | == 4-machine baseline | 1902 ms |
+| C8 negative: second batch refused | 2 ranks | 1/1 | 2 | 0 / 0 | none | == 4-machine baseline | 1906 ms |
+
+Phase C ran C0–C8 in order, one invocation per scenario, seeds rotating 1‑2‑3 across the block
+(C0/C3/C6 seed 1, C1/C4/C7 seed 2, C2/C5/C8 seed 3) — the trial counts in `campaign.json` are
+the repetition, and one pass of them is the plan's 26 trials / 60 migrated ranks exactly. Every
+migrated rank passed the state-`T` fd scan at `fds=5 sockets=0` (60 of 60), every `criu dump`
+and `criu restore` wrote `… finished successfully`, and the sweep for `inetsk.img`,
+`unixsk.img`, `tcp-stream.img`, `sk-queues.img`, `packetsk.img` and `netlinksk.img` over all 60
+image directories found **zero** of any of the six.
+
+### What the batch path adds, measured
+
+| | |
+| --- | --- |
+| **all sealed before any dump** | structural in `evacuate()` and confirmed from the stream in all 28 cuts: `max(sealed) < min(restored)` per batch, every time |
+| **pairwise counters inside the batch** | `sealed[a].sent.b == sealed[b].received.a` — **41 pairs across 28 cuts, 0 disagreements.** C4's k=4 contributes 6 pairs per cut; C5 cross-checks 380205080 bytes per direction between two migrators, mid-message |
+| **the driver's batch id, end to end** | every `leaving`, `sealed` and `restored` of all 60 migrations carried the driver's `<comm>\|cutN`, not the library's `comm\|rank@epoch` — the ranks adopted the batch and **skipped self-leasing** |
+| **one lease per cut, driver-held** | `MONITOR` on the campaign Redis shows exactly one `SET <comm>:batch <driver-owner> NX PX 120000` per cut and one compare-and-delete release; **no rank ever issued a `SET` on the batch key** |
+| **C7's lease-clear guard** | cut0's release (lua `GET`+`DEL`) at *t*, the driver's `EXISTS` poll 1 ms later, cut1's `SET NX` 1.5 s after that — the second cut never raced the first's release |
+| **C8's refusal** | the intruder's `SET … NX` landed 6.4 ms after the holder's and was refused; the job finished with the baseline checksums |
+
+### The C-1 fix, observed rather than argued
+
+C-1 is the one whose absence a green run would not by itself prove: a member that restores first
+must not dial a co-member that is still frozen. Its co-member's registry entry still names the
+address it left — on the **evacuated** node, where nothing listens any more — so such a dial is
+answered by that node's kernel with a RST. `Tcp: OutRsts` sampled on the evacuated node across
+the interval between the batch's *first* `restored` and its *last* is therefore a direct count of
+exactly the dials the fix must prevent; on a node whose ranks have all left, that interval is
+otherwise silent.
+
+**Measured over 30 such windows (C1–C7; C4 and C7 counted on both evacuated nodes), 17.6 s of
+total exposure with 1 to 3 co-members still frozen: `OutRsts` +0, every window.** The exposure
+per cut is 417–447 ms at k=2, 857–871 ms at k=3 and 1281–1286 ms at k=4 — the batch restores
+serially, so the wider the batch the longer the first member waits, which is precisely why C-1
+mattered.
+
+The rank logs agree from the other side. Not one of the 26 trials logged a `Timeout`, a
+`stream counters disagree`, an unplanned-death notice or any error at all; survivors logged
+*nothing* about the batches passing under them. And the first-restored member's link to the
+co-member is picked up only once that co-member is back — C1 trial 0, where rank 2 restored
+439 ms before rank 6:
+
+```
+17:55:46.016  DrainTCP: rank 6 … resumed at epoch 1, incarnation 1, listening on 10.164.0.3:39339
+17:55:46.036  DrainTCP: rank 6 dropped a leave notice from peer 2 written by incarnation 0;
+                        it is already connected to incarnation 1
+```
+
+20 ms after rank 6 comes back, rank 2 — restored, incarnation 1 — is already connected to it, and
+rank 2's own late leave notice is fenced by the incarnation rather than tearing that link down.
+Both halves of the design in two lines, cross-host, inside a batch.
+
+One honest observation: a single `OutRsts` was seen on N1 in one C7 trial, in the wider
+`[last sealed, last restored]` window of cut1 — **not** in any C-1 exposure window (those were
++0), on a node that at that moment held no rank of the job and was also being talked to over
+ssh by the driver. One event in 28 cuts, unattributable to a dial at a frozen co-member, and
+that trial met every acceptance criterion.
 
 B2's ten and B3's eight are the honest counts: B2 ran one further trial whose first leg
 migrated cleanly and whose second leg the driver then aborted as a **setup error** — its own pid-band
@@ -475,6 +538,8 @@ that trial is excluded from the trial column and its completed migration is not.
 trial is a re-verification after the `dump.log` permission fix below.
 
 ### Wall clock
+
+Phase B, over its 46 migrations:
 
 | | |
 | --- | --- |
@@ -485,9 +550,31 @@ trial is a re-verification after the `dump.log` permission fix below.
 | the rank's own view | `MigrationTrigger … is back at epoch 1 after 622 ms` (B1 trial 0) |
 | what a migration costs the job | clean 72.7 s vs 73.0–74.1 s with one migration at 4 ranks; B2's three migrations in one job cost 76 s against the same 72.7 s baseline |
 
+Phase C, over its 60 migrated ranks in 28 cuts. Two numbers matter here and only one of them
+existed in phase B: a rank's own window, and the **whole cut** — first `sealed` to last
+`restored`, the interval in which the job is missing at least one rank:
+
+| | |
+| --- | --- |
+| `leaving → restored`, per rank | min 932 ms, median 1891 ms, **max 3744 ms** over all 60 |
+| `leaving → sealed`, the drain itself | 0–20 ms, median 14 ms — **unchanged by batching**, and unchanged by k |
+| the whole cut, first sealed → last restored | 930–937 ms at k=1, 1856–1926 ms at k=2, 2812–2831 ms at k=3, **3705–3736 ms at k=4** |
+| `criu dump` | 0.2 s, every one of the 60 (9–34 ms on criu's own clock) |
+| `criu restore` | 0.2–0.3 s (2–132 ms on criu's own clock) |
+
+The whole cut is **linear in k at ~930 ms per additional rank** on top of a ~930 ms floor — 930,
+1890, 2820, 3720 at k = 1, 2, 3, 4. That is the driver's serial ordering showing through, not the
+protocol's: all k ranks seal concurrently inside the same 0–20 ms, and then the dumps, the reaps,
+the restores and the SIGCONTs are each done one rank at a time over ssh. Each extra rank
+therefore buys one more serialized dump leg **and** one more serialized restore leg, ~430–470 ms
+apiece — which is also why the interval in which one member is back and another is still frozen
+grows with k (417–447 ms at k=2, 857–871 ms at k=3, 1281–1286 ms at k=4). The drain does not care
+how many ranks are in the batch; the harness does, and a driver that dumped and restored the
+batch in parallel would collapse most of this.
+
 `migration_max_ms` is 120000 in `fmi_drain_multihost.json` against an observed maximum of
-**1036 ms** — a factor of 116, comfortably past the plan's rule that it be at least 10× the
-observed maximum before Phase C.
+**3744 ms** across both phases — a factor of 32, still comfortably past the plan's rule of 10×,
+and the k=4 row is the number to size it against rather than phase B's 1036 ms.
 
 ### The cross-host claim, measured
 
@@ -615,12 +702,19 @@ trial's favour.
 
 ## Scope
 
-Single host, one rank per migration, `SIGRTMIN+3` as the request. Batches (several ranks in one
-cut), multi-host moves and the steady-state cost measurement are the next stages and are not
-covered by anything here. Cross-host restore is *expected* to work by construction — the
-restore leg binds a fresh listener and re-runs `resolve_advertise_ip` before re-advertising, so
-nothing in the image pins the old machine, and the image has no socket to repair — but it has
-**not** been run, and until it has it is a design claim, not evidence.
+Backed by real `criu` dumps and restores: single host, one rank per migration by `SIGRTMIN+3`
+(43 migrations, the first half of this file); **cross-host restore**, one rank at a time (phase
+B, 47 migrations, dumped on one machine and restored on another); and **single-cut batch
+evacuation** by `migrate` event under a driver-held lease (phase C, 60 migrations in 28 cuts, up
+to k=4 and up to two machines emptied at once). Cross-host restore and batches are no longer
+design claims — they are the two evidence tables above.
+
+Still not covered here: more than one rank per *process* (a second armed drain channel in one
+process is a `std::logic_error` by design), unplanned failure of any kind (this protocol handles
+planned migration only), and the steady-state cost measurement — what the drain-armed data path
+costs a job that never migrates, which is the benchmark stage and not a correctness question.
+The cuts here are all driven by one driver holding one lease; nothing has yet exercised two
+independent drivers racing for the same communicator beyond C8's single-shot refusal.
 
 The in-place rehearsal in `tests/drain_migration.cpp` (`drain_rehearsal_only`, the whole
 sequence with the `SIGSTOP` replaced by an immediate restore) is the regression net that runs

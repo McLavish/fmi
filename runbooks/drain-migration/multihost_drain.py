@@ -25,11 +25,12 @@ Two regimes, from the same scenario file:
   comes back, so no rank of the moved set ever coexists with a half-moved peer on the old host
   (272caee's ordering, with the batch lease and the counter check added).
 
-Phase C scenarios drive the batch path. **Three library defects block concurrent batches**
-(C-1 stale `draining` on a co-migrating peer, C-2 the event cursor advancing before dispatch,
-C-3 a leaked batch lease on a failed drain); until those land, a C scenario refuses to run
-without `--allow-batch`, loudly, because a red result from them says nothing about the protocol
-that the plan does not already predict.
+Phase C scenarios drive the batch path. The three library defects that used to block concurrent
+batches (C-1 stale `draining` on a co-migrating peer, C-2 the event cursor advancing before
+dispatch, C-3 a leaked batch lease on a failed drain) **landed at 63382da**, each with its own
+mutation-verified test. `--allow-batch` is no longer a refusal to override: it is an
+acknowledgement that the scenario drives the batch path, which is younger evidence than the
+sequential one and whose verdicts should be read as such.
 
 Prerequisites (phase A of the plan, all of them environmental):
   * the repo, the build tree, this directory and the run directory at the SAME absolute path on
@@ -1025,8 +1026,8 @@ def main():
     ap.add_argument("--phase", choices=["B", "C"], default=None,
                     help="run only this phase's scenarios")
     ap.add_argument("--allow-batch", action="store_true",
-                    help="permit phase C (batch) scenarios; they need the C-1..C-3 library "
-                         "fixes and are refused without this")
+                    help="acknowledge and run the phase C (batch) scenarios; the C-1..C-3 "
+                         "library fixes they need landed at 63382da")
     ap.add_argument("--include-optional", action="store_true",
                     help="also run scenarios marked optional")
     ap.add_argument("--nodes", nargs="+", required=True,
@@ -1100,22 +1101,25 @@ def main():
     # the refusal itself unreviewable.
     def refuse_batch():
         sys.exit(
-            "REFUSING to run the phase C scenarios %s.\n"
+            "The phase C scenarios %s drive the single-cut BATCH path, which is opt-in:\n"
+            "pass --allow-batch.\n"
             "\n"
-            "These drive the single-cut BATCH path, and three library defects that block\n"
-            "concurrent batches have not landed yet:\n"
-            "  C-1  resume_after_restore leaves `draining` set on links to peers that are\n"
-            "       themselves mid-migration, so the first member to restore burns plain\n"
-            "       max_timeout dialling a frozen co-member;\n"
-            "  C-2  poll_control_events advances last_stream_id BEFORE dispatch, so a throw in\n"
-            "       a multi-event tick (normal under batches) silently drops a co-batched\n"
-            "       migrate;\n"
-            "  C-3  a drain that could not start leaks holds_batch_lock/batch_id, refusing\n"
-            "       every migration for the lease's 120 s.\n"
+            "The three library defects this flag used to guard against LANDED at 63382da,\n"
+            "each with its own mutation-verified test:\n"
+            "  C-1  resume_after_restore left `draining` set on links to peers that are\n"
+            "       themselves mid-migration, so the first member to restore burned plain\n"
+            "       max_timeout dialling a frozen co-member  — fixed: LinkState::peer_migrating,\n"
+            "       and the restore loop closes-and-reopens the window for such links;\n"
+            "  C-2  poll_control_events advanced last_stream_id BEFORE dispatch, so a throw in\n"
+            "       a multi-event tick (normal under batches) silently dropped a co-batched\n"
+            "       migrate — fixed: the cursor advances only past a dispatched event;\n"
+            "  C-3  a drain that could not start leaked holds_batch_lock/batch_id, refusing\n"
+            "       every migration for the lease's 120 s — fixed: release_batch_state().\n"
             "\n"
-            "Until those are fixed and their tests are green, a red result here says nothing\n"
-            "about the protocol that is not already known. Pass --allow-batch to run them\n"
-            "anyway (that is what the fixes' own verification does)." % ", ".join(batch_scenarios))
+            "So the flag no longer overrides a known-red path; it acknowledges that these\n"
+            "scenarios exercise the batch path, whose evidence is younger than the sequential\n"
+            "phase's, and that their verdicts should be read as such."
+            % ", ".join(batch_scenarios))
 
     nodes = list(args.nodes)
     if len(set(nodes)) != len(nodes):
@@ -1150,8 +1154,9 @@ def main():
                       file=sys.stderr)
                 return 2
             if scen.get("phase", "B") == "C" and not args.allow_batch:
-                print("  NOTE: this is a phase C scenario and will REFUSE to run without "
-                      "--allow-batch (the C-1..C-3 library fixes are not in yet)")
+                print("  NOTE: this is a phase C scenario; it drives the batch path and needs "
+                      "--allow-batch (the C-1..C-3 library fixes landed at 63382da — the flag "
+                      "acknowledges batch mode, it no longer overrides a known-red path)")
             print("")
         return 0
 
