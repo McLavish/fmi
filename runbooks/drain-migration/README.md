@@ -308,6 +308,182 @@ export PYTHONPATH=/tmp/critpkg/usr/lib/python3.9/site-packages:/tmp/critpkg/usr/
 python3 /tmp/critpkg/usr/bin/crit show <img>/files.img | grep -c inetsk    # 0
 ```
 
+## Multi-host: four machines, cross-host restore and single-cut batches
+
+Everything above is one machine. `multihost_drain.py` is the same acceptance criterion across a
+cluster: ranks spread over several machines, a rank dumped on one and restored on **another**,
+and — behind `--allow-batch` — several ranks drained in **one cut** under a driver-held batch
+lease. The evidence table at the end of this section is empty on purpose: until it is filled,
+the "Scope" section below still describes what is actually backed.
+
+Four files, all in this directory:
+
+| file | what it is |
+| --- | --- |
+| `cluster.py` | the reusable layer: `Cluster` (ssh, no ControlMaster), `preflight`, `launch_ranks`, `criu_dump`/`criu_restore`, `sigqueue_remote`/`cont_remote`, `wait_pid_gone`, `kill_all`, and the control-plane producers `emit_migrate` + `batch_lease_take/release/wait_free` |
+| `node_helper.py` | the per-node agent, stdlib-only python3.9, run from the shared tree over ssh. Every poll loop lives inside the node: `sigqueue`, `wait-state`, `seal-wait`, `wait-gone`, `cont-if-stopped`, `pidband`, `nvra` |
+| `multihost_drain.py` | the campaign driver. Imports `drain_driver.py`'s scoring, verdicts, socket-evidence rules and stream reader, so a multi-host result means exactly what a single-host one means |
+| `campaign.json` | the scenario matrix (B0–B8 sequential, C0–C8 batch), as a small DSL |
+| `fmi_drain_multihost.json` | `fmi_drain.json` with a cluster-reachable registry (`10.164.0.3:6380`), `bind_host 0.0.0.0` and **`advertise_host ""`** |
+
+### Setup prerequisites
+
+All environmental, all of them load-bearing:
+
+- **One shared tree at the same absolute path on every node** (here `/scratch/fmi`), holding the
+  checkout, the build tree, this directory and the run directory. criu reopens the subject
+  binary, the process's cwd and its log file *by path* on the restore host. Rule for the
+  campaign: develop and commit in `/home/luca/fmi`, refresh `/scratch/fmi` only **between**
+  phase blocks, and record `git rev-parse HEAD` plus the subject's sha256 with every run —
+  `preflight` does both and writes them to `preflight.json`.
+- **One Redis every node can reach**, named in the config, **never loopback**. It is both the
+  DrainTCP registry and the drain coordinator. A loopback `registry_host` is a hard refusal in
+  the driver: a restored rank re-resolves its advertise address against the registry, so it
+  would publish the loopback of whatever machine it woke up on.
+- **`advertise_host: ""`**. The restore leg binds a fresh listener and re-runs
+  `resolve_advertise_ip` before re-advertising, which is what makes a cross-host restore correct
+  by construction — but only if nothing pins an address in the config.
+- **`trigger: "both"` on every rank.** The migrating rank's drain finishes only once its peers
+  have half-closed, and they learn to from the coordinator stream.
+- **Disjoint pid bands per node**, seeded into `/proc/sys/kernel/ns_last_pid` (defaults in
+  `cluster.DEFAULT_PID_BANDS`: `.3`→1.0M, `.4`→1.5M, `.5`→2.0M, `.6`→2.5M, span 500000). criu
+  restores the dumped pid verbatim, so a pid already taken on the destination is a restore that
+  fails with "File exists". The driver asserts every **launched** pid is in its node's band the
+  moment it is captured, and after a move asserts the restored pid still belongs to its home
+  band and is *outside* the destination's — a rebooted node becomes a refused setup error at
+  second zero instead of a mid-campaign restore failure. `--pid-bands none` disables it.
+- **Identical runtime closure on every node**: `ldd` of the subject → `rpm -qf`, plus `criu -V`
+  and `uname -r`. Not `rpm -qa` — criu remaps shared libraries by path and content, so what
+  must match is what the subject actually loads. (Boost is static here and correctly absent.)
+- criu with `cap_sys_ptrace,cap_checkpoint_restore` (no `cap_net_admin`: the images are
+  socketless), `--unprivileged` on both legs, and passwordless ssh to every node.
+
+### Invocations
+
+```bash
+cd /scratch/fmi/runbooks/drain-migration
+NODES="10.164.0.3 10.164.0.4 10.164.0.5 10.164.0.6"      # T, N2, N1, N3 — campaign node order
+
+# review the plan for any scenario without touching the cluster
+python3 multihost_drain.py --dry-run --nodes $NODES --only B2
+python3 multihost_drain.py --dry-run --nodes $NODES --only C2
+
+# phase B — sequential cross-host migration (works today, driver only)
+python3 multihost_drain.py --nodes $NODES --config /scratch/fmi/runbooks/drain-migration/fmi_drain_multihost.json \
+        --phase B --seed 1 --keep
+
+# one scenario, three seeds
+for s in 1 2 3; do python3 multihost_drain.py --nodes $NODES --only B5 --seed $s; done
+
+# phase C — single-cut batches. REFUSED without --allow-batch until the C-1..C-3 library
+# fixes land; the refusal names all three defects.
+python3 multihost_drain.py --nodes $NODES --phase C --allow-batch --seed 1 --keep
+```
+
+The driver takes a **four-machine clean baseline per (shape, peers, rounds, payload_ints)**
+first and scores every trial against it — "the same checksums as a single-host run" and "the
+same checksums as a four-machine run" are different claims, and only the second separates a
+migration bug from a cluster that is wired wrong. `preflight` runs once per invocation
+(`--skip-preflight` to reuse a verified session). Images and logs live under
+`runs/mhd<pid>/<comm>/`, on the shared filesystem: nothing is copied, and the dump strictly
+precedes the restore, which is what gives NFS close-to-open consistency for the image.
+
+### Scenario DSL
+
+```jsonc
+{"name": "B2", "phase": "B", "kind": "seq",       // clean | seq | cut
+ "peers": 4, "shape": "baseline", "trials": 3,    // shape may be a list: once per shape
+ "place": "rr",                                   // rr | block | {rank: node} explicit map
+ "ranks": [1, 1, 1], "to": [3, 2, 1]}             // or "evacuate": <node>|[nodes],
+                                                  // "to": next|spread|one|<node>|[nodes],
+                                                  // "cuts": single|per-node
+```
+
+A node designator is an **index into `--nodes`** (so the file is cluster-agnostic) or a
+hostname. `place: "rr"` puts rank *r* and rank *r+4* on one machine and therefore never puts
+ring neighbours together — C6 uses an explicit map for exactly that reason.
+
+### Acceptance criteria (per trial, all phases)
+
+The six single-host criteria at the top of this README, plus:
+
+7. the rank **actually changed machine** (a plan whose destination equals the source is scored
+   `void`, never `pass`);
+8. the restored pid keeps its home band and is outside the destination's;
+9. the event trail reads `leaving(e) → sealed(e) → restored(e+1)` for every migration, with the
+   expected batch id — the library's own `comm|rank@epoch` for a signalled migration, the
+   driver's `comm|cutN` for a batch;
+10. for a cut: **every** member sealed before **any** member restored, and the sealed counters
+    agree pairwise, `sealed[a].sent.b == sealed[b].received.a`. That is byte-exactness evidence
+    taken before anything is dumped, and it is available even for a link that is never
+    re-established;
+11. for the C8 negative: a second batch lease taken while a cut is in flight must be **refused**
+    and the job must still finish with the baseline checksums.
+
+Failure policy, from the campaign plan and enforced by the driver: any `socket`, `criu`,
+`drain`, counters-disagree or checksum verdict **keeps the whole trial directory and stops**
+(`--continue-on-fail` overrides, deliberately not the default). Widening a timeout, retrying
+until green, pinning `advertise_host` or adding a TCP flag are not responses to a verdict. A
+setup violation — a pid out of band, a HEAD or subject sha that differs between nodes — aborts
+as a **setup error** and is never reported as a protocol verdict.
+
+### Evidence
+
+**EVIDENCE-PENDING** — the driver is committed before the campaign runs; this table is filled
+from the run logs, and until it is, cross-host restore and batch evacuation remain design
+claims here exactly as the "Scope" section says.
+
+| scenario | what it moves | trials | migrations | dump/restore rc | socket verdicts | checksums | max(leaving→restored) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B0 clean, 8 shapes | nothing | | | — | — | | — |
+| B1 one rank N2→N3 | 1 rank | | | | | | |
+| B2 chained N2→N3→N1→N2 | 1 rank ×3 | | | | | | |
+| B3 two ranks in sequence | 2 ranks | | | | | | |
+| B4 rank 0 (baseline, p2p_ring) | 1 rank | | | | | | |
+| B5 8 ranks, N1 evacuated sequentially | 2 ranks | | | | | | |
+| B6 mid-message (variable_payloads) | 1 rank | | | | | | |
+| B7 deep_rounds / uneven / mixed | 1 rank | | | | | | |
+| B8 12 ranks (optional) | 1 rank | | | | | | |
+| C0 batch of one | 1 rank | | | | | | |
+| C1 evacuate N1 k=2 → one survivor | 2 ranks | | | | | | |
+| C2 evacuate N1 k=2 → spread | 2 ranks | | | | | | |
+| C3 12 ranks, k=3 spread | 3 ranks | | | | | | |
+| C4 two machines, k=4, one cut | 4 ranks | | | | | | |
+| C5 k=2 mid-message | 2 ranks | | | | | | |
+| C6 ring neighbours, mutual seal | 2 ranks | | | | | | |
+| C7 two cuts back to back | 4 ranks | | | | | | |
+| C8 negative: second batch refused | 2 ranks | | | | | | |
+
+Wall-clock records to fill in with it: per-link `max(leaving → restored)`, dump and restore
+times, and the migration window — the numbers the Stage-4 benchmark will want, and the input to
+the rule that `migration_max_ms` must be at least 10× the observed maximum.
+
+### Multi-host wrinkles
+
+**A restored rank comes back stopped, on the other machine.** Same as single-host, one ssh call
+further away: `node_helper.py cont-if-stopped` is what resumes it.
+
+**`;` not `&&` before `setsid` in the launch string.** With `cd X && cmd &` the whole list is
+backgrounded as a subshell, `$!` names the subshell (criu would dump the wrong process) and that
+subshell holds the ssh channel open forever. The restore call uses `&&` precisely because
+nothing there is backgrounded.
+
+**No ControlMaster on any ssh call.** A mux master that wedges silently hangs every later call
+to that node; one plain handshake per call costs ~0.2 s and has no shared failure state.
+
+**Never poll over ssh.** At ~0.15 s per handshake a remote `/proc` poll cannot resolve a state
+that lasts a millisecond. Every wait loop is a `node_helper.py` verb, and one migration costs
+about six round trips.
+
+**The epoch payload is mandatory.** `sigqueue` carries the target's current epoch in
+`si_value.sival_int` and `MigrationTrigger` drops a request whose epoch is behind the process's
+restore count — which is exactly what B2's chained migrations produce.
+
+**Rank logs are read over NFS.** A log's server-side view can lag while the file is open. Every
+verdict reads logs after the ranks exited; the one softer read is the pre-migration round
+snapshot, which can undercount and makes the progressed-after-restore check conservative in the
+trial's favour.
+
 ## Interpreting failures
 
 | symptom | meaning |
