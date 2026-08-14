@@ -178,22 +178,37 @@ def assert_launched_pid(bands, node, rank, pid, span=PID_BAND_SPAN):
                          % (rank, node, pid, base, base + span))
 
 
-def assert_restored_pid(bands, src, dest, rank, pid, span=PID_BAND_SPAN):
+def assert_restored_pid(bands, home, dest, rank, pid, span=PID_BAND_SPAN):
     """A restored pid keeps the band of the node the rank was LAUNCHED on, and must not be in
-    the destination's.
+    any OTHER node's band.
 
     criu restores the dumped pid verbatim -- that is the whole reason the bands exist -- so a
     migrated rank does not acquire the destination's band and never could. What the bands
     promise is the other statement, and it is the one worth asserting after a move: the pid this
     process carries cannot collide with a pid the destination hands out locally.
+
+    `home` is the node the rank was **launched** on, and it has to be: the pid was allocated
+    there once and then travels unchanged through every later move, so after a chained migration
+    the machine a move starts FROM is no longer the machine whose band the pid belongs to.
+    Passing the move's source instead reads a rank that has legitimately moved once as a cluster
+    whose bands have gone wrong -- which is what B2's second leg (launched on N2, N3 -> N1) did.
+
+    The destination check is skipped when the destination IS the home node, for the same reason
+    stated positively: a rank coming BACK to the machine it was launched on carries a pid that is
+    inside that machine's band by construction, and that is the one case where "inside the
+    destination's band" is correct rather than alarming. (B2's third leg, N1 -> N2, is exactly
+    it.) Everywhere else the bands are disjoint, so being in home's band already means being in
+    no other node's -- the check is a guard against a mis-seeded or overlapping band, not a
+    restatement of the first.
     """
-    if bands and src in bands and not pid_in_band(bands, src, pid, span):
+    if bands and home in bands and not pid_in_band(bands, home, pid, span):
         raise SetupError("rank %d restored on %s with pid %d, which is outside its home band "
-                         "on %s -- the bands no longer describe this cluster" % (rank, dest, pid, src))
-    if bands and dest in bands and pid_in_band(bands, dest, pid, span):
-        raise SetupError("rank %d moved %s -> %s keeping pid %d, which is INSIDE %s's own band: "
-                         "the destination can hand that pid to a local process and the next "
-                         "restore there collides" % (rank, src, dest, pid, dest))
+                         "on %s -- the bands no longer describe this cluster"
+                         % (rank, dest, pid, home))
+    if bands and dest in bands and dest != home and pid_in_band(bands, dest, pid, span):
+        raise SetupError("rank %d moved to %s keeping pid %d, which is INSIDE %s's own band "
+                         "(its home is %s): the destination can hand that pid to a local process "
+                         "and the next restore there collides" % (rank, dest, pid, dest, home))
 
 
 # ----------------------------------------------------------------------------- the job
@@ -291,9 +306,24 @@ def seal_wait_remote(cluster, node, pid, timeout_s, state="T", timeout=None):
 
 
 def criu_dump(cluster, node, pid, imgdir, timeout=180):
-    """`criu dump` on the node that holds the rank. No socket flags -- see CRIU_FLAGS."""
-    return cluster.run(node, "%s dump %s -t %d -D %s -o dump.log"
-                             % (CRIU,CRIU_FLAGS, pid, shlex.quote(imgdir)), timeout=timeout)
+    """`criu dump` on the node that holds the rank. No socket flags -- see CRIU_FLAGS.
+
+    The log is chmodded readable afterwards and criu's own exit status is preserved across it.
+    That is not tidiness: criu creates `dump.log` mode 0600 as **root** (it runs under sudo, see
+    CRIU), and on the node where the shared tree is a LOCAL filesystem -- criu-testing, which is
+    the NFS server -- root stays root, so the driver cannot read the log it is about to search
+    for socket lines. On the other three nodes the export's `all_squash anonuid=1000` turns that
+    same root into `luca` and the log is readable, which is exactly what made the hole invisible:
+    it opened only for ranks dumped on one machine of four. `drain_driver.socket_lines` returns
+    `([], 0)` for a log it cannot open, which is indistinguishable from a clean one -- so the
+    runbook's acceptance criterion 2 passed VACUOUSLY for those. `dump_all` now refuses an
+    unreadable log outright; this makes it readable in the first place.
+    """
+    quoted = shlex.quote(imgdir)
+    return cluster.run(node, "%s dump %s -t %d -D %s -o dump.log; rc=$?; "
+                             "%s chmod 0644 %s/dump.log 2>/dev/null; exit $rc"
+                             % (CRIU, CRIU_FLAGS, pid, quoted, CRIU.split()[0], quoted),
+                       timeout=timeout)
 
 
 def criu_restore(cluster, node, imgdir, cwd=HERE, timeout=180):
@@ -307,8 +337,11 @@ def criu_restore(cluster, node, imgdir, cwd=HERE, timeout=180):
     `-d` and nothing else about state: the restored process comes back in group-stop because
     that is what the image contains, and the caller SIGCONTs it.
     """
-    return cluster.run(node, "cd %s && %s restore %s -D %s -o restore.log -d"
-                             % (shlex.quote(cwd), CRIU, CRIU_FLAGS, shlex.quote(imgdir)),
+    quoted = shlex.quote(imgdir)
+    return cluster.run(node, "cd %s && %s restore %s -D %s -o restore.log -d; rc=$?; "
+                             "%s chmod 0644 %s/restore.log 2>/dev/null; exit $rc"
+                             % (shlex.quote(cwd), CRIU, CRIU_FLAGS, quoted,
+                                CRIU.split()[0], quoted),
                        timeout=timeout)
 
 
@@ -503,9 +536,13 @@ def preflight(cluster, params, subject, tree, config_path, bands=None, span=PID_
 
     heads, shas, closures, crius, kernels = {}, {}, {}, {}, {}
     for node in cluster.nodes:
-        res = cluster.run(node, "git -C %s rev-parse HEAD" % shlex.quote(tree), timeout=timeout)
-        heads[node] = res.stdout.strip() if res.returncode == 0 else "ERROR: " + \
-            (res.stderr.strip()[:120] or "git failed")
+        # Through the helper, not `git rev-parse`: git is installed on the development host and
+        # on none of the worker nodes, and adding it to them would put an unpinned package on the
+        # machines the identity gate is about. The helper reads `.git/HEAD` and the ref it names
+        # off the shared filesystem, from inside the node -- which is the claim the gate makes.
+        rc, payload = cluster.helper_json(node, "head", tree, timeout=timeout)
+        heads[node] = payload.get("head") if rc == 0 and payload.get("head") else \
+            "ERROR: " + str(payload.get("error") or payload)[:120]
         rc, payload = cluster.helper_json(node, "nvra", subject, timeout=timeout)
         facts["nodes"].setdefault(node, {})["identity"] = payload
         shas[node] = payload.get("sha256")

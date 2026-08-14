@@ -108,9 +108,42 @@ VERDICT_LABEL = {
 
 # --------------------------------------------------------------------------- the scenario file
 
-def field(scen, defaults, key):
+# Knobs the command line pinned (--trials, --rounds). They beat everything in the campaign file:
+# a scenario's own value is a considered default, but an operator who typed --trials 1 to take a
+# quick look meant 1, not "1 unless the scenario disagrees". Set once in main().
+OVERRIDES = {}
+
+
+def field(scen, defaults, key, shape=None):
+    """One knob's value for a scenario, and -- when `shape` is given -- for that shape.
+
+    A command-line OVERRIDE wins outright. Below that the precedence is
+    scenario-before-defaults, and within each, **by_shape before flat**:
+
+        scen["by_shape"][shape][key] > scen[key] > defaults["by_shape"][shape][key]
+                                                 > defaults[key] > FIELD_DEFAULTS[key]
+
+    `by_shape` exists because a scenario may name a LIST of shapes and the shapes of this subject
+    differ by seventy-fold in cost per round: measured cross-host at 4 peers, `p2p_ring` runs
+    1.1 ms/round and `uneven_participation` 102 ms/round. One `rounds` for a list of shapes
+    therefore cannot mean one job length -- B7's three shapes at a shared 1700 rounds would be
+    71 s, 174 s and 2 s respectively -- and job length is not cosmetic here: too short and the
+    job outruns the migration (a SKIP that proves nothing), too long and the campaign does not
+    fit in its window. Sizing per shape is what makes a scenario's trials comparable to each
+    other and to the single-host table.
+    """
+    if key in OVERRIDES:
+        return OVERRIDES[key]
+    if shape is not None:
+        by_shape = scen.get("by_shape") or {}
+        if shape in by_shape and key in by_shape[shape]:
+            return by_shape[shape][key]
     if key in scen:
         return scen[key]
+    if shape is not None:
+        by_shape = defaults.get("by_shape") or {}
+        if shape in by_shape and key in by_shape[shape]:
+            return by_shape[shape][key]
     if key in defaults:
         return defaults[key]
     return FIELD_DEFAULTS[key]
@@ -323,13 +356,19 @@ class Trial:
         self.drain_signal = drain_signal
         self.signal_offset = signal_offset
         self.placement = {}
+        # {rank: the node it was LAUNCHED on}. Fixed for the whole trial, unlike `placement`,
+        # which follows the rank around. criu restores a pid verbatim, so the pid belongs to the
+        # launch node's band for the rank's whole life -- see cluster.assert_restored_pid.
+        self.home = {}
         self.epochs = {}
         self.migrations = []
         self.cuts = []
         self.log = []
 
     def f(self, key):
-        return field(self.scen, self.defaults, key)
+        # Always shape-aware: a trial knows its shape, and `rounds`/`payload_ints` are sized per
+        # shape (see `field`).
+        return field(self.scen, self.defaults, key, self.shape)
 
 
 def note_counters(sealed):
@@ -420,7 +459,26 @@ def dump_all(t, ranks, imgroot):
         # The image directory is on the shared filesystem, so the log is readable right here --
         # no copying, and the dump is strictly before any restore, which is what gives NFS
         # close-to-open consistency for it.
-        hits, n_hits = socket_lines(os.path.join(imgdir, "dump.log"))
+        #
+        # But READABLE has to be checked, not assumed. `socket_lines` answers ([], 0) for a log
+        # it cannot open, which is byte-for-byte the answer for a clean one, so an unreadable log
+        # would satisfy the runbook's acceptance criterion 2 without ever being looked at. criu
+        # writes it 0600 as root, and it landed readable on three nodes and root-only on the
+        # fourth (see cluster.criu_dump), so the hole was open for one machine of four and
+        # invisible in the summary line. A log that cannot be read is a SETUP error -- the
+        # evidence is missing, which is neither a pass nor a protocol verdict.
+        logpath = os.path.join(imgdir, "dump.log")
+        if not os.path.exists(logpath):
+            raise cl.SetupError("rank %d: criu wrote no dump.log at %s on %s -- the socket "
+                                "evidence cannot be read, so nothing here can be scored"
+                                % (rank, logpath, node))
+        if not os.access(logpath, os.R_OK):
+            raise cl.SetupError(
+                "rank %d: %s is not readable by this driver (criu runs under sudo and writes it "
+                "0600 as root; it is only squashed to the invoking user where the shared tree is "
+                "NFS). An unreadable log is indistinguishable from a clean one, so this would "
+                "have passed the socket check without performing it." % (rank, logpath))
+        hits, n_hits = socket_lines(logpath)
         t.log.append("dump r%d@%s rc=%d socket-lines=%d %.1fs"
                      % (rank, node, out.returncode, n_hits, time.monotonic() - started))
         if n_hits:
@@ -462,7 +520,7 @@ def restore_all(t, moves, imgroot):
                             % (rank, out.returncode, dest, out.stderr.strip()[:300]))
         # A setup violation, never a protocol verdict: the bands are the cluster's promise that
         # a verbatim-restored pid cannot collide on the destination.
-        cl.assert_restored_pid(t.bands, src, dest, rank, pid, t.span)
+        cl.assert_restored_pid(t.bands, t.home.get(rank, src), dest, rank, pid, t.span)
         t.placement[rank] = (dest, pid)
         # The image was taken of a process in group-stop -- the migrator sequence ends in
         # raise(SIGSTOP) -- and criu faithfully restores that state. Nothing in the library can
@@ -697,19 +755,25 @@ def cross_host_baseline(args, cluster, params, scen, defaults, shape, npeers, pl
     # rank, num_peers, params) by the shape contract, and `rounds` and `payload_ints` are two of
     # those params -- caching on (shape, peers) alone would score a 4096-int scenario against a
     # 1-int baseline and call the disagreement a migration bug.
-    key = (shape, npeers, field(scen, defaults, "rounds"), field(scen, defaults, "payload_ints"))
+    key = (shape, npeers, field(scen, defaults, "rounds", shape),
+           field(scen, defaults, "payload_ints", shape))
     if key in cache:
         return cache[key]
-    comm = "mhd-base-%s-%d-%d" % (shape, npeers, os.getpid())
+    # Every component of the cache key is in the name. The name was (shape, peers) alone while
+    # the key was (shape, peers, rounds, payload_ints): two baselines of one shape at different
+    # sizes then missed the cache, agreed on a directory, and the second read the FIRST's `DONE`
+    # lines out of the stale logs still sitting there -- scoring every later trial against the
+    # wrong oracle. Now a distinct key is a distinct directory by construction.
+    comm = "mhd-base-%s-%d-%dr-%di-%d" % (shape, npeers, key[2], key[3], os.getpid())
     outdir = os.path.join(root, comm)
     os.makedirs(outdir, exist_ok=True)
     clean_comm(params, comm)
     place_map = placement_for(place, cluster.nodes, npeers)
     started = time.monotonic()
     placement = cl.launch_ranks(cluster, comm, place_map, SUBJECT, args.config, outdir,
-                                field(scen, defaults, "rounds"), field(scen, defaults, "ms"),
-                                print_every=field(scen, defaults, "print_every"),
-                                payload_ints=field(scen, defaults, "payload_ints"),
+                                key[2], field(scen, defaults, "ms", shape),
+                                print_every=field(scen, defaults, "print_every", shape),
+                                payload_ints=key[3],
                                 shape=shape, cwd=HERE, bands=bands, span=span)
     finished = wait_for_finish(outdir, npeers, timeout_s=args.baseline_timeout)
     elapsed = time.monotonic() - started
@@ -757,6 +821,7 @@ def run_trial(args, cluster, params, scen, defaults, shape, npeers, trial_index,
         cl.kill_all(cluster, SUBJECT, comm)
         clean_comm(params, comm)
         raise
+    t.home = {rank: node for rank, (node, _) in t.placement.items()}
     t.log.append("peers=%d shape=%s placement %s"
                  % (npeers, shape, " ".join("r%d@%s" % (r, n)
                                             for r, (n, _) in sorted(t.placement.items()))))
@@ -777,6 +842,12 @@ def run_trial(args, cluster, params, scen, defaults, shape, npeers, trial_index,
         except cl.SetupError:
             cl.kill_all(cluster, SUBJECT, comm)
             save_events(params, comm, outdir)
+            # AFTER save_events, and it has to happen: the four keys of an aborted trial outlive
+            # the driver otherwise. A stale event stream is the dangerous one -- a later driver
+            # reads a communicator's stream from "-", so a leftover `sealed` under a reused name
+            # would satisfy a wait for a rank that has not been asked to migrate yet. The
+            # evidence is already on disk in outdir/events.log.
+            clean_comm(params, comm)
             raise
         if verdict != "ok":
             break
@@ -867,9 +938,11 @@ def describe(scen, defaults, nodes, comm="<comm>"):
     if scen.get("why"):
         lines.append("  why: %s" % scen["why"])
     for shape in shapes_of(scen, defaults):
-        lines.append("  shape=%s peers=%d rounds=%s ms=%s trials=%s place=%s"
-                     % (shape, npeers, field(scen, defaults, "rounds"),
-                        field(scen, defaults, "ms"), field(scen, defaults, "trials"),
+        lines.append("  shape=%s peers=%d rounds=%s ms=%s payload_ints=%s trials=%s place=%s"
+                     % (shape, npeers, field(scen, defaults, "rounds", shape),
+                        field(scen, defaults, "ms", shape),
+                        field(scen, defaults, "payload_ints", shape),
+                        field(scen, defaults, "trials", shape),
                         place if not isinstance(place, dict) else "explicit"))
     place_map = placement_for(place, nodes, npeers)
     lines.append("  placement: " + " ".join("r%d@%s" % (r, place_map[r])
@@ -905,10 +978,13 @@ def describe(scen, defaults, nodes, comm="<comm>"):
                              "REFUSED, and the job must finish clean anyway")
         else:
             lines.append("      then: wait for the batch lease to clear before the next step")
-    lines.append("  criu (both legs, every rank): criu dump %s -t <pid> -D <img> -o dump.log"
-                 % cl.CRIU_FLAGS)
-    lines.append("                               cd %s && criu restore %s -D <img> -o "
-                 "restore.log -d" % (HERE, cl.CRIU_FLAGS))
+    # cl.CRIU, not the bare word "criu": the printed plan is reviewed as if it were the
+    # invocation, so it has to be the invocation -- including the `sudo` the time-namespace
+    # finding made necessary.
+    lines.append("  criu (both legs, every rank): %s dump %s -t <pid> -D <img> -o dump.log"
+                 % (cl.CRIU, cl.CRIU_FLAGS))
+    lines.append("                               cd %s && %s restore %s -D <img> -o "
+                 "restore.log -d" % (HERE, cl.CRIU, cl.CRIU_FLAGS))
     lines.append("  verified per trial: every rank DONE with the four-machine baseline "
                  "checksum; the migrated rank logged a round past the one it was frozen on; "
                  "zero socket fds at state T; no socket line in dump.log; no socket image file; "
@@ -992,10 +1068,14 @@ def main():
     args.config = os.path.abspath(args.config)
 
     defaults, scenarios = load_campaign(args.campaign)
+    # Into OVERRIDES, NOT into `defaults`: `field` reads the scenario before the defaults, and
+    # every scenario in campaign.json names its own `trials`, so an override folded into the
+    # defaults was silently inert -- `--trials 1` ran the scenario's three anyway. Sizing knobs
+    # given on the command line have to outrank the file, or they are decoration.
     if args.trials is not None:
-        defaults = dict(defaults, trials=args.trials)
+        OVERRIDES["trials"] = args.trials
     if args.rounds is not None:
-        defaults = dict(defaults, rounds=args.rounds)
+        OVERRIDES["rounds"] = args.rounds
 
     wanted = [name.strip() for item in args.only for name in item.split(",") if name.strip()]
     selected = []
@@ -1130,7 +1210,7 @@ def main():
             if scen["kind"] == "clean":
                 totals["pass"] += 1
                 continue
-            for trial in range(int(field(scen, defaults, "trials"))):
+            for trial in range(int(field(scen, defaults, "trials", shape))):
                 try:
                     outcome, note = run_trial(args, cluster, params, scen, defaults, shape,
                                               npeers, trial, root, bands, args.pid_band_span,

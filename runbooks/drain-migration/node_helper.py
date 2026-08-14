@@ -36,6 +36,7 @@ Verbs
   cont-if-stopped <pid>                  SIGCONT a process that criu restored in group-stop
   pidband [base span]                    what this node is allocating pids from
   nvra <binary>                          the runtime closure identity gate reads
+  head <tree>                            the shared checkout's HEAD, resolved without git
 """
 import ctypes
 import hashlib
@@ -370,6 +371,68 @@ def verb_nvra(argv):
     return emit(payload)
 
 
+def verb_head(argv):
+    """head <tree> -- the checkout's HEAD commit, resolved by READING the ref files.
+
+    Not `git rev-parse`: git is not installed on the worker nodes of this cluster (only the
+    development host has it), and installing it would add an unpinned package to the identity
+    gate's own machines for no gain. What the gate actually asserts is that every node sees the
+    SAME tree at the SAME absolute path -- and reading `.git/HEAD` and the ref it names off the
+    shared filesystem, from inside each node, asserts exactly that and nothing weaker.
+
+    Resolves the three forms a checkout's HEAD can take: a detached sha, a symbolic ref whose
+    target is a loose ref file, and a symbolic ref that lives only in `packed-refs`. `.git` may
+    itself be a file (`gitdir: <path>`, the worktree/submodule form), which is followed once.
+    """
+    if len(argv) != 1:
+        return emit({"error": "usage: head <tree>"}, USAGE)
+    tree = argv[0]
+    payload = {"tree": tree, "hostname": os.uname().nodename, "head": None, "ref": None}
+    gitdir = os.path.join(tree, ".git")
+    try:
+        if os.path.isfile(gitdir):
+            with open(gitdir) as f:
+                pointer = f.read().strip()
+            if not pointer.startswith("gitdir:"):
+                payload["error"] = "%s is a file but not a gitdir pointer" % gitdir
+                return emit(payload, OS_ERROR)
+            gitdir = pointer.split(":", 1)[1].strip()
+            if not os.path.isabs(gitdir):
+                gitdir = os.path.join(tree, gitdir)
+        with open(os.path.join(gitdir, "HEAD")) as f:
+            text = f.read().strip()
+    except OSError as exc:
+        payload["error"] = "cannot read HEAD under %s: %s" % (gitdir, exc)
+        return emit(payload, OS_ERROR)
+    if not text.startswith("ref:"):
+        payload["head"] = text
+        return emit(payload)
+    ref = text.split(":", 1)[1].strip()
+    payload["ref"] = ref
+    try:
+        with open(os.path.join(gitdir, ref)) as f:
+            payload["head"] = f.read().strip()
+        return emit(payload)
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(gitdir, "packed-refs")) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith(("#", "^")):
+                    continue
+                sha, _, name = line.partition(" ")
+                if name.strip() == ref:
+                    payload["head"] = sha
+                    payload["packed"] = True
+                    return emit(payload)
+    except OSError as exc:
+        payload["error"] = "cannot resolve %s: %s" % (ref, exc)
+        return emit(payload, OS_ERROR)
+    payload["error"] = "%s is not a loose ref and is not in packed-refs" % ref
+    return emit(payload, OS_ERROR)
+
+
 VERBS = {
     "sigqueue": verb_sigqueue,
     "wait-state": verb_wait_state,
@@ -378,6 +441,7 @@ VERBS = {
     "cont-if-stopped": verb_cont_if_stopped,
     "pidband": verb_pidband,
     "nvra": verb_nvra,
+    "head": verb_head,
 }
 
 
