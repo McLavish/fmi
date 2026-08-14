@@ -9,8 +9,9 @@ Three things it owns:
   * **ssh plumbing** (`Cluster`), copied from `../criu-transparent-checkpoint/multihost_sweep.py`
     down to the launch string, because every rule in it was paid for by a failure.
   * **the criu legs** (`criu_dump`, `criu_restore`), with the flag set that IS this runbook's
-    acceptance criterion: `--unprivileged --manage-cgroups=ignore -v4` and **no
-    `--tcp-close`, no `--tcp-established`, no `--shell-job`**.
+    acceptance criterion: privileged criu (see the CRIU note below — the time namespace),
+    `--manage-cgroups=ignore -v4`, and **no `--tcp-close`, no `--tcp-established`, no
+    `--shell-job`**.
   * **the control-plane producers** the library deliberately has none of: `emit_migrate`, the
     `migrate` event nothing in FMI writes, and the batch lease a *driver* holds so that several
     ranks may drain in one cut (`DrainTCP::quiesce_and_drain` skips self-leasing when the
@@ -54,7 +55,15 @@ NODE_HELPER = os.path.join(HERE, "node_helper.py")
 #   --manage-cgroups=ignore -- ranks land in per-session systemd cgroups whose paths exist only
 #     on the host that created them; without this, criu tries to re-enter the dump host's
 #     session cgroup on the restore host. (multihost_sweep.py's lesson, unchanged.)
-CRIU_FLAGS = "--unprivileged --manage-cgroups=ignore -v4"
+# Privileged criu, deliberately: --unprivileged cannot create a time namespace, so a
+# cross-host restore lands with the DESTINATION's CLOCK_MONOTONIC and every absolute
+# steady_clock deadline the image carries is off by the uptime difference — forward jumps
+# expire them all instantly (measured: a 74h-uptime gap threw Timeout right after a
+# successful migration; the same cut under sudo criu, which builds the timens and
+# preserves the clock, passed with a 756 ms window). The acceptance criterion is
+# unchanged: no --tcp-close, no --tcp-established, no --shell-job on either leg.
+CRIU = "sudo criu"
+CRIU_FLAGS = "--manage-cgroups=ignore -v4"
 
 # Phase A7's bands, keyed by the IP the driver addresses the node as. criu restores a pid
 # verbatim, so a pid taken on the destination is a restore that fails with "File exists";
@@ -283,8 +292,8 @@ def seal_wait_remote(cluster, node, pid, timeout_s, state="T", timeout=None):
 
 def criu_dump(cluster, node, pid, imgdir, timeout=180):
     """`criu dump` on the node that holds the rank. No socket flags -- see CRIU_FLAGS."""
-    return cluster.run(node, "criu dump %s -t %d -D %s -o dump.log"
-                             % (CRIU_FLAGS, pid, shlex.quote(imgdir)), timeout=timeout)
+    return cluster.run(node, "%s dump %s -t %d -D %s -o dump.log"
+                             % (CRIU,CRIU_FLAGS, pid, shlex.quote(imgdir)), timeout=timeout)
 
 
 def criu_restore(cluster, node, imgdir, cwd=HERE, timeout=180):
@@ -298,8 +307,8 @@ def criu_restore(cluster, node, imgdir, cwd=HERE, timeout=180):
     `-d` and nothing else about state: the restored process comes back in group-stop because
     that is what the image contains, and the caller SIGCONTs it.
     """
-    return cluster.run(node, "cd %s && criu restore %s -D %s -o restore.log -d"
-                             % (shlex.quote(cwd), CRIU_FLAGS, shlex.quote(imgdir)),
+    return cluster.run(node, "cd %s && %s restore %s -D %s -o restore.log -d"
+                             % (shlex.quote(cwd), CRIU, CRIU_FLAGS, shlex.quote(imgdir)),
                        timeout=timeout)
 
 
