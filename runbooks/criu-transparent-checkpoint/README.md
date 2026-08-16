@@ -434,3 +434,331 @@ each one traced, fixed, and re-verified against its own failing schedule.
 `multihost_ft_migration.py` is left over from the deleted epoch migration protocol: it drives
 `fmi-rank-agent evacuate-local` / `restore-remote` / `promote`, none of which exist any more.
 It cannot run against this tree.
+
+## Sequenced-protocol parity campaign: four machines, scenario for scenario against the drain
+
+`runbooks/drain-migration/README.md` records a cluster campaign for the neighborhood-drain
+protocol — 130 migrations across sequential moves, single-cut batch evacuations and LULESH.
+This section is that **same scenario matrix run against the sequenced protocol**: `DirectTCP`
+with `"framed": true` and `"recover_links": true`, the retention/replay transport this runbook
+has always been about. The question it settles is one sentence: *both protocols should be able
+to pass the same tests.*
+
+The scenarios transfer. **The acceptance criteria do not, and must not.** The drain campaign's
+central criterion is that a migrating rank's criu image contains **zero sockets** — it drains
+and half-closes every link before it is frozen, so a socket in the image is a protocol failure.
+The sequenced protocol is the opposite trade-off by construction: it makes no arrangement with
+anybody, its image **carries its sockets by design**, `criu --tcp-close` drops them on restore,
+and correctness comes from the frames the peers had not yet acknowledged being retained and
+replayed across the break. So this campaign runs criu **with** `--tcp-close --shell-job` where
+the drain campaign forbids exactly those flags, and asserts nothing about sockets, seals,
+leases, epochs or event trails — none of which exist here.
+
+Both campaigns run criu **privileged** (`sudo`, never `--unprivileged`), and for the same
+reason: only a privileged restore lands in a time namespace that preserves `CLOCK_MONOTONIC`.
+The sequenced protocol's deadlines are `steady_clock` too, so an unprivileged cross-host
+restore onto a machine with a different uptime expires all of them at once. This campaign is
+the first evidence for that on this transport: at the time it ran, the host had been up 54
+minutes longer than the three nodes, and not one of the 103 migrated ranks saw a `Timeout`.
+
+### Acceptance criteria, per trial
+
+1. every rank reaches `DONE` with **exactly** the four-machine clean-run baseline checksum for
+   that (shape, peers, rounds, ms, payload) — the replay working *is* the correctness
+   mechanism, and the checksum is its oracle;
+2. every checkpointed rank logs a round **past** the round it had reached before its dump,
+   that round read on the machine that owns the log rather than over NFS;
+3. both criu legs return **0**, privileged, with `--tcp-close --shell-job
+   --manage-cgroups=ignore`;
+4. the rank **actually changed machine** — a restore whose destination came out equal to the
+   source is a trial failure, not a quiet pass;
+5. the restored pid still belongs to the band of the machine the rank was **launched** on
+   (criu restores the pid verbatim and keeps it for the life of the process, so after a hop the
+   pid no longer matches the band of the machine it is sitting on — which is what makes it
+   evidence the process was *moved* rather than started there);
+6. no `MISMATCH`, `terminate called`, `Segmentation` or `stack smashing` in any rank's log.
+
+There is deliberately **no socketless assertion and no counter cross-check**. The drain's
+pairwise sealed counters are evidence available only because a drain seals; inventing an
+analogue here would be inventing evidence.
+
+### Setup
+
+Four Rocky 9.8 machines — criu-testing `10.164.0.3` (T, 8c), criu-node-2 `.4` (N2), criu-node-1
+`.5` (N1), criu-node-3 `.6` (N3) — one shared `/scratch/fmi` (xfs on T, NFS on the other
+three), cluster Redis on `10.164.0.3:6380`, criu 3.19 under `sudo`, kernel
+`5.14.0-687.31.1+2.1.el9_8_ciq`, pid bands 1.0M/1.5M/2.0M/2.5M. 2026-08-16, tree `68287e3`,
+subject sha256 `46054d3e…`, config `/scratch/cfg/fmi_sequenced_multihost.json` (DirectTCP alone,
+`framed` and `recover_links` true, registry `10.164.0.3:6380`, `bind_host 0.0.0.0`,
+**`advertise_host ""`**, `max_timeout` 60000). Node order for round-robin is T, N2, N1, N3, so
+4 ranks is one per machine, 8 is two, 12 is three.
+
+### Evidence — phases B and C
+
+**65 trials, 65 passed, 0 failed, 0 skipped, 0 void — 103 cross-host migrations: 45 sequential
+and 58 inside 29 cuts. Every `criu dump` and every `criu restore` returned 0; every migrated
+rank was dumped on one machine and restored on another; every rank of every trial finished with
+the four-machine baseline checksum.** The four-machine baselines are themselves bit-identical to
+single-host runs of the same parameters — the B0 row.
+
+| scenario | what it moves | trials | migrations | dump/restore rc | checksums | window / cut |
+| --- | --- | --- | --- | --- | --- | --- |
+| B0 clean, 8 shapes | nothing | 8/8 clean | — | — | all 8 shapes **identical to the single-host oracle**, rank for rank | — |
+| B1 one rank N2→N3 | 1 rank | 6/6 | 6 | 0 / 0 | == 4-machine baseline | 0.73 s |
+| B2 same rank chained N2→N3→N1→N2 | 1 rank ×3 | 3/3 | 9 | 0 / 0 | == 4-machine baseline | 0.73 s |
+| B3 two ranks in sequence (r0 T→N3, r2 N1→T) | 2 ranks | 4/4 | 8 | 0 / 0 | == 4-machine baseline | 0.75 s |
+| B4 rank 0 — the rank everyone dials (baseline, p2p_ring) | 1 rank | 6/6 | 6 | 0 / 0 | == 4-machine baseline | 0.75 s |
+| B5 8 ranks, N1 evacuated sequentially onto T and N2 | 2 ranks | 3/3 | 6 | 0 / 0 | == 4-machine baseline | 0.75 s |
+| B6 mid-message, 8 ranks (variable_payloads, 4096 ints) | 1 rank | 3/3 | 3 | 0 / 0 | == 4-machine baseline | **0.86 s** |
+| B7 deep_rounds / uneven_participation / mixed_p2p_collective | 1 rank ×3 shapes | 6/6 | 6 | 0 / 0 | == 4-machine baseline | 0.74 s |
+| B8 12 ranks, 3 per machine | 1 rank | 1/1 | 1 | 0 / 0 | == 4-machine baseline | 0.72 s |
+| C0 one-rank-node evacuation (k=1) | 1 rank ×3 | 3/3 | 3 | 0 / 0 | == 4-machine baseline | 0.86 s |
+| C1 evacuate N1 k=2 → one survivor (T) | 2 ranks ×3 | 3/3 | 6 | 0 / 0 | == 4-machine baseline | 1.77 s |
+| C2 evacuate N1 k=2 → spread (T, N2) | 2 ranks ×5 | 5/5 | 10 | 0 / 0 | == 4-machine baseline | 1.74 s |
+| C3 12 ranks, k=3 spread (T, N2, N3) | 3 ranks ×3 | 3/3 | 9 | 0 / 0 | == 4-machine baseline | 2.58 s |
+| C4 **two machines (N1+N3), k=4, one cut** → T, N2 | 4 ranks ×2 | 2/2 | 8 | 0 / 0 | == 4-machine baseline | **3.42 s** |
+| C5 k=2 mid-message (variable_payloads, 4096 ints) | 2 ranks ×3 | 3/3 | 6 | 0 / 0 | == 4-machine baseline | 2.02 s |
+| C6 ring neighbours co-evacuated (p2p_ring / mixed) | 2 ranks ×2 shapes ×2 | 4/4 | 8 | 0 / 0 | == 4-machine baseline | 1.76 s |
+| C7 two cuts back to back (N1, then N3) | 2 ranks ×2 cuts ×2 | 2/2 | 8 | 0 / 0 | == 4-machine baseline | 1.73 s |
+| C8 negative: second batch refused | — | **skipped** | — | — | — | no sequenced equivalent |
+
+**C6 and C4 are where the sequenced protocol is genuinely stressed.** Round-robin places rank
+*r* with rank *r+4* and therefore never co-locates ring neighbours; C6 uses an explicit
+placement map to put ranks 2 and 3 on the evacuated machine, so the two migrators hold unacked
+frames **to each other** and both images are taken before either is restored. The replay has to
+reconcile both directions of a link whose two ends were frozen at different instants. C4 does
+the same at k=4 across two machines at once.
+
+### What the reconnect actually does, traced
+
+`FMI_LINK_TRACE=1` on a B2-shaped run (rank 1 cut three times, N2→N3→N1→N2, 4 ranks, 2000
+rounds) — the sequenced answer to the drain's `leaving → sealed → restored` event trail:
+
+| | |
+| --- | --- |
+| **every reconnect is the same lineage** | **18 `reconcile same-lineage` handshakes, 0 `RESET_STREAM`.** A peer that had been replaced rather than restored would reset the stream; none did. The incarnation is `0` throughout, which is what "a restored process keeps the one its image was taken with" means when nothing has yet claimed a second one |
+| **the replay is not vacuous** | 6 of the 18 handshakes found the peer's expected sequence *behind* what this side had sent, and replayed the difference — **6 frames replayed** across the three cuts. The rest had nothing outstanding, which is the other half of point 3 at the top of this runbook: retention is released on links the peer never writes back to |
+| **the sequences carry across all three cuts** | one link reconciled three times, `my_send` 610 → 1340 → 1728 and `my_recv` 915 → 2010 → 2592. The counters are cumulative across every hop, exactly as the drain's `sent.1` is |
+| **nothing else fired** | 0 `sequence gap`, 0 `is at its retention limit`, 0 `identity mismatch`, 0 incarnation-fence errors across all four ranks |
+| the run itself | all four ranks `DONE` with the baseline checksums `40171000 / 26207000 / 28413000 / 30621000` |
+
+### Wall clock
+
+| | |
+| --- | --- |
+| one rank: dump | **0.15–0.26 s** over all 48 single-rank migrations (ssh round trip included) |
+| one rank: restore | 0.15–0.31 s |
+| one rank: the whole window, dump start → restored and running | min 0.59 s, **median 0.72 s**, max 0.86 s |
+| a cut, first dump → last rank running | 0.84–0.86 s at k=1 (3), 1.67–2.02 s at k=2 (19), 2.56–2.58 s at k=3 (3), **3.41–3.42 s at k=4** (2) |
+| what a migration costs the job | 4-machine clean 75.0 s at 4 ranks vs 75–76 s with one migration; B2's three chained cuts in one job cost about 2 s in total |
+| the whole B+C matrix | 22 invocations, 65 trials, **1 h 36 min** of measured block time (B0's 16 runs a further 28 min) |
+
+Two things this table says that the drain's does not. A cut costs **~0.85 s per rank, strictly
+linear in k**, because the sequenced cut is nothing but *k* dumps then *k* restores — there is
+no seal to wait for and no lease to take, so the constant the drain pays per migration
+(`leaving → sealed`, 0–20 ms, plus the coordinator round trips) is simply absent. And the
+window is **a quarter shorter than the drain's**: 0.72 s median against 0.94 s for a single
+rank, and 3.41-3.42 s at k=4 against 3.71-3.74 s.
+
+The other side of that ledger is per-message cost, and it is the reason the two protocols exist.
+Measured on this cluster at 4 ranks, one per machine, `ms=1`, in ms per round — sequenced
+`DirectTCP` against the drain campaign's `DrainTCP` figures for the same shapes:
+
+| shape | DrainTCP | sequenced | ratio |
+| --- | --- | --- | --- |
+| baseline | 1.44 | 1.86 | 1.3× |
+| p2p_ring | 1.10 | 1.21 | 1.1× |
+| collectives_sweep | 1.55 | 2.07 | 1.3× |
+| mixed_p2p_collective | 1.35 | 1.73 | 1.3× |
+| noncommutative | 1.23 | 1.57 | 1.3× |
+| **deep_rounds** | 41.8 | **124.6** | **3.0×** |
+| variable_payloads | 44 | 40.0 | 0.9× |
+| uneven_participation | 102 | 93.3 | 0.9× |
+
+`deep_rounds` is hundreds of very short messages per round, and it is where the per-frame header
+and the retention bookkeeping stop being amortised — three times the cost. The shapes that move
+large payloads or spend their time idle (`variable_payloads`, `uneven_participation`) do not
+notice the difference at all. That is the trade-off stated numerically: the drain pays nothing
+per message and everything at the migration event; the sequenced protocol pays per message and
+almost nothing at the event. (The two columns were measured in different sessions on the same
+cluster, so read the ratios rather than the absolute difference.)
+
+### Harness extensions
+
+`multihost_sweep.py` chose its target rank, its instant and its destination at random, which is
+right for a sweep and cannot express a scenario matrix. Twelve changes, all additive — every
+previously valid invocation behaves exactly as before. **They are working-tree changes, logged
+here and synced to the shared tree, not committed.**
+
+| change | why the matrix needed it |
+| --- | --- |
+| `--target-rank R [R ...]` | scripted target per event, positionally; also fixes the event count. `--target-rank 1 1 1` is the same rank cut three times (B2); `--target-rank 0` is rank 0, the rank everyone dials (B4) |
+| `--restore-to NODE [NODE ...]` | explicit destination per event (index into `--nodes`, or a hostname), so a scenario can say "N2 → N3" rather than "somewhere else" |
+| `--evacuate-node NODE [NODE ...]` | which machine each cut empties, positionally. **An element may be comma-joined (`2,3`)**, which empties TWO machines in ONE cut — every rank of both dumped before any is restored. The biggest addition, and what C4 is |
+| `--restore spread` | a fourth destination policy: each rank of one event lands on a **different** survivor. `next`/`random` send a whole cut to one place |
+| `--place R:NODE,...` | explicit placement. Round-robin places rank *r* with rank *r+len(nodes)* and therefore **never** co-locates ring neighbours, which is exactly what C6 needs |
+| `--exact-checkpoints` | perform exactly `--max-checkpoints` events rather than a random 1..N |
+| pid-band assertion (`--pid-bands`) | every launched pid must fall in its node's `ns_last_pid` band. A rebooted node becomes a refused setup error at second zero instead of a mid-campaign restore failure |
+| cross-host move check | a cross-host policy whose destination came out equal to the source is now a trial **failure**; it used to log `(same host)` and pass. The restored pid is checked against its **launch** host's band |
+| `last_round_remote` | the pre-dump round is read on the machine that owns the log. Over NFS it read `-1` while the file was open, which made "logged a round past that one" a tautology |
+| `evacuate_node` generalised | it computed one destination for the whole set from a single source node; it now carries each rank's own source, which is what makes both multi-node cuts and `spread` possible |
+| `registry_del` port fix | it ran `redis-cli` with **no `-p`**, so with a campaign registry on 6380 every "cleanup" deleted a key on 6379 and left the real one behind |
+| `SetupError` → exit 3 | a setup violation aborts the invocation and is never scored as a protocol verdict |
+
+Plus one instrumentation line: each migration logs `[timing dump=… restore=… window=…]` and
+each cut `[timing k=… dumps=… cut=…]`, which is where the wall-clock table comes from.
+
+Two of these were found by the campaign failing, and both were the driver rather than the
+library. The pid-band check first used the *previous* host as "home", so B2's chained hops
+reported three false failures — criu keeps the pid, so after one hop it belongs to the launch
+host's band and to no other, and a rank chained back to where it started legitimately has a pid
+inside its destination's band. And the pre-dump round read over NFS returned `-1` for every
+trial of the first B1 block. Both were fixed and the whole of phase B re-run from the top, so
+the table above is one harness throughout.
+
+### What was skipped, and why
+
+**C0 (batch of one) — replaced, not skipped.** The drain's C0 isolates the *migrate-event* path
+from concurrency: a batch containing a single rank, under the driver-held lease. There is no
+event and no lease here, so a "batch of one" is not a thing that exists. The nearest sequenced
+shape is a **one-rank-node evacuation** — the cut code path at k=1 — and that is what the C0 row
+runs, three times.
+
+**C8 (lease refusal) — genuinely skipped, no sequenced equivalent.** The drain's C8 asserts that
+a second batch lease taken while a cut is in flight is refused and the job still finishes. The
+sequenced protocol has no lease, no batch identity and no coordinator to refuse anything; a
+second concurrent cut is simply two more dumps. There is nothing to assert that C7 (two cuts
+back to back) does not already cover, and inventing an assertion here would be inventing
+evidence.
+
+### Invocations
+
+```bash
+cd /scratch/fmi/runbooks/criu-transparent-checkpoint
+NODES="10.164.0.3 10.164.0.4 10.164.0.5 10.164.0.6"      # T, N2, N1, N3
+CFG=/scratch/cfg/fmi_sequenced_multihost.json
+
+# B0 — the four-machine clean oracle for one shape (and the single-host one to compare it to)
+python3 multihost_sweep.py --nodes $NODES --config $CFG --trials 1 --max-checkpoints 0 \
+        --peers 4 --rounds 40000 --ms 1 --shape baseline
+python3 multihost_sweep.py --nodes 10.164.0.3 --config $CFG --trials 0 \
+        --peers 4 --rounds 40000 --ms 1 --shape baseline
+
+# B2 — the same rank cut three times, N2 -> N3 -> N1 -> N2
+python3 multihost_sweep.py --nodes $NODES --config $CFG --trials 3 --peers 4 --rounds 40000 \
+        --ms 1 --restore next --target-rank 1 1 1 --restore-to 3 2 1 --delay-range 2 8
+
+# C4 — two machines emptied in ONE cut, k=4, onto the other two
+python3 multihost_sweep.py --nodes $NODES --config $CFG --trials 2 --peers 8 --rounds 35000 \
+        --ms 1 --evacuate-node 2,3 --restore spread --seed 2
+
+# C6 — ring neighbours co-evacuated (round-robin never produces this placement)
+python3 multihost_sweep.py --nodes $NODES --config $CFG --trials 2 --peers 8 --rounds 53000 \
+        --ms 1 --shape p2p_ring --place 0:0,1:1,2:2,3:2,4:3,5:0,6:1,7:3 \
+        --evacuate-node 2 --restore spread
+```
+
+Rounds are sized for a ~75 s job, which is the window a randomly-timed cut needs to land well
+inside the run. Measured here at 4 ranks, `ms=1`: baseline 40000, p2p_ring 62000,
+collectives_sweep 36000, mixed_p2p_collective 43000, noncommutative 48000, deep_rounds 600,
+variable_payloads 1850, uneven_participation 800; at 8 ranks baseline 35000 and at 12 ranks
+32000.
+
+### Phase D — LULESH across four machines
+
+The capstone, on a **real application** instead of the synthetic subject, and the direct
+counterpart of the drain campaign's phase D. LULESH 2.0 ported to FMI (`McLavish/LULESH_FMI`,
+upstream sources unchanged, all integration in the `lulesh-fmi.{h,cc}` MPI shim), 8 ranks,
+2 per machine in a `block` placement — r0,r1@T r2,r3@N2 r4,r5@N1 r6,r7@N3 — `-s 30`, run to
+completion at 2031 cycles. Its 2×2×2 decomposition makes every rank every other's neighbour, so
+24 of the 28 links cross a machine boundary, and every cycle is one global `dt` allreduce plus
+three 26-neighbour halo exchanges: the traffic being cut is a real application's, in the tens of
+megabytes per link.
+
+Its oracle is stronger than a checksum: rank 0's `Final Origin Energy` is bit-deterministic for
+a given (binary, size, rank count), so a migration that lost or duplicated a single halo byte
+moves it. The number to match is the single-host golden **`7.130703e+05`**.
+
+The driver is `LULESH_FMI/lulesh-multihost-sequenced.py`, and like its drain sibling it
+**imports** the campaign machinery rather than restating it — `multihost_sweep.py`'s `Cluster`,
+`checkpoint_restore`, `evacuate_node`, `destinations`, the pid-band assertions and the
+cross-host move check — so a phase-D verdict is produced by the same code as a phase-B or
+phase-C one, criu flags included. What it adds is only LULESH: the four FMI parameters arrive
+through the environment (`FMI_RANK`, `FMI_WORLD_SIZE`, `FMI_CONFIG`, `FMI_COMM_NAME`) rather
+than argv, `stdbuf -oL` so the per-cycle counter is readable while the job runs, rank 0's
+`cycle = N` replaces the subject's per-rank round counter as the progress reading, and the
+finish test is every rank's *process* being gone (ranks other than 0 print nothing at all in a
+healthy run).
+
+**11 trials, 11 passed, 0 failed — 23 cross-host migrations, 9 of them single and 14 inside 5
+cuts, every one dumped on one machine and restored on another. All eleven runs printed
+`Final Origin Energy = 7.130703e+05` and `Iteration count = 2031`.** 2026-08-16, FMI tree
+`68287e3`, `lulesh2.0` sha256 `3645f753…` (Release, `-O3`, `WITH_OPENMP=OFF`), config
+`fmi-lulesh-seq-multihost.json` (DirectTCP alone, `framed` and `recover_links` true, registry
+`10.164.0.3:6380`, `advertise_host ""`, `max_timeout` 60000).
+
+| scenario | what it moves | energy | cycles | migrations | dump/restore rc | job |
+| --- | --- | --- | --- | --- | --- | --- |
+| D0 clean, 4 machines | nothing | `7.130703e+05` **== single-host golden** | 2031 | — | — | 31 s |
+| D1a one rank, N2→N3 | r3 | `7.130703e+05` | 2031 | 1 | 0 / 0 | 39 s |
+| D1b one rank, N3→T | r6 | `7.130703e+05` | 2031 | 1 | 0 / 0 | 32 s |
+| D1c one rank, T→N1 — **rank 0 itself** | r0 | `7.130703e+05` | 2031 | 1 | 0 / 0 | 39 s |
+| D2a three sequential, three ranks (r2 N2→T, r5 N1→N2, r7 N3→N1) | 3 ranks | `7.130703e+05` | 2031 | 3 | 0 / 0 | 33 s |
+| D2b three sequential, rank 0 first (r0 T→N3, r3 N2→N1, r6 N3→T) | 3 ranks | `7.130703e+05` | 2031 | 3 | 0 / 0 | 39 s |
+| D3a single cut, N2 evacuated → spread (T, N1) | 2 ranks | `7.130703e+05` | 2031 | 2 | 0 / 0 | 42 s |
+| D3b single cut, N1 evacuated → spread (T, N2) | 2 ranks | `7.130703e+05` | 2031 | 2 | 0 / 0 | 39 s |
+| D3c single cut, **T** evacuated → spread (N2, N1) | 2 ranks | `7.130703e+05` | 2031 | 2 | 0 / 0 | 42 s |
+| D4a **two machines, k=4, one cut**: N1+N3 → T, N2 | 4 ranks | `7.130703e+05` | 2031 | 4 | 0 / 0 | 41 s |
+| D4b **two machines, k=4, one cut**: T+N2 → N1, N3 | 4 ranks | `7.130703e+05` | 2031 | 4 | 0 / 0 | 47 s |
+
+Timings on a real application's traffic: a single migration's window 0.66–0.78 s (dump
+0.18–0.25 s, restore 0.17–0.29 s); a cut 1.78–1.95 s at k=2 and **3.54–3.61 s at k=4**. The
+whole phase, eleven jobs, took 8 minutes. Against the drain campaign's LULESH figures — 0.93–1.04 s
+per single migration, 3.79–3.86 s at k=4 — the sequenced protocol is again the faster event, and its
+cut still scales at about 0.88 s per rank.
+
+### Drain vs sequenced, scenario by scenario
+
+Both protocols were put through the same matrix on the same four machines with the same subject
+and the same application. Neither failed a scenario it was asked to run.
+
+| scenario | drain: what it asserts | drain | sequenced: what it asserts | sequenced |
+| --- | --- | --- | --- | --- |
+| clean, 8 shapes | checksums == single-host oracle | 8/8 | same | 8/8 |
+| one cross-host cut | socketless image, `leaving→sealed→restored`, checksums | 6/6 | image **carries** its sockets, replay reconciles, checksums | 6/6 |
+| same rank chained ×3 | epochs 0,1,2; counters carry across the hops | 3/3 (10 migr) | lineage stays the same at every hop, sequences carry, replay reconciles | 3/3 (9 migr) |
+| two ranks in sequence | as above, second migrator's peer has already moved | 4/4 | same, minus the event trail | 4/4 |
+| rank 0 (baseline, p2p_ring) | as above | 6/6 | as above | 6/6 |
+| sequential whole-node evacuation | as above, 2 ranks one at a time | 3/3 | as above | 3/3 |
+| mid-message (variable_payloads) | seal cuts between chunks | 3/3 | freeze lands mid-message; retention/replay covers it | 3/3 |
+| deep / uneven / mixed shapes | as above | 6/6 | as above | 6/6 |
+| 12 ranks | scale | 1/1 | scale | 1/1 |
+| batch of one / k=1 cut | the migrate-event path in isolation, under the lease | 3/3 | **replaced**: a one-rank-node evacuation (there is no event or lease) | 3/3 |
+| evacuate one node k=2 → one survivor | all sealed before any restore; pairwise counters | 3/3 | all dumped before any restore; checksums | 3/3 |
+| evacuate one node k=2 → spread | as above | 5/5 | as above | 5/5 |
+| 12 ranks, k=3 | as above | 3/3 | as above | 3/3 |
+| **two machines, k=4, one cut** | as above at full width | 2/2 | as above at full width | 2/2 |
+| k=2 mid-message | counter cross-check is the byte-exactness oracle | 3/3 | checksums are the byte-exactness oracle | 3/3 |
+| ring neighbours co-evacuated | the mutual seal, cross-host | 4/4 | **mutual retention**: both images hold unacked frames for each other; replay reconciles both directions | 4/4 |
+| two cuts back to back | the lease race guard between them | 2/2 | no lease to race; the second cut is simply two more dumps | 2/2 |
+| negative: second batch refused | the lease is refused and the job survives | 1/1 | **no equivalent — skipped** (no lease, no batch identity, nothing to refuse) | — |
+| LULESH, 4 machines | `Final Origin Energy` bit-identical + socketless | 11/11, 23 migr | `Final Origin Energy` bit-identical | 11/11, 23 migr |
+| **totals** | | **69 trials, 130 migrations** | | **76 trials, 126 migrations** |
+
+Where they differ is not pass or fail but cost and what each demands of its environment.
+
+| | drain (`DrainTCP`) | sequenced (`DirectTCP` framed + recover_links) |
+| --- | --- | --- |
+| criu flags | **no** `--tcp-close`, `--tcp-established` or `--shell-job` — the image is socketless and that is the acceptance criterion | `--tcp-close --shell-job` — the image carries its sockets **by design** |
+| per-message cost | zero added bytes; a raw byte stream | a frame header per message plus retention until acknowledged: 1.1–1.3× on most shapes, **3.0× on `deep_rounds`** |
+| cost at the event | a drain, a seal, coordinator round trips and a lease; window median **0.94 s** | *k* dumps and *k* restores; window median **0.72 s**, and a cut is strictly ~0.85 s per rank |
+| what the application must arrange | `trigger: control` on every rank, a Redis stream coordinator, a batch lease for concurrent cuts | nothing whatsoever — the migration is unannounced and external |
+| the survivor's patience | `max_timeout` is **suspended** per link for the migration; `migration_max_ms` bounds it instead | no suspension: the cut must complete inside plain `max_timeout` (60 s here against cuts of 0.85–3.6 s) |
+| unplanned death | a loud error by design — planned migration only, never fault tolerance | the same: a break with no reconnect is a loud error, not a recovery |
+| what it needs privileged criu for | a time namespace preserving `CLOCK_MONOTONIC` across hosts | the same, for the same reason |
+
+The short version: **both protocols pass the same tests.** The drain buys a socketless image and
+a survivor bound that a long freeze cannot exhaust, and pays for it with a control plane the
+application has to participate in and a per-event cost. The sequenced protocol buys total
+transparency — nothing outside the process needs to know a migration is happening — and pays for
+it in bytes on every message and in images that carry sockets.
