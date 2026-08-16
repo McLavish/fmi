@@ -13,7 +13,10 @@ by path on the restore host.
 Cross-host restore prerequisites, all environmental:
   * identical distro/library versions on every node (criu remaps shared libraries by
     path and content),
-  * criu with cap_checkpoint_restore,cap_sys_ptrace,cap_net_admin file caps (or root),
+  * criu run PRIVILEGED (sudo, as this driver does, or CAP_SYS_ADMIN): a cross-host
+    restore must land in a time namespace preserving CLOCK_MONOTONIC, or every absolute
+    steady_clock deadline in the image is off by the machines' uptime difference and a
+    forward jump expires them all at once,
   * disjoint PID ranges per node (write a distinct base into /proc/sys/kernel/ns_last_pid
     on each node) -- criu restores the dumped PID verbatim, and a restore fails with
     "File exists" if that PID is taken on the destination,
@@ -177,8 +180,13 @@ def checkpoint_restore(cluster, comm, rank, placement, imgdir, restore_policy, r
     """Dump rank where it lives, restore per policy. Updates placement on success."""
     node, pid = placement[rank]
     os.makedirs(imgdir, exist_ok=True)
-    flags = "--unprivileged --tcp-close --shell-job --manage-cgroups=ignore -v4"
-    d = cluster.run(node, f"criu dump {flags} -t {pid} -D {shlex.quote(imgdir)} -o dump.log",
+    # Privileged criu, deliberately (mirrors runbooks/drain-migration/cluster.py): only a
+    # privileged restore creates the time namespace that preserves CLOCK_MONOTONIC across
+    # hosts. The sequenced protocol's deadlines are steady_clock too, so an --unprivileged
+    # cross-host restore onto a machine with a longer uptime expires them all at once; it
+    # only ever looked fine on clusters whose nodes booted together.
+    flags = "--tcp-close --shell-job --manage-cgroups=ignore -v4"
+    d = cluster.run(node, f"sudo criu dump {flags} -t {pid} -D {shlex.quote(imgdir)} -o dump.log",
                     timeout=120)
     if d.returncode != 0:
         log.append(f"dump rc={d.returncode} on {node}: {d.stderr.strip()[:300]}")
@@ -195,7 +203,7 @@ def checkpoint_restore(cluster, comm, rank, placement, imgdir, restore_policy, r
         dest = cluster.nodes[(cluster.nodes.index(node) + 1) % len(cluster.nodes)]
     else:
         dest = rng.choice([n for n in cluster.nodes if n != node] or [node])
-    r = cluster.run(dest, f"cd {shlex.quote(HERE)} && criu restore {flags} "
+    r = cluster.run(dest, f"cd {shlex.quote(HERE)} && sudo criu restore {flags} "
                           f"-D {shlex.quote(imgdir)} -o restore.log -d", timeout=120)
     if r.returncode != 0:
         log.append(f"restore rc={r.returncode} on {dest}: {r.stderr.strip()[:300]}")
@@ -218,14 +226,19 @@ def evacuate_node(cluster, comm, node, placement, imgroot, restore_policy, rng, 
              if n == node and pid_alive(cluster, n, p)]
     if not ranks:
         return None
-    flags = "--unprivileged --tcp-close --shell-job --manage-cgroups=ignore -v4"
+    # Privileged criu, deliberately (mirrors runbooks/drain-migration/cluster.py): only a
+    # privileged restore creates the time namespace that preserves CLOCK_MONOTONIC across
+    # hosts. The sequenced protocol's deadlines are steady_clock too, so an --unprivileged
+    # cross-host restore onto a machine with a longer uptime expires them all at once; it
+    # only ever looked fine on clusters whose nodes booted together.
+    flags = "--tcp-close --shell-job --manage-cgroups=ignore -v4"
     before = {}
     for r in ranks:
         _, pid = placement[r]
         imgdir = os.path.join(imgroot, f"r{r}")
         os.makedirs(imgdir, exist_ok=True)
         before[r] = last_round(outdir, r)
-        d = cluster.run(node, f"criu dump {flags} -t {pid} -D {shlex.quote(imgdir)} "
+        d = cluster.run(node, f"sudo criu dump {flags} -t {pid} -D {shlex.quote(imgdir)} "
                               f"-o dump.log", timeout=120)
         if d.returncode != 0:
             log.append(f"evac dump rank {r} rc={d.returncode} on {node}: "
@@ -243,7 +256,7 @@ def evacuate_node(cluster, comm, node, placement, imgroot, restore_policy, rng, 
         dest = rng.choice([n for n in cluster.nodes if n != node] or [node])
     for r in ranks:
         imgdir = os.path.join(imgroot, f"r{r}")
-        res = cluster.run(dest, f"cd {shlex.quote(HERE)}; criu restore {flags} "
+        res = cluster.run(dest, f"cd {shlex.quote(HERE)}; sudo criu restore {flags} "
                                 f"-D {shlex.quote(imgdir)} -o restore.log -d", timeout=120)
         _, pid = placement[r]
         if res.returncode != 0 or not pid_alive(cluster, dest, pid):
