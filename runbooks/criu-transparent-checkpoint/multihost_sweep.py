@@ -208,6 +208,54 @@ def checkpoint_restore(cluster, comm, rank, placement, imgdir, restore_policy, r
     return True
 
 
+def evacuate_node(cluster, comm, node, placement, imgroot, restore_policy, rng, log, outdir):
+    """The whole-machine analogue of checkpoint_restore: dump EVERY live rank on `node`,
+    and only then restore them all on the destination — the machine is emptied first, so no
+    rank of the moved set ever briefly coexists with a half-moved peer on the old host.
+    Returns rank -> pre-dump round on success, False on a criu failure, None when the node
+    held no live rank (the caller voids the attempt)."""
+    ranks = [r for r, (n, p) in placement.items()
+             if n == node and pid_alive(cluster, n, p)]
+    if not ranks:
+        return None
+    flags = "--unprivileged --tcp-close --shell-job --manage-cgroups=ignore -v4"
+    before = {}
+    for r in ranks:
+        _, pid = placement[r]
+        imgdir = os.path.join(imgroot, f"r{r}")
+        os.makedirs(imgdir, exist_ok=True)
+        before[r] = last_round(outdir, r)
+        d = cluster.run(node, f"criu dump {flags} -t {pid} -D {shlex.quote(imgdir)} "
+                              f"-o dump.log", timeout=120)
+        if d.returncode != 0:
+            log.append(f"evac dump rank {r} rc={d.returncode} on {node}: "
+                       f"{d.stderr.strip()[:200]}")
+            return False
+    for r in ranks:
+        if not wait_pid_gone(cluster, node, placement[r][1]):
+            log.append(f"evac pid {placement[r][1]} still present on {node}")
+            return False
+    if restore_policy == "same":
+        dest = node
+    elif restore_policy == "next":
+        dest = cluster.nodes[(cluster.nodes.index(node) + 1) % len(cluster.nodes)]
+    else:
+        dest = rng.choice([n for n in cluster.nodes if n != node] or [node])
+    for r in ranks:
+        imgdir = os.path.join(imgroot, f"r{r}")
+        res = cluster.run(dest, f"cd {shlex.quote(HERE)}; criu restore {flags} "
+                                f"-D {shlex.quote(imgdir)} -o restore.log -d", timeout=120)
+        _, pid = placement[r]
+        if res.returncode != 0 or not pid_alive(cluster, dest, pid):
+            log.append(f"evac restore rank {r} rc={res.returncode} on {dest}: "
+                       f"{res.stderr.strip()[:200]}")
+            return False
+        placement[r] = (dest, pid)
+    log.append(f"evacuated {node} -> {dest}: ranks {ranks}"
+               + (" (cross-host)" if dest != node else " (same host)"))
+    return before
+
+
 def kill_all(cluster, comm):
     cluster.all_nodes(f"pkill -9 -f {shlex.quote(os.path.basename(SUBJECT) + ' .* ' + comm + ' ')}"
                       " || true")
@@ -263,10 +311,14 @@ def main():
                     help="0 = no checkpointing: a pure multi-host liveness/correctness trial")
     ap.add_argument("--restore", choices=["same", "next", "random"], default="same",
                     help="where a dumped rank is restored, relative to its dump host. "
-                         "'next'/'random' are cross-host and currently UNBACKED: a restored "
-                         "rank keeps advertising the address of the machine it was dumped on, "
-                         "because the hook that dropped the cached address went with the epoch "
-                         "migration runtime. See README.md.")
+                         "'next'/'random' are cross-host: they require advertise_host to be "
+                         "EMPTY in the config, so the restored rank's next registry publish "
+                         "re-derives the address of the machine it actually woke up on "
+                         "(publish_self re-resolves on every publish).")
+    ap.add_argument("--evacuate", action="store_true",
+                    help="each checkpoint event empties a whole NODE: every live rank it "
+                         "hosts is dumped, then all of them are restored on the --restore "
+                         "destination")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--trace", action="store_true",
@@ -336,6 +388,21 @@ def main():
         checkpoints = []
         for k in range(n_ckpt):
             time.sleep(rng.uniform(args.delay_range[0], args.delay_range[1]))
+            if args.evacuate:
+                node = rng.choice(sorted({n for _, (n, _) in placement.items()}))
+                log.append(f"ckpt {k}: evacuating node {node}")
+                result = evacuate_node(cluster, comm, node, placement,
+                                       os.path.join(outdir, f"img{k}"), args.restore,
+                                       rng, log, outdir)
+                if result is None:
+                    log.append(f"ckpt {k}: node {node} had no live ranks (trial is void)")
+                    void = True
+                    continue
+                if result is False:
+                    ok = False
+                    break
+                checkpoints.extend(sorted(result.items()))
+                continue
             target = rng.randrange(npeers)
             node, pid = placement[target]
             if not pid_alive(cluster, node, pid):

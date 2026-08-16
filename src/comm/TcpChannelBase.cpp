@@ -331,20 +331,49 @@ bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long de
             link_suspect_since.size() == num_peers) {
             const long now_ms = steady_now_ms();
             for (Utils::peer_num q = 0; q < num_peers; q++) {
-                if (q == peer || q == peer_id || link_suspect_since[q] == 0 ||
-                    now_ms - link_suspect_since[q] < 1000) {
+                if (q == peer || q == peer_id) {
+                    continue;
+                }
+                // A dead descriptor with an unpaid reconcile debt is suspect BY STATE, not
+                // only by observation: suspicion is normally planted by servicing peeks on
+                // a LIVE fd, so a link that dies while (or right after) its fd closes has
+                // nothing left to plant it — fd=-1 links are invisible to every peek. The
+                // orphan was observed for real: a redial's connect got adopted (which
+                // rightly cleared standing suspicion — a live link existed), its handshake
+                // then failed against a peer mid-restore, and the link settled at fd=-1
+                // rec=1 sus=0 forever while both sides' whole jobs wedged behind it.
+                const bool orphaned = q < sockets.size() && sockets[q] < 0 &&
+                                      q < link_needs_reconcile.size() &&
+                                      link_needs_reconcile[q];
+                if (orphaned && link_suspect_since[q] == 0) {
+                    link_suspect_since[q] = now_ms - 1000;   // eligible immediately
+                }
+                if (link_suspect_since[q] == 0 || now_ms - link_suspect_since[q] < 1000) {
                     continue;
                 }
                 if (q < app_owns_stream.size() && app_owns_stream[q]) {
                     continue;   // the application is mid-frame on it; it is not dead
                 }
-                if (redial_dead_link(q, 250)) {
+                // 2000 ms, not the original 250: the budget must outlive the LISTENER'S
+                // servicing latency, not just the network. A moved rank paying multi-frame
+                // handshake replays cycles its accept queue every few hundred ms; every
+                // dialer whose budget was shorter closed its half-established connect and
+                // redialed, replacing the pending fd the listener was about to answer —
+                // 166 accept-REPLACE churn events in one traced minute, zero completions.
+                if (redial_dead_link(q, 2000)) {
                     link_suspect_since[q] = 0;
                     if (link_trace()) {
                         std::fprintf(stderr, "[lt] REDIALED peer=%u fd=%d\n",
                                      static_cast<unsigned>(q),
                                      q < sockets.size() ? sockets[q] : -2);
                     }
+                } else {
+                    // A FAILED attempt must re-arm, not disqualify: the attempt's own
+                    // bookkeeping (an adopt that lived for a moment, a note_link_replaced)
+                    // may have cleared the suspicion that queued it, and a peer mid-restore
+                    // legitimately needs several tries. Paced at ~500 ms so a genuinely
+                    // gone peer costs a bounded trickle, not a spin.
+                    link_suspect_since[q] = now_ms - 500;
                 }
             }
         }
@@ -361,9 +390,11 @@ bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long de
                     if (q < sockets.size() && sockets[q] >= 0) {
                         ::ioctl(sockets[q], FIONREAD, &avail);
                     }
-                    std::fprintf(stderr, " p%u{fd=%d rq=%d rec=%d}", q,
+                    std::fprintf(stderr, " p%u{fd=%d rq=%d rec=%d sus=%ld}", q,
                                  q < sockets.size() ? sockets[q] : -2, avail,
-                                 q < link_needs_reconcile.size() ? link_needs_reconcile[q] : -1);
+                                 q < link_needs_reconcile.size() ? link_needs_reconcile[q] : -1,
+                                 (q < link_suspect_since.size() && link_suspect_since[q] != 0)
+                                         ? steady_now_ms() - link_suspect_since[q] : -1);
                 }
                 std::fprintf(stderr, " %s\n", transport_state_note().c_str());
             }
@@ -569,7 +600,7 @@ void FMI::Comm::TcpChannelBase::repair_link(Utils::peer_num partner_id) {
 
 void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     check_socket(rcpt_id, link_name(rcpt_id, true));
-    reconcile_if_needed(rcpt_id);
+    reconcile_or_repair(rcpt_id);
     if (!framed) {
         write_all(rcpt_id, buf.buf, buf.len);
         return;
@@ -649,7 +680,7 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         }
     }
     check_socket(sender_id, link_name(sender_id, false));
-    reconcile_if_needed(sender_id);
+    reconcile_or_repair(sender_id);
     if (!framed) {
         read_all(sender_id, buf.buf, buf.len);
         return;
@@ -1315,6 +1346,41 @@ void FMI::Comm::TcpChannelBase::reconcile_if_needed(Utils::peer_num partner_id) 
     }
 }
 
+void FMI::Comm::TcpChannelBase::reconcile_or_repair(FMI::Utils::peer_num partner_id) {
+    // The op-path face of reconcile_if_needed. A handshake or replay write can die exactly
+    // like a frame write (the peer vanished mid-payment — observed as an uncaught Broken
+    // pipe killing a rank during evacuation churn), and it deserves the same answer as
+    // send_object's frame catch: the debt survived (reconcile restores its mark on the
+    // throw path), the repair replaces the link, and the debt is paid on the replacement.
+    try {
+        reconcile_if_needed(partner_id);
+        return;
+    } catch (const Utils::Timeout&) {
+        throw;
+    } catch (const LinkProtocolError&) {
+        throw;
+    } catch (const LinkReplaced&) {
+        // The transport already holds a fresh connection; fall through and pay on it.
+    } catch (const std::exception&) {
+        // Fall through to the repair below.
+    }
+    // The SECOND attempt gets the same protection as the first: an exception thrown from
+    // inside a catch handler is not handled by its sibling clauses, so a repair whose own
+    // handshake died used to escape to the application one level deeper than the failure
+    // this function was written for (adversarial-review finding, confirmed). A second
+    // death leaves the link closed and STILL MARKED (both reconcile_if_needed and the
+    // check_socket pay restore the debt on their throw paths); the next touch of the link
+    // re-establishes and replays, bounded by that op's own deadline.
+    try {
+        repair_link(partner_id);
+    } catch (const Utils::Timeout&) {
+        throw;
+    } catch (const LinkProtocolError&) {
+        throw;
+    } catch (const std::exception&) {
+    }
+}
+
 void FMI::Comm::TcpChannelBase::note_link_replaced(FMI::Utils::peer_num partner_id) {
     if (!recover_links) {
         return;
@@ -1358,7 +1424,14 @@ void FMI::Comm::TcpChannelBase::check_socket(FMI::Utils::peer_num partner_id, co
     if (partner_id < link_needs_reconcile.size() && link_needs_reconcile[partner_id]) {
         link_needs_reconcile[partner_id] = 0;
         ensure_link_state();
-        exchange_handshake(partner_id);
+        try {
+            exchange_handshake(partner_id);
+        } catch (...) {
+            // Same contract as reconcile_if_needed: a payment that died is NOT paid, and
+            // clearing the mark on this path silently cancelled the replay forever.
+            link_needs_reconcile[partner_id] = 1;
+            throw;
+        }
     }
 }
 

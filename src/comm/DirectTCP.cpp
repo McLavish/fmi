@@ -54,6 +54,61 @@ FMI::Comm::DirectTCP::DirectTCP(std::map<std::string, std::string> params,
     // construction, and in the forked test harness the connection must be opened by the
     // process that will use it.
     registry = std::make_unique<PeerRegistry>(registry_host, registry_port);
+    birth_boot_id = read_boot_id();
+}
+
+std::string FMI::Comm::DirectTCP::read_boot_id() {
+    std::string id;
+    if (FILE* f = std::fopen("/proc/sys/kernel/random/boot_id", "r")) {
+        char buf[64] = {};
+        if (std::fgets(buf, sizeof(buf), f) != nullptr) {
+            id = buf;
+            while (!id.empty() && (id.back() == '\n' || id.back() == ' ')) {
+                id.pop_back();
+            }
+        }
+        std::fclose(f);
+    }
+    return id;
+}
+
+bool FMI::Comm::DirectTCP::reset_transport_if_relocated() {
+    if (birth_boot_id.empty()) {
+        return false;
+    }
+    const std::string current = read_boot_id();
+    if (current.empty() || current == birth_boot_id) {
+        return false;
+    }
+    // Restored on a different machine. Contract and rationale on the declaration: wipe the
+    // transport wholesale — the same reset the FT-managed checkpoint hook performed — and
+    // let establishment start over on truth. Sequenced-link state is deliberately kept;
+    // replay over the fresh connections is what recovers the streams, exactly as on the
+    // same-host path.
+    if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
+        std::fprintf(stderr, "[lt] RELOCATION-RESET old_boot=%.8s new_boot=%.8s\n",
+                     birth_boot_id.c_str(), current.c_str());
+    }
+    close_sockets();
+    close_transport_state();
+    // Every link this reset severed must REPLAY when it re-forms. Closing the fds here
+    // bypasses the per-link I/O-error discovery that normally plants the reconcile debt
+    // through repair_link, and a markless re-established link skips its handshake and
+    // replay entirely — the peer then classifies the retained-frames hole as a FATAL
+    // sequence gap (adversarial-review finding, confirmed). Plant the debts wholesale,
+    // exactly as per-link repairs would have.
+    if (recover_links) {
+        if (link_needs_reconcile.size() != num_peers) {
+            link_needs_reconcile.assign(num_peers, 0);
+        }
+        for (Utils::peer_num q = 0; q < num_peers; q++) {
+            if (q != peer_id) {
+                link_needs_reconcile[q] = 1;
+            }
+        }
+    }
+    birth_boot_id = current;
+    return true;
 }
 
 FMI::Comm::DirectTCP::~DirectTCP() {
@@ -125,6 +180,36 @@ void FMI::Comm::DirectTCP::publish_self(long deadline_ms) {
     long remaining = deadline_ms - monotonic_ms();
     if (remaining <= 0) {
         throw Utils::Timeout();
+    }
+    // Re-derived on EVERY publish, never trusted from listener creation: the cached value is
+    // the one piece of transport state that goes stale when a criu image is restored on a
+    // different machine. The listener itself survives relocation — criu re-binds
+    // 0.0.0.0:port wherever the port is free, and the nonce rides in the image — but an
+    // address derived on the dump host sends every higher peer to a machine this process no
+    // longer lives on, while this process waits for their dials on the new one: a mutual
+    // wedge for both sides' full deadlines (observed and traced, baseline@4p, rank 1 moved
+    // between hosts). Re-deriving here heals it at the first post-restore establishment,
+    // and peers pick the corrected entry up on their next registry poll. The probe is two
+    // syscalls ahead of a Redis round trip; with an explicit advertise_host it degenerates
+    // to returning the configured string (which is exactly why cross-host restore requires
+    // advertise_host to be left empty).
+    const std::string current_ip =
+            TcpEndpoint::resolve_advertise_ip(advertise_host, registry_host, registry_port);
+    // Never DOWNGRADE a working advertisement to the last-resort fallback: the probe can
+    // fail transiently (fd exhaustion in a repair storm, a resolver blip when registry_host
+    // is a name) while the publish itself still lands on the already-connected context — a
+    // poisoned loopback entry would send every dialer to its own machine. Adopting the
+    // fallback is right only when nothing better was ever known (single-host dev, where
+    // loopback genuinely is the address). The periodic republish retries the derivation, so
+    // a real relocation still heals on the next pass once the probe succeeds.
+    if (current_ip != advertised_ip &&
+        !(current_ip == "127.0.0.1" && !advertised_ip.empty())) {
+        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
+            std::fprintf(stderr, "[lt] ADVERTISE-MOVED old=%s new=%s port=%u\n",
+                         advertised_ip.c_str(), current_ip.c_str(),
+                         static_cast<unsigned>(listen_port));
+        }
+        advertised_ip = current_ip;
     }
     registry->publish(registry_key(), std::to_string(peer_id),
                       advertised_ip + ":" + std::to_string(listen_port) + ":" +
@@ -484,11 +569,36 @@ bool FMI::Comm::DirectTCP::redial_dead_link(Utils::peer_num partner_id, long bud
         sockets[partner_id] = -1;
     }
     note_link_replaced(partner_id);
+    // Failures here were invisible — REDIALED prints only on success, so a redial that
+    // fails every slice for a whole deadline looks in a trace exactly like a redial that
+    // never ran. One throttled line per outcome makes the rescuer auditable.
+    const bool lt_on = [] {
+        const char* lt = std::getenv("FMI_LINK_TRACE");
+        return lt && lt[0] == '1';
+    }();
     try {
         build_mesh(partner_id, monotonic_ms() + std::max<long>(budget_ms, 50));
     } catch (const Utils::Timeout&) {
+        if (lt_on) {
+            static thread_local long last_rdf_note = 0;
+            const long now = monotonic_ms();
+            if (now - last_rdf_note > 1000) {
+                last_rdf_note = now;
+                std::fprintf(stderr, "[lt] REDIAL-FAIL peer=%u reason=timeout budget=%ld\n",
+                             static_cast<unsigned>(partner_id), budget_ms);
+            }
+        }
         return false;   // not now; pump retries next slice
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        if (lt_on) {
+            static thread_local long last_rde_note = 0;
+            const long now = monotonic_ms();
+            if (now - last_rde_note > 1000) {
+                last_rde_note = now;
+                std::fprintf(stderr, "[lt] REDIAL-FAIL peer=%u reason=%s\n",
+                             static_cast<unsigned>(partner_id), e.what());
+            }
+        }
         return false;
     }
     // establish() pops the pending entry and check_socket stores it plus pays the debt.
@@ -499,6 +609,15 @@ bool FMI::Comm::DirectTCP::redial_dead_link(Utils::peer_num partner_id, long bud
         check_socket(partner_id, link_name(partner_id, true));
         return partner_id < sockets.size() && sockets[partner_id] >= 0;
     }
+    if (lt_on) {
+        static thread_local long last_rdn_note = 0;
+        const long now = monotonic_ms();
+        if (now - last_rdn_note > 1000) {
+            last_rdn_note = now;
+            std::fprintf(stderr, "[lt] REDIAL-FAIL peer=%u reason=no-link-after-mesh\n",
+                         static_cast<unsigned>(partner_id));
+        }
+    }
     return false;
 }
 
@@ -508,6 +627,11 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
         int& depth;
         ~DepthGuard() { --depth; }
     } depth_guard{establishment_depth};
+    // Before touching any transport state: a criu image restored on a different machine
+    // must not build on what it woke up with (see reset_transport_if_relocated). Detecting
+    // it here covers every establishment that STARTS after the restore; the in-loop check
+    // below covers an establishment the freeze landed inside of.
+    reset_transport_if_relocated();
     ensure_listener();
 
     auto have_link = [&](Utils::peer_num rank) {
@@ -527,7 +651,6 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
     std::map<Utils::peer_num, int> unconfirmed;
     long next_connect_attempt = 0;
     long next_publish_attempt = 0;
-    bool published = false;
 
     // One event loop, and it keeps servicing the listener the whole time it waits — accepting
     // from any peer, not just the one we want. That is what makes lazy establishment safe: the
@@ -541,9 +664,10 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             if (now - last_bm_note > 3000) {
                 last_bm_note = now;
                 std::fprintf(stderr,
-                             "[lt] BUILD-MESH-WAIT target=%u dialer=%d pending=%zu unconfirmed=%zu published=%d\n",
+                             "[lt] BUILD-MESH-WAIT target=%u dialer=%d pending=%zu unconfirmed=%zu next_pub_in=%ld\n",
                              static_cast<unsigned>(target), target < peer_id ? 1 : 0,
-                             pending_links.size(), unconfirmed.size(), published ? 1 : 0);
+                             pending_links.size(), unconfirmed.size(),
+                             next_publish_attempt - now);
             }
         }
         if (now >= deadline_ms) {
@@ -554,12 +678,40 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             throw Utils::Timeout();
         }
 
-        // Re-advertise on every establishment, refreshing the key's TTL. A registry that is
-        // briefly unreachable is retried rather than fatal — the deadline above is what ends it.
-        if (!published && now >= next_publish_attempt) {
+        // Re-advertise PERIODICALLY while waiting, never behind a publish-once latch: the
+        // latch was a stack local a criu image preserves, so a rank frozen inside this loop
+        // and restored on a different machine resumed with it already true and kept the
+        // dump host's address in the registry for the establishment's whole remainder — the
+        // one freeze position publish-time re-derivation cannot reach on its own
+        // (adversarial-review finding, confirmed; also the traced evacuation signature:
+        // peers connected to the moved rank while it waited behind the stale entry). A
+        // refresh a second is one HSET against a registry already serving every
+        // establishment's HGETALL polls, and it also renews the TTL for long waits.
+        if (now >= next_publish_attempt) {
+            if (reset_transport_if_relocated()) {
+                // This loop's locals belong to the pre-relocation attempt; the connects in
+                // flight aimed at addresses that meant something on the old machine. Restart
+                // THIS establishment on the fresh transport, same target, same deadline.
+                for (auto& [rank, fd] : unconfirmed) {
+                    (void) rank;
+                    ::close(fd);
+                }
+                unconfirmed.clear();
+                ensure_listener();
+                // The dropped connect was this establishment's only path to a LOWER target:
+                // connect_batch consumed want_connect when it issued it, and nothing refills
+                // the queue once unconfirmed is cleared — without this the loop would
+                // publish and service until its whole deadline with no dial in flight
+                // (adversarial-review finding, confirmed).
+                if (target < peer_id &&
+                    std::find(want_connect.begin(), want_connect.end(), target) ==
+                            want_connect.end()) {
+                    want_connect.push_back(target);
+                }
+            }
             try {
                 publish_self(deadline_ms);
-                published = true;
+                next_publish_attempt = monotonic_ms() + 1000;
             } catch (const std::runtime_error&) {
                 next_publish_attempt = monotonic_ms() + registry_poll_interval_ms;
             }
@@ -663,9 +815,8 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
         if (!want_connect.empty()) {
             budget = std::min<long>(budget, std::max<long>(next_connect_attempt - monotonic_ms(), 1));
         }
-        if (!published) {
-            budget = std::min<long>(budget, std::max<long>(next_publish_attempt - monotonic_ms(), 1));
-        }
+        // The publish is periodic now, so its retry timer always bounds the sleep.
+        budget = std::min<long>(budget, std::max<long>(next_publish_attempt - monotonic_ms(), 1));
         if (!serviced_progress) {
             // The established sockets are out of the poll set this iteration, but the
             // servicing pass must still come back: the staging heuristic judges a frame
