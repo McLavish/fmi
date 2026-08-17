@@ -5,6 +5,9 @@
 #include <thread>
 #include <netinet/tcp.h>
 #include <cmath>
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
 
 FMI::Comm::Direct::Direct(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params) {
     hostname = params["host"];
@@ -24,23 +27,63 @@ FMI::Comm::Direct::Direct(std::map<std::string, std::string> params, std::map<st
 
 void FMI::Comm::Direct::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     check_socket(rcpt_id, comm_name + std::to_string(peer_id) + "_" + std::to_string(rcpt_id));
-    long sent = ::send(sockets[rcpt_id], buf.buf, buf.len, 0);
-    if (sent == -1) {
-        if (errno == EAGAIN) {
+    // send() on a stream socket may accept fewer bytes than it was offered — the kernel's send
+    // buffer is finite, and a large message routinely takes several calls. A single send() whose
+    // short return was only logged left the peer waiting for bytes this rank believed it had
+    // delivered, and the operation completed with a silently truncated message.
+    std::size_t total = 0;
+    while (total < buf.len) {
+        long sent = ::send(sockets[rcpt_id], buf.buf + total, buf.len - total, 0);
+        if (sent > 0) {
+            total += static_cast<std::size_t>(sent);
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // SO_SNDTIMEO lapsed. Report it as a timeout, as before.
             throw Utils::Timeout();
         }
-        BOOST_LOG_TRIVIAL(error) << peer_id << ": Error when sending: " << strerror(errno) ;
+        throw std::runtime_error("FMI: Direct: sending to peer " + std::to_string(rcpt_id) +
+                                 " failed after " + std::to_string(total) + " of " +
+                                 std::to_string(buf.len) + " bytes: " + std::strerror(errno));
     }
 }
 
 void FMI::Comm::Direct::recv_object(channel_data buf, Utils::peer_num sender_id) {
     check_socket(sender_id, comm_name + std::to_string(sender_id) + "_" + std::to_string(peer_id));
-    long received = ::recv(sockets[sender_id], buf.buf, buf.len, MSG_WAITALL);
-    if (received == -1 || received < buf.len) {
-        if (errno == EAGAIN) {
-            throw Utils::Timeout();
+    // MSG_WAITALL does not survive a socket timeout: when SO_RCVTIMEO lapses it returns the bytes
+    // that did arrive rather than the whole message. The previous code logged that case and
+    // returned, handing the caller a partly-filled buffer whose tail was uninitialised — for a
+    // reduction, silently wrong data. Loop instead, and distinguish "nothing arrived" (a timeout)
+    // from "half a message arrived" (a broken link), which are not the same failure.
+    std::size_t total = 0;
+    while (total < buf.len) {
+        long received = ::recv(sockets[sender_id], buf.buf + total, buf.len - total, 0);
+        if (received > 0) {
+            total += static_cast<std::size_t>(received);
+            continue;
         }
-        BOOST_LOG_TRIVIAL(error) << peer_id << ": Error when receiving: " << strerror(errno);
+        if (received == 0) {
+            throw std::runtime_error("FMI: Direct: peer " + std::to_string(sender_id) +
+                                     " closed the connection after " + std::to_string(total) +
+                                     " of " + std::to_string(buf.len) + " bytes");
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (total == 0) {
+                throw Utils::Timeout();
+            }
+            throw std::runtime_error("FMI: Direct: receiving from peer " + std::to_string(sender_id) +
+                                     " stalled after " + std::to_string(total) + " of " +
+                                     std::to_string(buf.len) + " bytes");
+        }
+        throw std::runtime_error("FMI: Direct: receiving from peer " + std::to_string(sender_id) +
+                                 " failed after " + std::to_string(total) + " of " +
+                                 std::to_string(buf.len) + " bytes: " + std::strerror(errno));
     }
 }
 
