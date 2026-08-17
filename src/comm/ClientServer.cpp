@@ -96,9 +96,14 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
         std::vector<bool> applied(num_peers, false);
         auto buffer_length = sendbuf.len;
         std::vector<char> data(buffer_length * num_peers);
-        std::memcpy(reinterpret_cast<void*>(recvbuf.buf), sendbuf.buf, buffer_length);
+        // The root's own contribution belongs at its own rank index, like everyone else's, so the
+        // fold visits all num_peers values in rank order. Seeding the accumulator with it instead
+        // computed f(v_root, v_0, v_1, ...) rather than f(v_0, v_1, ..., v_n-1) — correct only
+        // when root == 0, and wrong at every other root for a reduction that is not commutative,
+        // which is exactly the case left_to_right exists to serve.
+        std::memcpy(reinterpret_cast<void*>(data.data() + root * buffer_length), sendbuf.buf, buffer_length);
         received[root] = true;
-        applied[root] = true;
+        bool seeded = false;
         unsigned int elapsed_time = 0;
         while (elapsed_time < max_timeout && std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; }) ) {
             // Receive all values
@@ -115,7 +120,15 @@ void FMI::Comm::ClientServer::reduce(channel_data sendbuf, channel_data recvbuf,
             bool all_left_applied = true;
             for (int i = 0; i < num_peers; i++) {
                 if (received[i] && !applied[i] && (!left_to_right || all_left_applied)) {
-                    f.f(recvbuf.buf, data.data() + i * buffer_length);
+                    if (!seeded) {
+                        // The lowest-ranked contribution is the accumulator's initial value, not
+                        // an argument to f: a reduction over one value is that value.
+                        std::memcpy(reinterpret_cast<void*>(recvbuf.buf),
+                                    data.data() + i * buffer_length, buffer_length);
+                        seeded = true;
+                    } else {
+                        f.f(recvbuf.buf, data.data() + i * buffer_length);
+                    }
                     applied[i] = true;
                 } else if (!received[i]) {
                     all_left_applied = false;
@@ -147,9 +160,12 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
     std::vector<bool> applied(num_data, false);
     auto buffer_length = sendbuf.len;
     std::vector<char> data(buffer_length * num_data);
-    std::memcpy(reinterpret_cast<void*>(recvbuf.buf), sendbuf.buf, buffer_length);
+    // Same defect as reduce(), and here it bites every rank above 0: this rank's own value is the
+    // HIGHEST index in the scan, so seeding the accumulator with it computed
+    // f(v_peer_id, v_0, ..., v_peer_id-1) instead of f(v_0, ..., v_peer_id).
+    std::memcpy(reinterpret_cast<void*>(data.data() + peer_id * buffer_length), sendbuf.buf, buffer_length);
     received[peer_id] = true;
-    applied[peer_id] = true;
+    bool seeded = false;
     unsigned int elapsed_time = 0;
     while (elapsed_time < max_timeout && std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; }) ) {
         // Receive all values
@@ -164,9 +180,15 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
         }
         // Apply function where possible
         bool all_left_applied = true;
-        for (int i = 0; i < num_peers; i++) {
+        for (int i = 0; i < num_data; i++) {
             if (received[i] && !applied[i] && (!left_to_right || all_left_applied)) {
-                f.f(recvbuf.buf, data.data() + i * buffer_length);
+                if (!seeded) {
+                    std::memcpy(reinterpret_cast<void*>(recvbuf.buf),
+                                data.data() + i * buffer_length, buffer_length);
+                    seeded = true;
+                } else {
+                    f.f(recvbuf.buf, data.data() + i * buffer_length);
+                }
                 applied[i] = true;
             } else if (!received[i]) {
                 all_left_applied = false;
