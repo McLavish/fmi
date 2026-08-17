@@ -948,7 +948,11 @@ static int HPCCG(FMI::Communicator &comm, HPC_Sparse_Matrix *A, const double *co
         waxpby(nrow, 1.0, r, -alpha, Ap, r);
         TOCK(t2); // 2*nrow ops
         niters = k;
-        cout << "Rank " << rank << ": finished iteration " << k << ", residual = " << normr << endl;
+        // Gated like the rank-0 progress line above: an unconditional per-rank cout here is
+        // 149 line-buffered writes inside the timed loop at the default max_iter, polluting
+        // both the timings and any per-process byte accounting.
+        if (k % print_freq == 0 || k + 1 == max_iter)
+            cout << "Rank " << rank << ": finished iteration " << k << ", residual = " << normr << endl;
     }
 
     // Store times
@@ -1075,6 +1079,11 @@ int main(int argc, char **argv) {
             cout << "Time DDOT " << times[1] << endl;
             cout << "Time WAXPBY " << times[2] << endl;
             cout << "Time SPARSEMV " << times[3] << endl;
+            // The two communication phases, accumulated since ever but never reported:
+            // ALLREDUCE is the ddot-internal allreduce time (a subset of Time DDOT), EXCHANGE
+            // the halo exchange. Together they are the transport-sensitive share of the run.
+            cout << "Time ALLREDUCE " << times[4] << endl;
+            cout << "Time EXCHANGE " << times[5] << endl;
 
             cout << "FLOPS Total" << fnops << endl;
             cout << "FLOPS DDOT" << fnops_ddot << endl;
