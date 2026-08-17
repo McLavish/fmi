@@ -176,10 +176,14 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
         elapsed_time += timeout;
         std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
     }
+    // Advance before the throw, as reduce() does. The generation counter names the object keys
+    // this scan used; a timed-out scan has already uploaded under that generation and may have
+    // peers still reading it. Leaving the counter where it was meant the next scan reused the
+    // abandoned generation's keys and read the dead round's values back as live data.
+    num_operations["scan"]++;
     if (std::any_of(applied.begin(), applied.end(), [] (bool v) { return !v; })) {
         throw Utils::Timeout();
     }
-    num_operations["scan"]++;
 }
 
 FMI::Comm::ClientServer::ClientServer(std::map<std::string, std::string> params) {
