@@ -20,11 +20,23 @@ Cross-host restore prerequisites, all environmental:
   * disjoint PID ranges per node (write a distinct base into /proc/sys/kernel/ns_last_pid
     on each node) -- criu restores the dumped PID verbatim, and a restore fails with
     "File exists" if that PID is taken on the destination,
-  * a Redis reachable from every node (the DirectTCP registry): the config's
-    registry_host must NOT be 127.0.0.1 anywhere, or a restored rank would look for the
-    registry on whatever machine it wakes up on,
-  * advertise_host left empty in the config, so each rank advertises the address that
-    routes to the registry from the machine it is currently on.
+  * the address the config's one enabled backend names reachable from every node -- on the
+    TCP planes the Redis peer registry (registry_host), on the store planes the data plane
+    itself (the Redis host, or S3's endpoint_url). Either way it must NOT be 127.0.0.1
+    anywhere, because a restored rank re-dials the address written in its config from
+    whatever machine it wakes up on,
+  * advertise_host left empty in the config (TCP planes only -- the store family has no
+    advertised address), so each rank advertises the address that routes to the registry
+    from the machine it is currently on.
+
+--config selects the data plane, exactly as in sweep.py: fmi.json runs the job over
+DirectTCP, fmi_redis.json over Redis, fmi_s3.json over S3, and the config must enable
+exactly one backend. The store family needs none of the transport-side machinery above:
+there is no listener, no advertised address and no boot-id relocation state, and every poll
+budget is iteration-counted rather than wall-clock, so the cross-host path is structurally
+the single-host one. The two steady_clock members that exist at all -- Redis::dial_not_before
+and S3::failing_since -- matter only under an UNPRIVILEGED cross-host restore, and this
+driver runs criu privileged.
 
 Trial semantics, pass/fail/skip scoring, the checksum contract and the void rules are
 sweep.py's, unchanged. --max-checkpoints 0 turns a trial into a pure multi-host liveness
@@ -60,6 +72,17 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+# The single-host sibling is imported rather than copied, as runbooks/drain-migration/
+# multihost_drain.py imports its own single-host driver. What is reused is the plane logic:
+# data_plane (which backend the config enables), clean_comm and clean_run (what that backend
+# leaves in its store, and how it is removed) and s3_cost_guard. The store-plane cleanup rules
+# are too easy to get subtly wrong to exist twice -- deletion by SCAN rather than KEYS, and the
+# batched s3api delete-objects that replaced an `aws s3 rm --recursive` deleting nothing at all
+# (these keys have no slash, so nothing matched the path prefix it was given).
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import sweep                                                                  # noqa: E402
+
 SUBJECT = os.environ.get("FMI_CHECKPOINT_SUBJECT", os.path.join(
     REPO, "build", "runbooks", "criu-transparent-checkpoint", "fmi_checkpoint_subject"))
 
@@ -69,6 +92,11 @@ PRINT_EVERY = 25
 PAYLOAD_INTS = 1
 SHAPE = "baseline"
 TRACE = False
+# (backend name, its config block); set from --config in main().
+PLANE = ("DirectTCP", {})
+# Every comm_name this invocation uses starts with this, so one pattern cleans a whole
+# invocation and a leak check afterwards is a single --scan.
+RUN_PREFIX = f"mhsw{os.getpid()}-"
 
 # Disjoint pid bands per node, as seeded into /proc/sys/kernel/ns_last_pid. criu restores the
 # dumped pid verbatim, so a pid already taken on the destination is a restore that fails with
@@ -418,11 +446,34 @@ def registry_del(comm, redis_host, redis_port=6379):
                     "DEL", f"fmi:direct:{comm}"], capture_output=True)
 
 
+def clean_comm(comm, redis_host, redis_port=6379):
+    """Remove what a job under this name left in the data plane. Safe to call before it runs."""
+    # The TCP planes are deliberately NOT delegated to sweep.clean_comm: its DirectTCP branch
+    # runs redis-cli with no -h/-p, so on a cluster whose registry is neither on this host nor
+    # on 6379 it deletes the key from the wrong Redis and silently leaves the stale entry the
+    # next trial reads -- the exact bug registry_del's explicit -h/-p was added here to fix.
+    # A drain config is treated the same, which is what this driver has always done.
+    if PLANE[0] in ("DirectTCP", "DrainTCP"):
+        registry_del(comm, redis_host, redis_port)
+    else:
+        # The store planes address their store out of the config block, which is the same block
+        # the ranks read, so there is nothing left to pass in.
+        sweep.clean_comm(comm)
+
+
+def clean_run_prefix():
+    """Remove everything this invocation wrote, whatever became of the individual trials."""
+    # Nothing to sweep up on the TCP planes: the only per-comm key is the registry hash, and
+    # every trial deletes its own.
+    if PLANE[0] not in ("DirectTCP", "DrainTCP"):
+        sweep.clean_run(RUN_PREFIX)
+
+
 def baseline(cluster, npeers, rounds, ms, root, config, redis_host, redis_port=6379):
-    comm = f"mhbase{npeers}x{rounds}x{os.getpid()}"
+    comm = f"{RUN_PREFIX}base{npeers}x{rounds}"
     outdir = os.path.join(root, comm)
     os.makedirs(outdir, exist_ok=True)
-    registry_del(comm, redis_host, redis_port)
+    clean_comm(comm, redis_host, redis_port)
     started = time.monotonic()
     placement = start_job(cluster, comm, npeers, rounds, ms, outdir, config)
     if not wait_for_finish(outdir, npeers, timeout_s=1200):
@@ -438,112 +489,15 @@ def baseline(cluster, npeers, rounds, ms, root, config, redis_host, redis_port=6
               file=sys.stderr)
         sys.exit(1)
     shutil.rmtree(outdir, ignore_errors=True)
+    # The checksums are collected, so what the baseline left in the store is not evidence. On a
+    # store plane it would otherwise sit there for the whole sweep and every later cleanup would
+    # scan past it.
+    clean_comm(comm, redis_host, redis_port)
     return sums, elapsed
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--nodes", nargs="+", required=True,
-                    help="hostnames/IPs of the cluster nodes; ranks go round-robin")
-    ap.add_argument("--ssh-key", default=os.environ.get("FMI_SSH_KEY", ""))
-    ap.add_argument("--ssh-user", default=os.environ.get("FMI_SSH_USER", os.environ.get("USER", "ec2-user")))
-    ap.add_argument("--config", required=True,
-                    help="fmi.json with a cluster-reachable registry_host; see module doc")
-    ap.add_argument("--redis-host", default="",
-                    help="registry host for pre-trial cleanup; default: parsed from --config")
-    ap.add_argument("--trials", type=int, default=20)
-    ap.add_argument("--peers", type=int, nargs="+", default=[4])
-    ap.add_argument("--rounds", type=int, default=40000)
-    ap.add_argument("--ms", type=int, default=0)
-    ap.add_argument("--shape", default=os.environ.get("FMI_SHAPE", "baseline"))
-    ap.add_argument("--print-every", type=int, default=25)
-    ap.add_argument("--payload-ints", type=int, default=1)
-    ap.add_argument("--delay-range", type=float, nargs=2, default=[0.25, 1.2])
-    ap.add_argument("--max-checkpoints", type=int, default=1,
-                    help="0 = no checkpointing: a pure multi-host liveness/correctness trial")
-    ap.add_argument("--restore", choices=["same", "next", "random", "spread"], default="same",
-                    help="where a dumped rank is restored, relative to its dump host. "
-                         "'next'/'random'/'spread' are cross-host: they require advertise_host "
-                         "to be EMPTY in the config, so the restored rank's next registry "
-                         "publish re-derives the address of the machine it actually woke up on "
-                         "(publish_self re-resolves on every publish). 'spread' puts each rank "
-                         "of one event on a DIFFERENT survivor.")
-    ap.add_argument("--evacuate", action="store_true",
-                    help="each checkpoint event empties a whole NODE: every live rank it "
-                         "hosts is dumped, then all of them are restored on the --restore "
-                         "destination")
-    ap.add_argument("--evacuate-node", nargs="+", default=None, metavar="NODE",
-                    help="which node each checkpoint event evacuates, positionally (a node "
-                         "INDEX into --nodes, or a hostname); implies --evacuate and fixes the "
-                         "number of events. An element may name SEVERAL nodes comma-joined "
-                         "('2,3'), which empties both machines in ONE cut: every rank of both "
-                         "is dumped before any of them is restored.")
-    ap.add_argument("--target-rank", nargs="+", type=int, default=None, metavar="RANK",
-                    help="which rank each checkpoint event targets, positionally, instead of a "
-                         "random one; fixes the number of events. Repeat a rank to cut the "
-                         "SAME rank again ('--target-rank 1 1 1').")
-    ap.add_argument("--restore-to", nargs="+", default=None, metavar="NODE",
-                    help="explicit destination per checkpoint event, positionally (index into "
-                         "--nodes, or a hostname); overrides --restore for that event.")
-    ap.add_argument("--exact-checkpoints", action="store_true",
-                    help="perform exactly --max-checkpoints events instead of a random 1..N")
-    ap.add_argument("--place", default=None, metavar="R:NODE,...",
-                    help="explicit placement map, e.g. '0:0,1:1,2:2,3:2,...' (rank : node "
-                         "index). Round-robin never co-locates ring NEIGHBOURS -- it places r "
-                         "and r+len(nodes) together -- so a scenario that needs neighbours on "
-                         "one machine has to say so.")
-    ap.add_argument("--pid-bands", default="default",
-                    help="'default' asserts the campaign's per-node ns_last_pid bands on every "
-                         "launched and restored pid; 'none' disables the assertion")
-    ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--keep", action="store_true")
-    ap.add_argument("--trace", action="store_true",
-                    help="run every rank with FMI_LINK_TRACE=1 (beacon diagnosis)")
-    args = ap.parse_args()
-
-    global PRINT_EVERY, PAYLOAD_INTS, SHAPE, TRACE, PID_BANDS, PLACEMENT_MAP
-    PRINT_EVERY = args.print_every
-    PAYLOAD_INTS = args.payload_ints
-    SHAPE = args.shape
-    TRACE = args.trace
-    if args.pid_bands == "none":
-        PID_BANDS = {}
-    if args.place:
-        PLACEMENT_MAP = {int(k): int(v)
-                         for k, v in (p.split(":") for p in args.place.split(","))}
-    if args.evacuate_node:
-        args.evacuate = True
-
-    if not os.path.exists(SUBJECT):
-        print(f"subject not built at {SUBJECT}", file=sys.stderr)
-        return 2
-    if not os.path.isabs(args.config) or not os.path.exists(args.config):
-        print(f"--config must be an absolute path that exists on every node: {args.config}",
-              file=sys.stderr)
-        return 2
-
-    import json
-    with open(args.config) as f:
-        backend = json.load(f)["backends"]["DirectTCP"]
-    redis_host = args.redis_host or backend["registry_host"]
-    redis_port = int(backend.get("registry_port", 6379))
-    if redis_host in ("127.0.0.1", "localhost"):
-        print("registry_host is loopback -- a restored rank would look for the registry on "
-              "whatever machine it wakes up on; use a cluster-reachable address",
-              file=sys.stderr)
-        return 2
-
-    cluster = Cluster(args.nodes, args.ssh_key, args.ssh_user)
-    for n, res in cluster.all_nodes("echo ok"):
-        if res.returncode != 0 or "ok" not in res.stdout:
-            print(f"cannot ssh to {n}: {res.stderr.strip()}", file=sys.stderr)
-            return 2
-
-    rng = random.Random(args.seed)
-    root = os.path.join(HERE, "sweep", f"mhrun{os.getpid()}")
-    shutil.rmtree(root, ignore_errors=True)
-    os.makedirs(root)
-
+def run(args, cluster, rng, root, redis_host, redis_port):
+    """Take the baselines, then run the trials. Returns the process exit status."""
     expected = {}
     finish_timeout = {}
     for n in args.peers:
@@ -556,10 +510,10 @@ def main():
     passed = failed = skipped = 0
     for trial in range(args.trials):
         npeers = rng.choice(args.peers)
-        comm = f"mh{trial}p{npeers}x{os.getpid()}"
+        comm = f"{RUN_PREFIX}t{trial}p{npeers}"
         outdir = os.path.join(root, comm)
         os.makedirs(outdir, exist_ok=True)
-        registry_del(comm, redis_host, redis_port)
+        clean_comm(comm, redis_host, redis_port)
         log = []
         placement = start_job(cluster, comm, npeers, args.rounds, args.ms, outdir,
                               args.config)
@@ -620,6 +574,7 @@ def main():
 
         if not ok:
             kill_all(cluster, comm)
+            clean_comm(comm, redis_host, redis_port)
             print(f"trial {trial}: SKIP (criu) {' | '.join(log)}")
             skipped += 1
             continue
@@ -633,6 +588,10 @@ def main():
                 failures.append(
                     f"rank {target} logged no round past {before} after its restore")
         kill_all(cluster, comm)
+        # Every verdict below is read out of the rank logs, which --keep preserves; what the
+        # trial left in the store is not evidence and would otherwise sit there for a whole
+        # object_ttl_s, so a long sweep would carry every earlier trial's message history.
+        clean_comm(comm, redis_host, redis_port)
 
         if args.max_checkpoints > 0 and (void or not checkpoints):
             clean = finished and not failures and all(
@@ -666,6 +625,168 @@ def main():
 
     print(f"\n== {passed} passed, {failed} failed, {skipped} skipped (criu) ==")
     return 1 if failed else 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--nodes", nargs="+", required=True,
+                    help="hostnames/IPs of the cluster nodes; ranks go round-robin")
+    ap.add_argument("--ssh-key", default=os.environ.get("FMI_SSH_KEY", ""))
+    ap.add_argument("--ssh-user", default=os.environ.get("FMI_SSH_USER", os.environ.get("USER", "ec2-user")))
+    ap.add_argument("--config", required=True,
+                    help="FMI config the ranks run with, and with it the data plane under test; "
+                         "must enable exactly one backend and name a cluster-reachable address "
+                         "for it; see module doc")
+    ap.add_argument("--redis-host", default="",
+                    help="registry host for pre-trial cleanup on the TCP planes; default: parsed "
+                         "from --config. Ignored on the store planes, whose address IS the "
+                         "config's and cannot be overridden from here")
+    ap.add_argument("--trials", type=int, default=20)
+    ap.add_argument("--peers", type=int, nargs="+", default=[4])
+    ap.add_argument("--rounds", type=int, default=40000)
+    ap.add_argument("--ms", type=int, default=0)
+    ap.add_argument("--shape", default=os.environ.get("FMI_SHAPE", "baseline"))
+    ap.add_argument("--print-every", type=int, default=25)
+    ap.add_argument("--payload-ints", type=int, default=1)
+    ap.add_argument("--delay-range", type=float, nargs=2, default=[0.25, 1.2])
+    ap.add_argument("--max-checkpoints", type=int, default=1,
+                    help="0 = no checkpointing: a pure multi-host liveness/correctness trial")
+    ap.add_argument("--restore", choices=["same", "next", "random", "spread"], default="same",
+                    help="where a dumped rank is restored, relative to its dump host. "
+                         "'next'/'random'/'spread' are cross-host: they require advertise_host "
+                         "to be EMPTY in the config, so the restored rank's next registry "
+                         "publish re-derives the address of the machine it actually woke up on "
+                         "(publish_self re-resolves on every publish). 'spread' puts each rank "
+                         "of one event on a DIFFERENT survivor.")
+    ap.add_argument("--evacuate", action="store_true",
+                    help="each checkpoint event empties a whole NODE: every live rank it "
+                         "hosts is dumped, then all of them are restored on the --restore "
+                         "destination")
+    ap.add_argument("--evacuate-node", nargs="+", default=None, metavar="NODE",
+                    help="which node each checkpoint event evacuates, positionally (a node "
+                         "INDEX into --nodes, or a hostname); implies --evacuate and fixes the "
+                         "number of events. An element may name SEVERAL nodes comma-joined "
+                         "('2,3'), which empties both machines in ONE cut: every rank of both "
+                         "is dumped before any of them is restored.")
+    ap.add_argument("--target-rank", nargs="+", type=int, default=None, metavar="RANK",
+                    help="which rank each checkpoint event targets, positionally, instead of a "
+                         "random one; fixes the number of events. Repeat a rank to cut the "
+                         "SAME rank again ('--target-rank 1 1 1').")
+    ap.add_argument("--restore-to", nargs="+", default=None, metavar="NODE",
+                    help="explicit destination per checkpoint event, positionally (index into "
+                         "--nodes, or a hostname); overrides --restore for that event.")
+    ap.add_argument("--exact-checkpoints", action="store_true",
+                    help="perform exactly --max-checkpoints events instead of a random 1..N")
+    ap.add_argument("--place", default=None, metavar="R:NODE,...",
+                    help="explicit placement map, e.g. '0:0,1:1,2:2,3:2,...' (rank : node "
+                         "index). Round-robin never co-locates ring NEIGHBOURS -- it places r "
+                         "and r+len(nodes) together -- so a scenario that needs neighbours on "
+                         "one machine has to say so.")
+    ap.add_argument("--pid-bands", default="default",
+                    help="'default' asserts the campaign's per-node ns_last_pid bands on every "
+                         "launched and restored pid; 'none' disables the assertion")
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--max-cost", type=float, default=1.0,
+                    help="S3 only: estimated dollars this run may spend before it asks for "
+                         "--yes. The other data planes are free and ignore it")
+    ap.add_argument("--yes", action="store_true",
+                    help="go ahead with an S3 run over --max-cost")
+    ap.add_argument("--trace", action="store_true",
+                    help="run every rank with FMI_LINK_TRACE=1 (beacon diagnosis)")
+    args = ap.parse_args()
+
+    global PRINT_EVERY, PAYLOAD_INTS, SHAPE, TRACE, PID_BANDS, PLACEMENT_MAP, PLANE
+    PRINT_EVERY = args.print_every
+    PAYLOAD_INTS = args.payload_ints
+    SHAPE = args.shape
+    TRACE = args.trace
+    if args.pid_bands == "none":
+        PID_BANDS = {}
+    if args.place:
+        PLACEMENT_MAP = {int(k): int(v)
+                         for k, v in (p.split(":") for p in args.place.split(","))}
+    if args.evacuate_node:
+        args.evacuate = True
+
+    if not os.path.exists(SUBJECT):
+        print(f"subject not built at {SUBJECT}", file=sys.stderr)
+        return 2
+    if not os.path.isabs(args.config) or not os.path.exists(args.config):
+        print(f"--config must be an absolute path that exists on every node: {args.config}",
+              file=sys.stderr)
+        return 2
+
+    PLANE = sweep.data_plane(args.config)   # exits unless exactly one backend is enabled
+    sweep.PLANE = PLANE                     # sweep's cleanup helpers read their own module global
+    name, params = PLANE
+    print(f"data plane: {name} (from {args.config})")
+
+    if name in ("DirectTCP", "DrainTCP"):
+        redis_host = args.redis_host or params["registry_host"]
+        redis_port = int(params.get("registry_port", 6379))
+        if redis_host in ("127.0.0.1", "localhost"):
+            print("registry_host is loopback -- a restored rank would look for the registry on "
+                  "whatever machine it wakes up on; use a cluster-reachable address",
+                  file=sys.stderr)
+            return 2
+    elif name == "Redis":
+        # NOT --redis-host, on purpose: here the store is the data plane, and the address a
+        # restored rank dials is the one in the config its image captured. A flag known only to
+        # the driver would clean one server while the ranks talked to another.
+        if args.redis_host:
+            print("--redis-host is honoured for the TCP planes only; the Redis plane's address "
+                  "is backends.Redis.host from --config")
+        redis_host = str(params.get("host", ""))
+        redis_port = int(params.get("port", 6379))
+        if redis_host in ("", "127.0.0.1", "localhost", "::1"):
+            print(f"backends.Redis.host is {redis_host!r} -- on this plane the store IS the data "
+                  "plane, and a loopback address makes a restored rank talk to whatever machine "
+                  "it woke up on instead of the one holding the job's messages; use a "
+                  "cluster-reachable address", file=sys.stderr)
+            return 2
+    elif name == "S3":
+        endpoint = str(params.get("endpoint_url", ""))
+        if any(h in endpoint for h in ("127.0.0.1", "localhost", "::1")):
+            print(f"backends.S3.endpoint_url is {endpoint!r} -- on this plane the store IS the "
+                  "data plane, and a loopback endpoint makes a restored rank talk to whatever "
+                  "machine it woke up on instead of the one holding the job's objects; use a "
+                  "cluster-reachable endpoint", file=sys.stderr)
+            return 2
+        if not endpoint:
+            print("no endpoint_url: the ranks talk to real AWS, so every node needs credentials "
+                  "for the bucket -- and a criu image keeps the environment it captured, so a "
+                  "restored rank uses the credentials of the machine it was dumped on")
+        else:
+            print("a self-hosted endpoint bills nothing; the estimate below is request volume, "
+                  "not dollars")
+        if not sweep.s3_cost_guard(args, args.yes or bool(endpoint)):
+            return 2
+        # Only clean_comm's TCP branch reads these, and the S3 plane never reaches it.
+        redis_host, redis_port = args.redis_host or "", 6379
+    else:
+        print(f"data plane {name} has no launch/cleanup plumbing in this driver; it drives the "
+              "TCP planes and the store family", file=sys.stderr)
+        return 2
+
+    cluster = Cluster(args.nodes, args.ssh_key, args.ssh_user)
+    for n, res in cluster.all_nodes("echo ok"):
+        if res.returncode != 0 or "ok" not in res.stdout:
+            print(f"cannot ssh to {n}: {res.stderr.strip()}", file=sys.stderr)
+            return 2
+
+    rng = random.Random(args.seed)
+    root = os.path.join(HERE, "sweep", f"mhrun{os.getpid()}")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+
+    try:
+        return run(args, cluster, rng, root, redis_host, redis_port)
+    finally:
+        # However the run ended -- verdicts, a baseline's sys.exit, Ctrl-C -- nothing of
+        # it stays in the store. Every comm_name this invocation used starts with
+        # RUN_PREFIX for exactly that.
+        clean_run_prefix()
 
 
 if __name__ == "__main__":
