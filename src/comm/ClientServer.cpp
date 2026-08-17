@@ -162,9 +162,14 @@ void FMI::Comm::ClientServer::scan(channel_data sendbuf, channel_data recvbuf, r
                 received[i] = true;
             }
         }
-        // Apply function where possible
+        // Apply function where possible.
+        // A scan folds only the ranks at or below this one, so every vector here is sized
+        // num_data (= peer_id + 1), not num_peers. Iterating to num_peers read received[] and
+        // applied[] past their end and folded data.data() + i * buffer_length past the end of a
+        // num_data-sized buffer — an out-of-bounds read whose value went straight into the
+        // reduction result, for every rank except the last.
         bool all_left_applied = true;
-        for (int i = 0; i < num_peers; i++) {
+        for (int i = 0; i < num_data; i++) {
             if (received[i] && !applied[i] && (!left_to_right || all_left_applied)) {
                 f.f(recvbuf.buf, data.data() + i * buffer_length);
                 applied[i] = true;
