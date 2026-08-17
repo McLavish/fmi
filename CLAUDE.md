@@ -479,7 +479,11 @@ reverted when reasoning about "what the checkpointing work cost":
 
 ## Known defects
 
-Confirmed by review, unfixed as of 2026-08-17. Do not rediscover these:
+Confirmed by review, unfixed as of 2026-08-17. Do not rediscover these. `TODO.md` at the repo root
+carries the full work list this is drawn from — 48 items including the structural duplication, the
+dead wire fields, the performance work and the doc corrections. **Both checkpoint-survival
+mechanisms are being kept and benchmarked against each other**, so nothing in `TODO.md` proposes
+dropping either.
 
 - `src/comm/TcpChannelBase.cpp:1088` — `maybe_send_ack` sits outside the enclosing `try` in
   `service_established_links`, and calls `write_all`. An ack whose socket had 1..71 bytes of room
