@@ -21,6 +21,7 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -113,8 +114,10 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     std::printf("rank %u: start pid=%d shape=%s\n", peer_id, (int) ::getpid(), shape->name);
 
+    const auto t_start = std::chrono::steady_clock::now();
     FMI::Communicator comm(peer_id, num_peers, config, comm_name, 128);
     comm.hint(FMI::Utils::Hint::fast);
+    const auto t_ready = std::chrono::steady_clock::now();
 
     unsigned long long checksum = 0;
     try {
@@ -123,7 +126,14 @@ int main(int argc, char** argv) {
         // The shape has already printed which operation disagreed and what it expected.
         return failure.exit_code;
     }
+    const auto t_done = std::chrono::steady_clock::now();
 
-    std::printf("rank %u: DONE rounds=%d checksum=%llu\n", peer_id, params.rounds, checksum);
+    // ctor_ms is Communicator construction (for DrainTCP that includes listener bind and
+    // arming); run_ms is the shape's whole run, lazy link establishment included. Appended
+    // after the checksum so every existing DONE-line regex keeps matching.
+    const double ctor_ms = std::chrono::duration<double, std::milli>(t_ready - t_start).count();
+    const double run_ms = std::chrono::duration<double, std::milli>(t_done - t_ready).count();
+    std::printf("rank %u: DONE rounds=%d checksum=%llu ctor_ms=%.3f run_ms=%.3f\n",
+                peer_id, params.rounds, checksum, ctor_ms, run_ms);
     return 0;
 }
