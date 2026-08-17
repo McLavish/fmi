@@ -4,7 +4,7 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
-#include <aws/s3/model/ListObjectsRequest.h>
+#include <aws/s3/model/ListObjectsV2Request.h>
 #include <cmath>
 
 char TAG[] = "S3Client";
@@ -72,16 +72,38 @@ void FMI::Comm::S3::delete_object(std::string name) {
 
 std::vector<std::string> FMI::Comm::S3::get_object_names() {
     std::vector<std::string> object_names;
-    Aws::S3::Model::ListObjectsRequest request;
-    request.WithBucket(bucket_name);
-    auto outcome = client->ListObjects(request);
-    if (outcome.IsSuccess()) {
-        auto objects = outcome.GetResult().GetContents();
-        for (auto& object : objects) {
+    // Two faults, both silent. S3 returns at most 1000 keys per response and signals the rest with
+    // IsTruncated; a single unpaginated request simply dropped everything past the first page, so
+    // barrier() could not see the markers it was counting and timed out on a job that had in fact
+    // arrived. And listing with no prefix returned every object in the bucket, including those of
+    // unrelated jobs sharing it — barrier() then matched them by suffix and could be satisfied by
+    // another communicator's markers.
+    Aws::S3::Model::ListObjectsV2Request request;
+    request.WithBucket(bucket_name).WithPrefix(comm_name);
+    Aws::String continuation_token;
+    while (true) {
+        if (!continuation_token.empty()) {
+            request.SetContinuationToken(continuation_token);
+        }
+        auto outcome = client->ListObjectsV2(request);
+        if (!outcome.IsSuccess()) {
+            BOOST_LOG_TRIVIAL(error) << "Error when listing objects from S3: " << outcome.GetError();
+            break;
+        }
+        const auto& result = outcome.GetResult();
+        for (const auto& object : result.GetContents()) {
             object_names.push_back(object.GetKey());
         }
-    } else {
-        BOOST_LOG_TRIVIAL(error) << "Error when listing objects from S3: " << outcome.GetError();
+        if (!result.GetIsTruncated()) {
+            break;
+        }
+        continuation_token = result.GetNextContinuationToken();
+        if (continuation_token.empty()) {
+            // Truncated with nothing to resume from: stop rather than reissue the first page
+            // forever.
+            BOOST_LOG_TRIVIAL(error) << "S3 reported a truncated listing with no continuation token";
+            break;
+        }
     }
     return object_names;
 }
