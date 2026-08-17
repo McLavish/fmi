@@ -22,8 +22,10 @@ Nothing here is a regression introduced by the review; these are pre-existing fi
   This is now the highest-value item in the file: it is the evidence that justifies carrying both.
   Wants at minimum: per-message wire overhead and latency at small message sizes (binomial-tree
   collectives fragment down to 4–8 bytes), throughput at large sizes, establishment cost, and
-  migration wall-clock. Note §4.1 first — the missing `writev` costs the sequenced path a whole
-  extra TCP segment per message, so benchmarking before that fix measures the bug, not the design.
+  migration wall-clock. Read §4's first item before interpreting small-message results: the
+  sequenced path spends an extra TCP segment per message on a header/payload write split that is
+  deliberate and not trivially removable, which inflates its small-message cost against drain's.
+  That makes an unfixed run an upper bound on sequenced-path cost rather than a wrong one.
 
 ---
 
@@ -270,13 +272,35 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
 
 ## 4. Performance
 
-- [ ] **No `writev`: every framed message costs two TCP segments.** `src/comm/TcpChannelBase.cpp:520`
-  issues two separate `write_all` calls, header then payload, with `TCP_NODELAY` set
-  unconditionally — so the 72-byte header leaves as its own segment. For the 4–8 byte fragments
-  binomial-tree collectives are made of this roughly doubles packet count. Cheap to fix *because*
-  the retention copy already exists: assemble header+payload into the retained buffer once and
-  issue one `write_all`, or `writev` for the non-retained case. **Do this before §0's benchmark**,
-  or the benchmark measures this bug rather than the design.
+- [ ] **Every framed message costs two TCP segments.** `src/comm/TcpChannelBase.cpp:520` —
+  `write_frame` issues two `write_all` calls, header then payload, with `TCP_NODELAY` set
+  unconditionally, so the 72-byte header leaves as its own segment. For the 4–8 byte fragments
+  binomial-tree collectives are made of, this roughly doubles packet count.
+
+  **The split is deliberate and the obvious fix is wrong.** Do not assemble header and payload into
+  one buffer:
+  - The header is **re-encoded per send**. On replay, `src/comm/TcpChannelBase.cpp:563` rewrites
+    `frame.header.cumulative_ack` to the *current* receive watermark before handing the frame to
+    `write_frame`. `SequencedLink::admit` (`src/comm/SequencedLink.cpp:70`) therefore retains the
+    header as a struct and the payload as bytes, deliberately unencoded. A pre-encoded blob would
+    replay a stale ack — under-reporting the watermark, stalling the peer's retention release, and
+    walking into the binomial-tree deadlock that releasing retention on write-only links exists to
+    prevent.
+  - The first send is **zero-copy on the payload**: `write_frame(rcpt_id, header, buf.buf)`
+    (`:621`, `:646`) sends straight from the application's buffer, not from the retained copy.
+    Assembling into a contiguous buffer would add a full-message memcpy to every send to save one
+    syscall — worse at any size that matters.
+
+  The remedy that preserves both properties is a vectored or coalesced write: `MSG_MORE` on the
+  header write (smallest change — a flag threaded through the existing scalar `write_all` loop) or
+  `writev` with two iovecs. `writev` is the tidier shape but not trivial: `write_all` is a
+  partial-write loop carrying generation and freeze checks, and a vectored version has to advance
+  across an iovec boundary correctly.
+
+  **Weigh this against §0 rather than blocking on it.** It inflates the sequenced path's small-message
+  cost relative to drain's, so a benchmark run before the fix overstates the gap — but it is a fixed
+  per-message overhead, so a run *with* it is still a valid upper bound on sequenced-path cost, and
+  the measurement is worth having either way.
 
 - [ ] **Retention copy is unconditional and unpooled.** `src/comm/SequencedLink.cpp:74` —
   `r.payload.assign(...)` is one heap allocation plus a full payload memcpy into a
