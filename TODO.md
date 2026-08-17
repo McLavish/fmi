@@ -2,7 +2,11 @@
 
 Work items from the `dev` vs `main` growth review of 2026-08-17 (six independent reviews: five
 Claude subsystem passes plus a Codex `gpt-5.6-sol` cross-family pass). Line counts are estimates
-unless marked *measured*.
+unless marked *measured*. A second pass later the same day (15 agents: five subsystem
+accountants, three cross-cutting analysts, six adversarial verifiers, plus another Codex
+`gpt-5.6-sol` sweep) confirmed the totals, added the items marked *(2nd pass)*, and corrected two
+attributions in place: the §2 intro (reparenting `DrainTCP` was not the cause of the duplication)
+and §5's `.text` figure (129 KB is the drain stack's share, not 448 KB).
 
 **Standing decision: both checkpoint-survival mechanisms stay.** The sequenced-link layer
 (retention/replay) and the neighborhood-drain protocol are being kept and benchmarked against each
@@ -132,9 +136,17 @@ Fix regardless of any structural decision. Ordered by severity.
 
 **This section is what the keep-both decision makes mandatory rather than optional.** Two full TCP
 transports are being maintained; the establishment machinery underneath them does not have to be
-duplicated to achieve that. Measured duplication across the whole core is ~520 code lines, and
-roughly 70% of it comes from the single decision that `DrainTCP` derives from `PeerToPeer` rather
-than `TcpChannelBase`.
+duplicated to achieve that. Measured duplication across the whole core is ~450–650 code lines
+(648 implicated, ~447 realistically removable — 2nd-pass count).
+
+**Correction (2nd pass):** an earlier draft blamed ~70% of the duplication on the single decision
+that `DrainTCP` derives from `PeerToPeer` rather than `TcpChannelBase`. That attribution was
+adversarially checked and **refuted**: `TcpChannelBase` contains no listener, registry, dial or
+accept code — all of that lives in the *sibling* `DirectTCP`, behind the pure-virtual
+`establish()`, and `DirectTCP` derives from the base yet still writes every line of it. Reparenting
+`DrainTCP` would recover only `apply_socket_options`, `get_latency`/`get_price` and the model-param
+parse — ~40 lines. The duplication exists because the establishment machinery was never extracted
+into a shared helper; the first item below is the fix regardless of parentage.
 
 - [ ] **Extract a shared registered-TCP endpoint.** ~250–360 lines. The biggest single win.
   A `TcpMeshEndpoint` sibling of the existing `TcpEndpoint`/`PeerRegistry` extraction:
@@ -180,12 +192,36 @@ than `TcpChannelBase`.
   a shared throttle. Note `DirectTCP.cpp` re-reads `getenv` inline at six sites rather than using
   `TcpChannelBase`'s cached `link_trace()`, because that helper is in an anonymous namespace in
   the `.cpp` and unreachable — itself a sign the extraction stopped one step early.
+  *(2nd pass)* Add `SequencedLink.cpp` to the sweep: its trace predicate (`:12`) is identical to
+  `TcpChannelBase.cpp:73` but for the function name, and its blocks plus the `first_int` helper
+  are another ~42 lines. `DirectTCP::redial_dead_link` is the extreme case — 31 of its 55 code
+  lines are trace. Route the two *unconditional* `DRAIN GAP` `fprintf` blocks
+  (`TcpChannelBase.cpp:1034`, `:1288`) through the same gate while there.
 
 - [ ] **Five config-value accessors, four near-identical.** ~38 lines.
   `TcpEndpoint::param_or` (`src/comm/TcpEndpoint.cpp:81`), `RecoverableClientServer::configured`
   (`:18`), `Redis::timeout_param` (`:15`), `S3::required` (`:183`), `S3::numeric_param` (`:192`).
   `timeout_param` and `numeric_param` differ only in clamp-vs-throw and the message prefix;
   `required` and `configured` only in return type.
+
+- [ ] **Intra-file and intra-family clones.** *(2nd pass)* ~250 lines across five files, each pair
+  verified by diffing the spans:
+  - `SequencedLink::accept` re-implements `classify` instead of calling it —
+    `src/comm/SequencedLink.cpp:128-137` is **byte-identical** (comments included) to `:157-166`.
+  - `DrainTCP::send_object`/`recv_object` (`src/comm/DrainTCP.cpp:1068`/`:1157`) are the same
+    per-chunk loop written twice: 58 of send's 61 code lines have a counterpart in recv (draining
+    check, `fd < 0` rebuild with `clock.absorb`, one non-blocking syscall, EINTR/EAGAIN,
+    drain-armed EPIPE/ECONNRESET, `wait_fd`), differing in `::send` vs `::recv` and the EOF
+    branch. One direction-parameterised `move_chunk` helper. ~75 lines.
+  - `TcpChannelBase.cpp` internal: `finish_stage`'s dispatch tail (`:1027`) vs the whole-frame
+    tail in `service_established_links` (`:1281`); `drain_acks`' stage-advance loop (`:132`) vs
+    `read_header_yielding`'s (`:770`); the suspect-mark idiom ×3 (`:1106`, `:1139`, `:1185`); the
+    repair-budget throw ×3 (`:719`, `:782`, `:829`). ~53 excess lines.
+  - `ClientServer::scan`'s fold + `apply_ready` lambdas (`src/comm/ClientServer.cpp:226-252`) are
+    byte-identical to `reduce`'s (`:135-161`) apart from `num_data` vs `num_peers`. ~27 lines.
+  - The retry-under-poll-budget upload loop is written once per store backend
+    (`src/comm/Redis.cpp:268`, `src/comm/S3.cpp:584`) — it belongs next to `poll_attempts` in
+    `RecoverableClientServer` (see the item above). ~15 lines.
 
 - [ ] **Two byte-order helper families with opposite endianness.** ~30 lines.
   `TcpEndpoint::put32/get32/put64/get64` (`src/comm/TcpEndpoint.cpp:12`, big-endian) and
@@ -205,6 +241,15 @@ than `TcpChannelBase`.
   `DrainTCP.cpp:1091` *and* `:1201`; `DrainTCP.h:318` at `DrainTCP.cpp:1029`; `DrainTCP.h:447` at
   `DrainTCP.cpp:1497`; `DrainTCP.h:520` at `DrainTCP.cpp:1410`. Keep the header copy (it is the
   interface contract), reduce the `.cpp` copy to a one-line pointer.
+
+- [ ] **Merge the two Python reduction dispatchers; reconsider the support-header split.**
+  *(2nd pass)* ~46 lines: `get_vec_function` (`python/PythonBindingSupport.h:103-150`) mirrors
+  `get_function` (`:83-101`) branch-for-branch (SUM/PROD/MAX/MIN/CUSTOM), differing only by a
+  `std::transform` wrapper — one dispatch parameterised on the transform collapses it. The header
+  itself is a 154-line verbatim move-and-reformat of 116 lines deleted from
+  `PythonCommunicator.h`, has exactly one includer (the file it came from), and carries one
+  2-token semantic change (`:146`, the CUSTOM-flags fix). Either fold it back (~40 net lines, one
+  fewer file) or give the split a second consumer that justifies it.
 
 ---
 
@@ -236,6 +281,35 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
   production caller (`src/comm/TcpChannelBase.cpp:538`) passes the default `0` and `reconcile()`
   never compares it. The protection is nonfunctional as shipped.
 
+- [ ] **`HandshakePayload::next_send_seq` and `lowest_retained` decide nothing.** *(2nd pass)*
+  **16 wire bytes** of the 56-byte handshake. The *transmitted* copies are read only by the
+  decode-time sanity check of each other (`include/comm/LinkFrame.h:390`, reject if
+  `lowest_retained > next_send_seq`) and a trace line (`src/comm/SequencedLink.cpp:273`);
+  `reconcile()` decides everything from `peer.next_expected_seq` alone. (The *local* methods of
+  the same names are load-bearing for replay — `src/comm/TcpChannelBase.cpp:559` — it is only the
+  wire copies that carry no decision.) With this pair, the incarnation pair and
+  `policy_fingerprint`, 40 of the 56 handshake bytes are dead: only 14 influence any outcome
+  *(measured)*. Either cross-check them against the replay bounds for real, or stop sending them.
+
+- [ ] **`ack_safe_seq` is a shadow of `next_recv`.** *(2nd pass)* ~12 lines plus a wrong class
+  doc. Assigned `= next_recv` at both production write sites (`src/comm/SequencedLink.cpp:147`,
+  `:182`) and zeroed with it (`:106`); the only distinct assignment is the test-only `seed()`
+  (`:306`). Read only by `snapshot()` and the `ack_safe()` accessor — no production caller. The
+  class doc (`include/comm/SequencedLink.h:22`) presents it as an independent "highest seq the
+  peer may prune" watermark, i.e. it documents state the code does not maintain separately.
+  Either maintain it for real (it becomes meaningful the day delivery and durable custody
+  diverge) or delete the member and fix the doc.
+
+- [ ] **The drain coordinator's members hash is write-only in production.** *(2nd pass)* ~74
+  lines plus one Redis round trip per arm and per restore. `publish_member` runs at arm
+  (`src/comm/DrainTCP.cpp:311`) and after every restore (`:1814`), `remove_member` at finalize
+  (`:1337`) — but nothing in `src/` ever calls `DrainCoordinator::members()`; the only reader is
+  a test fake (`tests/drain_migration.cpp:530`), and real peer discovery goes through the
+  transport registry (`lookup_peer` on `fmi:drain:<comm>` — a *different* key from
+  `...:members`). `MemberRecord::encode`/`decode`, `members()` and `members_key()` are dead in
+  production. Either make batch planning read it (the plausible intended consumer) or delete the
+  hash and its three interface slots.
+
 - [ ] **`DrainTCP::LinkState::generation`.** ~20 lines. `include/comm/DrainTCP.h:163` — incremented
   at `src/comm/DrainTCP.cpp:669,1394,1564,1934`, **never read**. Two comments
   (`DrainTCP.h:165`, `DrainTCP.cpp:1149`) assert a generation check that does not exist;
@@ -264,9 +338,15 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
 
 - [ ] **Decide on the test-only API surface.** ~27 lines shipped in production headers and used
   only by `tests/`: `SequencedLink::snapshot`/`seed`, `::ack_safe`, `::known_peer_incarnation`,
-  `LinkFrame::encode_header_checked`, `DrainTCP::set_coordinator_for_testing`,
-  `RedisDrainCoordinator::members` + `MemberRecord::decode`. Not deletions — a decision about
-  whether the production header should advertise them.
+  `LinkFrame::encode_header_checked`, `DrainTCP::set_coordinator_for_testing` (the
+  `RedisDrainCoordinator::members`/`MemberRecord` pair has moved to its own item above). Not
+  deletions — a decision about whether the production header should advertise them.
+
+- [ ] **`S3::note_transient_failure` keeps counters the flag-off path never prints.** *(2nd
+  pass)* ~6 lines. Under `!recover` it increments `consecutive_transient_failures` and stamps
+  `failing_since` "for the log line" (`src/comm/S3.cpp:430`), but the only flag-off transient log
+  prints `describe()` and neither counter (`:475`). Print the count in that warning or stop
+  maintaining the counters flag-off.
 
 ---
 
@@ -341,12 +421,16 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
   `continue`s on a disabled backend *before* `:28` reads its model sub-tree, yet every new config
   carries full `model` entries for backends it never enables — ~20 dead lines × 7 files.
 
-- [ ] **Let a build drop the migration stack while keeping Redis.** *(measured: +448 KB of `.text`
-  for a user who enables none of it.)* `src/comm/Channel.cpp:15`'s factory references every
-  compiled-in backend, so `DrainTCP.cpp.o` (244 KB), `MigrationTrigger.cpp.o` (66 KB) and
-  `DrainCoordinator.cpp.o` (73 KB) link into any application regardless of config. The only escape
-  today is `FMI_ENABLE_REDIS=OFF`, which also removes the Redis channel. Wants either a separate
-  `FMI_ENABLE_DRAIN` option or a registration scheme the linker can prune.
+- [ ] **Let a build drop the migration stack while keeping Redis.** `src/comm/Channel.cpp:15`'s
+  factory references every compiled-in backend, so `DrainTCP.cpp.o` (244 KB on disk),
+  `MigrationTrigger.cpp.o` (66 KB) and `DrainCoordinator.cpp.o` (73 KB) link into any application
+  regardless of config, and drag `Threads::Threads` with them. **Corrected numbers (2nd pass,
+  measured):** those three TUs are ~129 KB of `.text` (~160 KB of allocated sections) at `-O2`;
+  the earlier +448 KB figure is the *whole branch's* static-link `.text` growth, most of which
+  (sequenced links, DirectTCP, store recovery) an `FMI_ENABLE_DRAIN` option would not remove. The
+  only escape today is `FMI_ENABLE_REDIS=OFF`, which also removes the Redis channel. Wants either
+  a separate `FMI_ENABLE_DRAIN` option (~15 lines of CMake plus one `#if`; benchmark builds keep
+  it ON) or a registration scheme the linker can prune.
 
 - [ ] **`FMI_ENABLE_REDIS`'s help string is wrong.** `CMakeLists.txt` — it says "Enable the Redis
   backend" but actually gates hiredis and everything depending on it: `Redis.cpp`, `DirectTCP.cpp`,
@@ -361,6 +445,22 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
 ---
 
 ## 6. Documentation
+
+- [ ] **Trim the comment layer to its contracts.** *(2nd pass)* The single largest non-code cost
+  in the diff: 3,172 of the ~10.7k added core lines are pure comment — 30%, *measured twice
+  independently* (the Claude and Codex sweeps agree within 5 lines) against `main`'s baseline
+  ratio of ~10% (headers: 0.41 comment lines per code line on `main`, 1.42 in the added code).
+  Keep interface contracts and the notes that record measured failures (the 403-vs-404
+  `ListBucket` trap, `requestTimeoutMs` being curl low-speed time, the R9 stall analysis); move
+  incident narrative and rejected alternatives into `docs/superpowers/specs/`. Measured worst
+  offenders: `DrainTCP.h` 424 of 693 lines (61% — and 79% of that prose documents *private*
+  members, e.g. a 19-line essay on one bool parameter at `:338`); `TcpChannelBase.h` 295 comment
+  vs 108 code (seven runs ≥ 12 lines, the longest 33 at `:128`); `TcpChannelBase.cpp` 351;
+  `S3.cpp` 303 of 661; `DirectTCP.cpp` 209; `RecoverableClientServer.cpp` 101 of 226, including
+  a 28-line rationale on a `finalize()` whose recover-path body is empty (`:152`). Realistic
+  reduction: 900–1,200 lines with no information loss — more if §2's header/implementation
+  comment-dedup item lands first. This also corrects the headline growth optics: code-only
+  growth is ~4.6×, not the raw 5.7×.
 
 - [ ] **`DrainTCP.h:26`'s rationale is half false.** It gives two reasons for not deriving from
   `TcpChannelBase`. The first is **true** and is the real constraint: the base's read/write loops
