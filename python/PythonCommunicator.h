@@ -142,8 +142,13 @@ namespace FMI::Utils {
                 func = FMI::Utils::Function<T>([] (T a, T b) { std::transform(a.begin(), a.end(), b.begin(), a.begin(),
                                                                               [] (A a, A b) {return std::min(a,b);}); return a; }, true, true);
             } else if (f.op == CUSTOM) {
+                // The user's declared commutativity/associativity, not true/true. The built-in ops
+                // above really are both, but a custom one is whatever the caller said it is, and
+                // those flags drive algorithm choice and evaluation order. Hardcoding them here
+                // silently treated a non-commutative vector reduction as commutative — the scalar
+                // overload, get_function(), has always passed them through correctly.
                 auto iter = [this, f] (A a, A b) {return extract_object<A>(f.func(a, b));};
-                func = FMI::Utils::Function<T>([iter] (T a, T b) { std::transform(a.begin(), a.end(), b.begin(), a.begin(), iter); return a; }, true, true);
+                func = FMI::Utils::Function<T>([iter] (T a, T b) { std::transform(a.begin(), a.end(), b.begin(), a.begin(), iter); return a; }, f.comm, f.assoc);
             }
             return func;
         }
