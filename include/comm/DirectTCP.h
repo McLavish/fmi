@@ -20,8 +20,10 @@ namespace FMI::Comm {
      * ordinary connect/accept.
      *
      * Establishment costs one Redis round trip to publish, one to discover, and one TCP
-     * handshake per link, all overlapped. The whole mesh is built on first use rather than a
-     * link at a time; see establish().
+     * handshake per link, all overlapped. Only the link actually asked for is built — building
+     * the full mesh up front costs O(num_peers^2) sockets where a binomial-tree collective
+     * touches O(log num_peers) of them, measured as ~1500 sockets per suite run left in
+     * TIME_WAIT. See establish().
      *
      * Not usable behind NAT, or anywhere ranks cannot accept inbound connections (Lambda,
      * Knative scale-from-zero). Those are exactly the cases Direct is for.

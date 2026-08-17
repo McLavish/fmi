@@ -123,11 +123,11 @@ cd build/tests
 ./Boost_Tests_run --list_content                   # list all suites/cases
 ```
 
-Sixteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
+Seventeen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
 `Channels`, `Communicator`, `LinkLayer`, `LinkRecovery`, `LinkLiveness`, `LinkIncarnations`,
 `FramedTransport`, `TransportRecovery`, `OperationIdentity`, `ProtocolValidation`,
 `ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`, `ClientServerRecovery`,
-`S3Backend`, `DrainTransport`.
+`S3Backend`, `DrainTransport`, `DrainMigration`.
 (`tests/client.cpp` is a standalone sample, not a suite, and is not compiled into the binary.)
 `S3Backend` only exists in an `FMI_ENABLE_S3=ON` build, and splits in two: the cases that need a
 working store skip green unless `FMI_S3_TEST_BUCKET` names one (plus optional
@@ -222,13 +222,19 @@ The dependency direction is: user API → channel policy → channel → transpo
     via the downward API — never a Service VIP, which load-balances to an arbitrary pod).
     Otherwise the rank advertises whichever local address routes to the registry.
   - `runbooks/criu-transparent-checkpoint/` freezes an unmodified DirectTCP job raw — no hooks
-    — and survives on the sequenced-link recovery alone. `advertised_ip` and the listener are
-    set once in `ensure_listener()` and only torn down by `close_transport_state()` at
-    finalize/destruction, so a restored process keeps the address and port its image captured.
-    Correct on the machine it was dumped on, wrong on any other, and there is no longer a
-    pre-checkpoint hook that drops them — `Channel::prepare_for_checkpoint` went with the epoch
-    migration runtime that was its only caller. **Treat cross-host restore as unbacked** until
-    something re-establishes it.
+    — and survives on the sequenced-link recovery alone. **Cross-host restore is backed** (commit
+    `dc43beb`), by three mechanisms that replaced the deleted `Channel::prepare_for_checkpoint`
+    hook. `reset_transport_if_relocated()` (`src/comm/DirectTCP.cpp:75`) remembers the kernel boot
+    id the transport was built on; an establishment that finds a different one drops listener,
+    links, registry client and cached advertisement wholesale, and plants a reconcile debt on
+    every severed link so each re-formed connection pays handshake and replay — without the debts
+    the peer classifies the retained-frames hole as a FATAL sequence gap. `publish_self`
+    (`src/comm/DirectTCP.cpp:196`) re-derives the advertised address on *every* publish rather
+    than caching it once, and never downgrades a working address to the loopback fallback on a
+    transient probe failure. Detection runs both at establishment entry and at the publish cadence
+    inside the loop a freeze may land in. Same boot id — a same-host restore — never resets, so
+    the proven path is untouched. Note this requires `advertise_host` to be left **empty**: an
+    explicit one degenerates the probe to returning the configured string.
   - Note `ChannelPolicy` breaks ties by `std::map` order, so `Direct` beats `DirectTCP`
     alphabetically at equal modelled cost — `model.DirectTCP.overhead` is set below `Direct`'s
     to reflect its cheaper connection setup, which is also what makes the policy pick it.
@@ -340,21 +346,35 @@ The dependency direction is: user API → channel policy → channel → transpo
   retention must be released on links the peer never writes back to, or the sender's window
   fills and a binomial tree deadlocks from three ranks up.
   - `LinkFrame`/`SequencedLink` also carry an **incarnation**, a lineage fence distinguishing
-    "the same process, restored" from "a different process now serving this rank". It is
-    permanently `0` today: its producer was the deleted control plane and nothing has replaced
+    "the same process, restored" from "a different process now serving this rank". On this path
+    it is permanently `0`: its producer was the deleted control plane and nothing has replaced
     it, so the field is inert rather than absent — see the comment on
-    `Communicator::incarnation`.
+    `Communicator::incarnation`. All three lineage branches of `SequencedLink::reconcile()` are
+    therefore unreachable (`0 > 0`), which makes `reset_stream()` dead with them, and the pair
+    costs 16 of the 56 handshake bytes. Removing it is ~124 lines, but `Channel::set_incarnation`
+    must survive the cut: **`DrainTCP` overrides it and its incarnation is live**, fencing late
+    leave notices against a restored link (`src/comm/DrainTCP.cpp:353`). The drain runtime is the
+    producer this layer never got.
+  - Three more header fields are inert, and cost wire bytes for nothing: `message_id` (written
+    to the same value as `transport_seq`, read by nothing, 8 bytes), `fragment_index` (never set
+    non-zero anywhere — it implies a fragmentation feature that does not exist, 4 bytes) and
+    `HandshakePayload::policy_fingerprint` (documented as a backend-policy mismatch detector,
+    always defaulted to zero and never compared, 8 bytes). Dropping `message_id` and
+    `fragment_index` takes the frame header from 72 to 56 bytes, still 8-aligned.
 
 - **Store-family recovery** (`include/comm/RecoverableClientServer.h`,
   `src/comm/RecoverableClientServer.cpp`, `src/comm/Redis.cpp`, `src/comm/S3.cpp`): the same idea as the sequenced
   link layer for the other channel family, in the same place in the hierarchy —
-  `RecoverableClientServer` sits between `ClientServer`, which keeps the collective algorithms
-  and is untouched, and the concrete backends, exactly as `TcpChannelBase` sits between
-  `PeerToPeer` and `Direct`/`DirectTCP`. One opt-in flag, `"recover": "true"` on the backend's
+  `RecoverableClientServer` sits between `ClientServer`, which keeps the collective algorithms,
+  and the concrete backends, exactly as `TcpChannelBase` sits between `PeerToPeer` and
+  `Direct`/`DirectTCP`. One opt-in flag, `"recover": "true"` on the backend's
   config block, **off by default**: unset, every override delegates to the base and the keys, the
-  deletes and the byte copies are what the family always wrote. The only flag-off difference
-  anywhere is that a NULL hiredis reply is now a named `std::runtime_error` instead of a null
-  dereference. **Both backends implement the flag.** `Redis` was first; `S3` refused it at
+  deletes and the byte copies are what the family always wrote. Recovery's entire footprint in
+  the base is two hooks — `object_key_prefix()` and `delete_objects()`, both one-liners — so the
+  collective algorithms are untouched *by recovery*. `ClientServer.cpp` did change (+141/-43),
+  independently: see the vanilla bug fixes below. The only flag-off difference
+  in the recovery work itself is that a NULL hiredis reply is now a named `std::runtime_error`
+  instead of a null dereference. **Both backends implement the flag.** `Redis` was first; `S3` refused it at
   construction until it had its own half, because the family half (no deletion) without an S3 half
   is unbounded cost plus silent data loss.
   - Why the store family needs so much less machinery than TCP: all protocol state is
@@ -428,9 +448,104 @@ The dependency direction is: user API → channel policy → channel → transpo
   Because Python is dynamically typed, collective calls take an explicit `fmi.types(...)`
   descriptor and return results directly rather than filling a receive buffer.
 
-`include/fmi.h` is the umbrella header and includes `Communicator.h` and nothing else. The
-ICS'23 paper and the thesis linked from `README.md` are the authoritative design references;
-technical docs are generated with Doxygen (`docs/Doxyfile`, output gitignored).
+`include/fmi.h` is the umbrella header and includes `Communicator.h` and nothing else — it is
+byte-identical to the pre-checkpointing version, and none of the transport/framing/migration
+headers are reachable through it. The ICS'23 paper and the thesis linked from `README.md` are the
+authoritative design references; technical docs are generated with Doxygen (`docs/Doxyfile`,
+output gitignored).
+
+## Correctness fixes carried on this branch
+
+These are repairs to defects that predate the checkpointing work and are unrelated to it. They
+explain diffs in files that otherwise look untouched by the feature, and they must not be
+reverted when reasoning about "what the checkpointing work cost":
+
+- `ClientServer::scan` indexed `received`/`applied` (sized `peer_id + 1`) with a loop to
+  `num_peers`, and folded past the end of the buffer — an out-of-bounds read feeding the
+  reduction result for every rank except the last.
+- `ClientServer::reduce`/`scan` seeded the accumulator with the local value, computing
+  `f(v_root, v0, v1, ...)` instead of `f(v0, ..., v_{n-1})` — wrong at every root ≠ 0, which is
+  exactly the case `left_to_right` exists to serve.
+- `scan` advanced `num_operations["scan"]` *after* its `Timeout` throw, so a timed-out scan left
+  the counter unadvanced and the next scan rewrote the abandoned generation.
+- `Direct::send_object` issued one non-looping `::send` and silently truncated on a partial
+  write; `recv_object` logged and returned with a partly-filled buffer on a short read. Both are
+  fixed by `TcpChannelBase`'s `write_all`/`read_all`.
+- `S3::get_object_names` issued one unpaginated, unprefixed `ListObjectsV2`: silently truncated
+  at 1000 keys and listed every other job's objects in the bucket.
+- The Python binding's `get_vec_function` CUSTOM branch hardcoded commutativity/associativity to
+  `true`, ignoring the user's declared flags — which drive both algorithm choice and evaluation
+  order.
+
+## Known defects
+
+Confirmed by review, unfixed as of 2026-08-17. Do not rediscover these:
+
+- `src/comm/TcpChannelBase.cpp:1088` — `maybe_send_ack` sits outside the enclosing `try` in
+  `service_established_links`, and calls `write_all`. An ack whose socket had 1..71 bytes of room
+  throws while the application waits on a *different* peer, violating the "servicing must not
+  throw" contract stated at `TcpChannelBase.h:89`.
+- `src/comm/DrainTCP.cpp:1610` — if `take_establish_gate()` throws, the catch clears
+  `drain_pending` but not the `draining` flags already set on links that yielded, and rethrows
+  before the outer handler that would `break_every_link`. The parked thread escapes only when
+  `migration_max_ms` (120 s) expires, naming a peer that never migrated.
+- `src/comm/DrainTCP.cpp:1320` — `finalize()` closes peer sockets abruptly and emits no leave
+  event, so a drain-armed peer converts a normal shutdown into a tentative drain, waits
+  `drain_grace_ms`, and dies with "an unplanned death is not recoverable". The same job with
+  `drain: false` ends cleanly. There is no `DrainTCP` equivalent of
+  `TcpChannelBase::drain_links_for_shutdown`.
+- `src/utils/MigrationTrigger.cpp:112` — `forget_in_child()` documents assigning over a
+  possibly inherited-locked mutex but never reconstructs or resets it; `attach`, `detach` and
+  `drain_signal` later lock it. Fork-child deadlock risk.
+- `src/utils/Signals.cpp:6` vs `src/comm/S3.cpp:32` — `suppress_sigpipe()` treats `SIG_IGN` as
+  already owned and leaves it alone; S3 treats both `SIG_DFL` and `SIG_IGN` as unclaimed and
+  installs the SDK handler, replacing a process-global disposition an application chose.
+- `src/comm/Redis.cpp:273` and `:347` — `Utils::BackendFailure` is half-adopted. S3 throws it
+  five times; Redis throws it zero, using plain `std::runtime_error` for the identical
+  conditions, including a length mismatch where S3's matching check *does* throw
+  `BackendFailure`.
+- `src/comm/SequencedLink.cpp:61` — `admit` returns `false` for both "over
+  `max_frame_bytes`" and "window full", so an oversized message burns the full `max_timeout` in
+  `drain_acks` and then throws "at its retention limit with 0 bytes outstanding". Note
+  `link_max_frame_bytes` (16 MiB) is also the one link parameter `parse_tcp_params` does not read
+  from config.
+- `src/comm/TcpChannelBase.cpp:384` — the stuck-rank beacon derives `waited` from a deadline two
+  of its four call sites do not compute that way, so the value is constant and the guard is
+  effectively never satisfiable under the shipped `max_timeout` values.
+- `src/comm/TcpChannelBase.cpp:331` — the orphaned-link redial rescue requires
+  `link_suspect_since.size() == num_peers`, but that vector is only ever sized by the
+  live-fd peek path the rescue exists to substitute for. `ensure_link_state` sizes `links` and
+  three siblings but not this one.
+- `src/comm/DrainTCP.cpp:1149` — two comments assert a `LinkState::generation` check that does
+  not exist. The counter is incremented four times and never read; correctness actually comes
+  from re-reading `l.fd` under the lock.
+- `src/comm/PeerRegistry.cpp:216`, `:273`, `:284` — every failure is reported as
+  `"DirectTCP: registry error: ..."`, including when the caller is `DrainTCP` or
+  `RedisDrainCoordinator`.
+
+## Structural notes for anyone extending this
+
+- **Two mechanisms solve the same problem.** Sequenced links (retention/replay, survives an
+  unplanned death, costs a 72-byte header and a retention copy per message) and neighborhood
+  drain (coordinated quiesce, zero added bytes, any unplanned death is terminal) are independent
+  solutions to surviving a criu freeze. Nothing in the tree yet benchmarks one against the other,
+  so the choice between them is currently an argument rather than a measurement.
+- **`DrainTCP` derives from `PeerToPeer`, not `TcpChannelBase`**, and so re-implements listener
+  bind, registry publish/parse, non-blocking dial, socket options and the cost model — the
+  listener bind block exists three times in the tree, twice inside `DrainTCP.cpp` alone
+  (`ensure_started` and `rebind_listener`). Of the two reasons given at `DrainTCP.h:26`, only the
+  first holds: the base throws `LinkReplaced` and restarts at a frame boundary where drain must
+  resume at a byte offset, which is a genuine conflict — but it constrains only the data path.
+  The second reason (framing/retention cost) is **false as written**: both flags default off and
+  `send_object` branches to `write_all` before any frame work, so an unconfigured
+  `TcpChannelBase` already has a zero-overhead hot path.
+- **A vanilla user links the whole migration stack.** `Channel::get_channel` references every
+  compiled-in backend, so `DrainTCP.cpp.o`, `MigrationTrigger.cpp.o` and `DrainCoordinator.cpp.o`
+  are pulled into any application regardless of config — measured at +448 KB of `.text`. The only
+  way to avoid it is `FMI_ENABLE_REDIS=OFF`, which also removes the `Redis` channel; note that
+  option gates hiredis and *everything* depending on it, not just the Redis backend.
+- Constructing a `DrainTCP` channel starts its control thread even when `drain` is `false`,
+  because `register_channel` calls `set_incarnation`, which calls `ensure_started`.
 
 ## Git Commits
 
