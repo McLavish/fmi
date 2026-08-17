@@ -143,7 +143,10 @@ exercises a rank being frozen while a peer is itself mid-repair.
 ## ClientServer (Redis, S3) data plane
 
 Everything above runs over `DirectTCP`. The store-backed family checkpoints too, by an entirely
-different mechanism, and the same sweep drives it — `--config` chooses the plane:
+different mechanism, and the same sweep drives it — `--config` chooses the plane. (Everything in
+this section is single-host; the four-machine, cross-host-restore evidence for this family is
+the [store-plane cluster campaign](#store-plane-cluster-campaign-clientserver-across-four-machines)
+at the end of this file.)
 
 ```bash
 python3 sweep.py --config fmi_redis.json --trials 20 --peers 2 4 8 --max-checkpoints 3 \
@@ -393,7 +396,10 @@ backed by this; see the multi-host evidence below.
 `multihost_sweep.py` is the multi-machine sibling: ranks spread round-robin over `--nodes` via
 ssh, criu dump/restore driven on whichever host holds the target rank, and `--restore
 same|next|random` choosing whether a dumped rank wakes up on the machine it left or a different
-one. Its module docstring lists the environmental prerequisites (shared checkout at one absolute
+one. Like `sweep.py`, `--config` selects the data plane — the DirectTCP campaign below runs it
+against `fmi_sequenced_multihost.json`, the store-plane campaign at the end of this file against
+`fmi_redis_multihost.json`/`fmi_s3_multihost.json` — and cleanup, the loopback refusal and the
+S3 cost guard all follow the plane the config enables. Its module docstring lists the environmental prerequisites (shared checkout at one absolute
 path, identical library versions, criu file caps, disjoint PID bands per node, a
 cluster-reachable registry, `advertise_host` left empty). `--max-checkpoints 0` turns it into a
 pure multi-host liveness/correctness harness — no freezes, every rank must still reach DONE with
@@ -762,3 +768,280 @@ a survivor bound that a long freeze cannot exhaust, and pays for it with a contr
 application has to participate in and a per-event cost. The sequenced protocol buys total
 transparency — nothing outside the process needs to know a migration is happening — and pays for
 it in bytes on every message and in images that carry sockets.
+
+## Store-plane cluster campaign: ClientServer across four machines
+
+The sequenced parity campaign above put the retention/replay transport through the drain
+protocol's scenario matrix. This section is the **same matrix run against the third
+mechanism** — the store-backed `ClientServer` family under `"recover": true`, the plane the
+[ClientServer section](#clientserver-redis-s3-data-plane) describes — with the ranks spread
+over four machines, criu dumps taken on one machine and restored on another, on both of the
+family's backends: Redis as the data plane, and S3 (MinIO, plus a real-bucket confirmation).
+The question it settles is the same one sentence: this plane passes the same tests too.
+
+### What transfers from the sequenced campaign, and what cannot
+
+The scenarios and the harness transfer whole: `multihost_sweep.py` drives the store planes
+through `--config` since the plane-aware change, and the criu legs are the same privileged
+`--tcp-close --shell-job --manage-cgroups=ignore` (privileged for the same CLOCK_MONOTONIC
+reason — see below). The acceptance criteria 1–6 transfer verbatim: baseline-identical
+checksums, post-restore progress read on the owning machine, rc 0/0, a genuinely changed
+machine, the launch-host pid band, no crash markers. One is added: **nothing leaks** — after
+every block the store is scanned for the sweep's `mhsw*` prefix and must be empty, and its
+dbsize/object count must be back at the pre-block value.
+
+What cannot transfer is every link-layer assertion, because the machinery does not exist
+here: no frames, no sequences, no retention, no replay, no incarnation, and `--trace`
+produces nothing on this plane. There is also nothing like DirectTCP's boot-id relocation
+reset to exercise: the store family holds **no host-bound transport state at all** — no
+listener, no advertised address, a store address that is a config string re-dialed on every
+reconnect, and poll budgets counted in iterations rather than wall clock. The store plane's
+own evidence stands in instead: the mid-outage freeze (E1) and the key-count identity (E2)
+below.
+
+The clock deserves one paragraph, because it is the one place the store family carries
+absolute `steady_clock` state across a freeze: `Redis::dial_not_before` (the post-failed-dial
+backoff) and `S3::failing_since` (the start of a transient-failure run, half of the
+two-bound failure detector). Both are armed only while the store is misbehaving, and both are
+meaningless on a machine with a different monotonic epoch — an unprivileged cross-host
+restore mid-outage could wedge the Redis channel permanently (a stale future `dial_not_before`
+suppresses every later dial) or disable the S3 wall-clock bound. Privileged criu restores
+into a time namespace that preserves CLOCK_MONOTONIC, which makes both behave exactly as a
+same-host freeze; E1 dumps a rank **while the backoff is armed** and restores it on another
+machine to demonstrate that rather than assume it.
+
+### Setup
+
+The same four Rocky 9.8 machines, node order T `10.164.0.3` (8c), N2 `.4`, N1 `.5`, N3 `.6`,
+pid bands 1.0M/1.5M/2.0M/2.5M, criu 3.19 under sudo, kernel `5.14.0-687.31.1+2.1.el9_8_ciq`,
+shared `/scratch/fmi`. 2026-08-17, tree `11e9054` plus the plane-aware `multihost_sweep.py`
+(committed as `runbooks: multihost_sweep drives the store planes too`), subject sha256
+`46054d3e…` (the Redis-enabled build — bit-identical to the sequenced campaign's), S3 subject
+`424853ef…` from `build-s3` against aws-sdk-cpp 1.11.861 installed to `/scratch/aws-sdk-cpp`
+(shared, so criu's library remapping sees identical paths on every node; the subject's RPATH
+resolves it with no per-node configuration). Data planes: cluster Redis 6.2.22 on
+`10.164.0.3:6380` (`fmi_redis_multihost.json` — `timeout 1`, `max_timeout 60000`, `recover`,
+`object_ttl_s 3600`), MinIO on `10.164.0.3:9000` (`fmi_s3_multihost.json` — `timeout 100`,
+`max_timeout 60000`, `recover`, path-style, bucket `fmi-criu-store-campaign`). Drivers:
+`/scratch/cfg/store_*.sh`, logs `/scratch/cfg/storelogs` and `/scratch/cfg/s3logs`.
+
+Rounds were calibrated per (shape, peers) by small 4-machine probes to give 45–90 s jobs.
+Measured ms/round on the Redis plane: baseline 0.06@1p, 7.4@2p, 8.5@3p, 9.6@4p, 12.6@8p,
+16.9@12p; p2p_ring 1.28@4p; collectives_sweep 16.5@4p; noncommutative 7.2@4p; mixed 6.0@4p;
+deep_rounds 1220@4p; variable_payloads(4096 ints) 165@8p; uneven_participation 130@4p. On
+MinIO, where the 100 ms poll interval dominates: baseline 627@2p, 785@4p, 892@8p; p2p_ring
+103@4p; variable_payloads 2225@8p. Campaign rounds: baseline 150000/12000/10500/9000/7000/5000
+at 1/2/3/4/8/12 peers, p2p_ring 70000@4p 52000@8p, collectives_sweep 5400, noncommutative
+12000, mixed 15000@4p 11000@8p, deep_rounds 75, variable_payloads 700@4p 550@8p, uneven 700;
+S3: baseline 100@4p 90@8p, p2p_ring 750, variable_payloads 35. The survivor-patience
+arithmetic these numbers feed: `max_timeout` is 60000 **iterations** of (1 ms sleep + one
+store round trip) on the Redis plane — roughly 80–100 s of patience against cuts measured at
+0.7–3.5 s, a ~25× margin (S3: 60000 ms of consecutive-failure wall clock against the same
+cuts).
+
+### Evidence — R0, the oracle, and one row the sequenced campaign could not have
+
+For every one of the 8 shapes at 4 peers, three runs of identical (shape, peers, rounds,
+payload): single-host on the Redis plane, four-machine on the Redis plane, and single-host on
+**DirectTCP**. **All three checksum dicts are identical for all 8 shapes.** The third run is
+the row this campaign adds: the oracle is proven independent not just of placement but of the
+*data plane itself* — a `ClientServer` binomial fold and a `PeerToPeer` one produce the same
+bytes, which is what makes every cross-plane comparison in this file meaningful (and is the
+property the ordered-reduce fix above restored).
+
+### Evidence — phases B and C on the Redis plane
+
+**65 trials, 65 passed, 0 failed, 0 skipped — 111 cross-host migrations: 53 sequential and 58
+inside 27 cuts. Every criu leg returned 0, every migrated rank was dumped on one machine and
+restored on another (0 same-host destinations), every rank of every trial finished with the
+baseline checksum, and the store scan after every block found 0 leaked keys, dbsize back to
+its pre-block value.**
+
+| scenario | what it moves | trials | migrations | window / cut |
+| --- | --- | --- | --- | --- |
+| B9 peers sweep 1/2/3/4 ranks, one cross-host move each | 1 rank ×8 | 8/8 | 8 | 0.71–0.80 s |
+| B1 one rank N2→N3 | 1 rank | 6/6 | 6 | 0.71–0.72 s |
+| B2 same rank chained N2→N3→N1→N2 | 1 rank ×3 | 3/3 | 9 | 0.60–0.72 s |
+| B3 two ranks in sequence (r0 T→N3, r2 N1→T) | 2 ranks | 4/4 | 8 | 0.74–0.78 s |
+| B4 rank 0 (baseline, p2p_ring) | 1 rank | 6/6 | 6 | 0.73–0.77 s |
+| B5 8 ranks, N1 evacuated sequentially onto T and N2 | 2 ranks | 3/3 | 6 | 0.72–0.77 s |
+| B6 mid-message, 8 ranks (variable_payloads, 4096 ints) | 1 rank | 3/3 | 3 | 0.74–0.79 s |
+| B7 deep_rounds / uneven_participation / mixed | 1 rank ×3 shapes | 6/6 | 6 | 0.71–0.73 s |
+| B8 12 ranks, 3 per machine | 1 rank | 1/1 | 1 | 0.71 s |
+| C0 one-rank-node evacuation (k=1) | 1 rank ×3 | 3/3 | 3 | 0.85–0.87 s |
+| C1 evacuate N1 k=2 → one survivor (T) | 2 ranks ×3 | 3/3 | 6 | 1.76–1.81 s |
+| C2 evacuate N1 k=2 → spread | 2 ranks ×5 | 5/5 | 10 | 1.75–1.79 s |
+| C3 12 ranks, k=3 spread | 3 ranks ×3 | 3/3 | 9 | 2.60–2.63 s |
+| C4 **two machines (N1+N3), k=4, one cut** → spread | 4 ranks ×2 | 2/2 | 8 | 3.42–3.47 s |
+| C5 k=2 mid-message (variable_payloads, 4096 ints) | 2 ranks ×3 | 3/3 | 6 | 1.76–1.80 s |
+| C6 communicating pair co-located (p2p_ring / mixed) | 2 ranks ×2 shapes ×2 | 4/4 | 8 | 1.73–1.76 s |
+| C7 two cuts back to back (N1, then N3) | 2 ranks ×2 cuts ×2 | 2/2 | 8 | 1.71–1.77 s |
+| C8 negative: second batch refused | — | **skipped** | — | no lease, no batch identity, nothing to refuse |
+
+B9-peers1 is the store family's own scenario — a **single-rank job** whose sends and recvs
+round-trip through the store to itself, dumped on T and restored on N2 — and C6 must be read
+honestly: round-robin never co-locates ring neighbours, and on the sequenced plane the
+co-location means mutual retention, both images holding unacked frames for each other. No
+such thing exists here; what C6 tests is two ranks that exchange data through the store
+frozen in one cut, the store still holding every object both were mid-way through, both
+resuming on the same keys. It is kept because it is the matrix, not because it is special
+here — which is itself the point: scenarios that stress the TCP planes' hardest machinery
+are unremarkable on this one.
+
+### The store plane's own evidence: E1 and E2
+
+**E1 — dumped mid-outage, restored cross-host, outage held over the restore.** Four ranks,
+one per machine; at t+15 s an iptables DROP on 6380 opens an outage on every rank at once
+(DROP rather than REJECT or SIGSTOP on purpose: only a dial that fails after the full
+`connect_timeout_ms` arms `dial_not_before` — a stopped redis-server still completes
+handshakes from its listen backlog, and a REJECT fails in microseconds and arms a ~0 window).
+With rank 1's log on N2 showing the armed path — `Redis: could not connect to
+10.164.0.3:6380: Connection timed out`, `could not GET …_bcast_… (waiting out the poll
+budget)` — it was dumped on N2 (rc 0), restored on N3 (rc 0) **still inside the outage**, and
+the outage held 5 s more over the restored process. Outage closed: all four ranks `DONE`
+with the baseline checksums, the restored rank logged 360 round lines after its restore, and
+no `Timeout`/`BackendFailure` anywhere. That is the `dial_not_before` hazard exercised at its
+worst — armed at dump, evaluated after a cross-host restore — and behaving exactly as a
+same-host freeze, which is what the privileged restore's time namespace is for.
+
+**E2 — key-count identity, the store plane's replay oracle.** Under `recover` a job deletes
+nothing, so the objects a run leaves ARE its write history. A clean 2-rank run and an
+identical run whose rank 1 was dumped on N2 and restored on N3 mid-run both left **exactly
+66000 keys** (5.5 writes/rank/round × 2 ranks × 6000 rounds — the same per-round write rate
+measured on the real bucket above), with identical checksums: the restored rank re-issued its
+writes to the *same* keys, byte-for-byte the same store history a never-frozen run produces.
+
+### The S3 leg — MinIO on the cluster, then a real bucket
+
+The same harness and criteria against the family's other backend, on the `build-s3` subject
+(aws-sdk-cpp 1.11.861 from the shared prefix): MinIO on `10.164.0.3:9000`, `minioadmin`
+credentials in each node's own `~/.aws`, a per-block object-count check in place of the key
+scan. A reduced matrix, since the plane's machinery is the family's — what S3 adds is the
+much heavier client (curl pool, CRT event-loop threads, multi-second per-request timeouts),
+and that client is exactly what the freeze has to carry.
+
+**17 trials, 17 passed, 0 failed, 0 skipped — 26 cross-host migrations. Checksums identical
+to each block's baseline throughout; R0's solo and 4-machine dicts identical for both shapes
+run; the bucket's object count back to 0 after every block.** Windows 0.72–0.78 s single,
+1.74–1.78 s at k=2, 3.50–3.52 s at k=4 — the same profile as the Redis plane and the
+sequenced protocol, on a plane whose rounds are ~80× more expensive (785 ms at 4 peers, the
+100 ms poll interval dominating). A free cross-plane bonus: the `variable_payloads`
+calibration probes on MinIO and on the Redis plane, identical parameters, produced identical
+checksum dicts — the oracle holds across the family's two backends as well.
+
+| scenario | trials | migrations | window / cut |
+| --- | --- | --- | --- |
+| R0 solo vs 4-machine (baseline, p2p_ring) | 2 clean + 2 solo | — | checksums identical |
+| B1 one rank N2→N3 | 3/3 | 3 | 0.74–0.78 s |
+| B4 rank 0, dumped on T | 3/3 | 3 | 0.76–0.77 s |
+| B6 mid-message (variable_payloads, 4096 ints, 8 ranks) | 3/3 | 3 | 0.72–0.74 s |
+| C0 one-rank-node evacuation (k=1) | 3/3 | 3 | 0.85–0.86 s |
+| C2 evacuate N1 k=2 → spread | 3/3 | 6 | 1.74–1.78 s |
+| C4 two machines, k=4, one cut | 2/2 | 8 | 3.50–3.52 s |
+
+**The one environmental failure of the whole campaign, and what it teaches.** The first pass
+of B4/B6/C2/C4 skipped 10 trials, every one a criu `restore rc=1` naming the same fact:
+`File usr/lib64/libssl.so.3.5.5 has bad size 1040024 (expect 1039984)`. Installing the AWS
+SDK's build dependencies that morning had pulled openssl `3.5.5-6` onto T while the nodes
+still had `-5`, and the S3 subject — unlike the Redis one, which maps no libssl and sailed
+through the whole Redis matrix — carries libssl in every image. Node↔node moves kept
+passing; only T↔node moves failed, in both directions. That is the harness docstring's
+"identical library versions on every node" prerequisite demonstrating itself with a precise
+signature, and criu refusing loudly rather than remapping approximately. Aligning
+`openssl-libs` across the four machines (sha256-identical afterwards) and re-running the
+four blocks produced the 11/11 in the table.
+
+**E1-S3 — dumped mid-outage (MinIO firewalled), restored cross-host, outage held over the
+restore.** The S3 twin of E1, exercising `S3::failing_since` — the armed wall-clock half of
+the transient-failure bound — across the machine change: outage opened by an iptables DROP
+on 9000 at t+20 s, rank 1 dumped on N2 (rc 0) and restored on N3 (rc 0) inside it, outage
+held 4 s more, then closed, all well inside the 60 s failure budget. All four ranks `DONE`
+with the baseline checksums, the restored rank logged all 100 of its round lines, no
+`BackendFailure`, bucket clean afterwards.
+
+**E2-S3 — object-count identity.** A clean 2-rank run and an identical run whose rank 1 was
+dumped on N2 and restored on N3 both left **exactly 660 objects** (5.5 per rank per round —
+the same rate every store on every plane of this family has measured) with identical
+checksums `84030 / 25770`, themselves the very numbers the MinIO tier-1 table above recorded
+for these parameters on one machine.
+
+**The real bucket (2026-08-17).** The same account, bucket and lifecycle rule as the
+single-host tier-2 evidence above (`fmi-criu-sweep-323756936843-eu-central-1`, rule
+`expire-sweep-objects` confirmed live — a test PUT came back stamped with its expiry), driven
+by the same harness with short-lived login credentials distributed to every node for the
+duration of the leg and removed after it. A probe measured ~1.15 s/round at 2 peers from this
+cluster (GCP Frankfurt to AWS Frankfurt), against which the leg was sized to fit inside one
+session token's lifetime — which it did, with minutes to spare. **B1 (one rank N2→N3) 3/3,
+windows 0.74 s; C2 (N1 evacuated, k=2, spread onto T and N2) 1/1, cut 1.76 s — 5 cross-host
+migrations against AWS itself, every rank finishing on the baseline checksums, KeyCount 0
+after every block.** The cost guard priced the leg at $0.05 before it ran ($0.03 + $0.02,
+read as a lower bound per the estimate note above). What this adds over MinIO is what only
+AWS can: real request signing against a real region, the SDK's own retry/redirect stack, and
+credentials that genuinely expire — the leg's ranks carried a session token that died minutes
+after the last trial passed.
+
+### Wall clock
+
+| | |
+| --- | --- |
+| one rank: the whole window, dump start → restored and running | min 0.60, **median 0.73**, max 0.80 s over all 53 single-rank migrations |
+| a cut, first dump → last rank running | 0.85–0.87 s at k=1 (3), 1.71–1.81 s at k=2 (19), 2.60–2.63 s at k=3 (3), **3.42–3.47 s at k=4** (2) |
+| the Redis matrix, calibration + R0 + B + C | 42 invocations, 2 h 08 min of block time |
+| store cleanup | included in the numbers above — a trial's scan-and-delete of ~50–120k keys costs a few seconds and runs between trials |
+
+Identical shape to the sequenced protocol's table — 0.73 s median window against its 0.72 s,
+cuts linear in k at ~0.86 s per rank against its ~0.85 s — which is what "the migration event
+is criu, not the protocol" predicts: the store plane adds nothing to the event, exactly as
+the sequenced plane adds almost nothing. Where they differ is steady state, and this
+campaign's calibration is the measurement: a baseline round is 9.6 ms on the Redis plane
+against ~1.9 ms sequenced (README above) — the store plane pays ~5× per operation for its
+migration costing nothing to arrange.
+
+### Invocations
+
+```bash
+cd /scratch/fmi/runbooks/criu-transparent-checkpoint
+NODES="10.164.0.3 10.164.0.4 10.164.0.5 10.164.0.6"      # T, N2, N1, N3
+CFG=/scratch/cfg/fmi_redis_multihost.json                # == the committed fmi_redis_multihost.json
+
+# R0 -- one shape's triple oracle (Redis solo, Redis 4-machine, DirectTCP solo)
+python3 multihost_sweep.py --nodes 10.164.0.3 --config $CFG --trials 0 --peers 4 --rounds 9000
+python3 multihost_sweep.py --nodes $NODES --config $CFG --trials 1 --max-checkpoints 0 --peers 4 --rounds 9000
+python3 multihost_sweep.py --nodes 10.164.0.3 --config /scratch/cfg/fmi_sequenced_multihost.json \
+        --trials 0 --peers 4 --rounds 9000
+
+# B2 -- the same rank cut three times, N2 -> N3 -> N1 -> N2
+python3 multihost_sweep.py --nodes $NODES --config $CFG --trials 3 --peers 4 --rounds 9000 \
+        --restore next --target-rank 1 1 1 --restore-to 3 2 1 --delay-range 2 8
+
+# C4 -- two machines emptied in ONE cut, k=4, onto the other two
+python3 multihost_sweep.py --nodes $NODES --config $CFG --trials 2 --peers 8 --rounds 7000 \
+        --evacuate-node 2,3 --restore spread --seed 2
+
+# the S3 leg is the same invocations against fmi_s3_multihost.json with the build-s3 subject:
+FMI_CHECKPOINT_SUBJECT=/scratch/fmi/build-s3/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject \
+python3 multihost_sweep.py --nodes $NODES --config /scratch/cfg/fmi_s3_multihost.json \
+        --trials 3 --peers 4 --rounds 100 --restore next --target-rank 1 --restore-to 3 --print-every 1 --yes
+```
+
+### What was skipped, and why
+
+**C8 (lease refusal)** — skipped for the same reason the sequenced campaign skipped it: there
+is no lease, no batch identity and no coordinator on this plane; a second concurrent cut is
+simply more dumps, and C7 already runs that. And there is deliberately no analogue of the
+sequenced campaign's traced-reconnect table: `FMI_LINK_TRACE` traces a link layer this plane
+does not have. E1's armed-backoff log lines and E2's key-count identity are the evidence this
+plane can honestly produce.
+
+### Store plane vs sequenced, one paragraph
+
+Both passed the same matrix on the same machines. The sequenced protocol buys its
+transparency with machinery — frames, retention, replay, an incarnation fence — and pays per
+message; a freeze is survivable because the transport can reconstruct what the break
+destroyed. The store plane buys it with *absence*: there is nothing to reconstruct because
+nothing protocol-critical ever lived outside the process image and the store — every poll
+budget is an iteration counter criu restores byte-exact, every command is idempotent, and
+the one thing a freeze does destroy (the connection to the store) is rebuilt by an ordinary
+reconnect that dials a config string. It pays instead in steady state, one store round trip
+per operation. The migration event itself belongs to criu either way: ~0.73 s a rank,
+~0.86 s a rank in cuts, on both planes, and on both TCP alternatives before them.
