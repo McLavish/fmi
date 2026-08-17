@@ -360,7 +360,14 @@ The dependency direction is: user API → channel policy → channel → transpo
     non-zero anywhere — it implies a fragmentation feature that does not exist, 4 bytes) and
     `HandshakePayload::policy_fingerprint` (documented as a backend-policy mismatch detector,
     always defaulted to zero and never compared, 8 bytes). Dropping `message_id` and
-    `fragment_index` takes the frame header from 72 to 56 bytes, still 8-aligned.
+    `fragment_index` takes the frame header from 72 to 56 bytes, still 8-aligned. The 56-byte
+    handshake is thinner than it looks, too: the transmitted `next_send_seq`/`lowest_retained`
+    pair is read only by a decode-time sanity check of each other (`LinkFrame.h:390`) and a trace
+    line — `reconcile()` decides from `next_expected_seq` alone (the *local* methods of those
+    names are load-bearing for replay; only the wire copies decide nothing) — so with the
+    incarnation pair and `policy_fingerprint` dead, only 14 of the 56 bytes influence any
+    outcome. Relatedly, `ack_safe_seq` is assigned `= next_recv` at both production write sites,
+    so the separate "safe to prune" watermark `SequencedLink.h` documents is not maintained.
 
 - **Store-family recovery** (`include/comm/RecoverableClientServer.h`,
   `src/comm/RecoverableClientServer.cpp`, `src/comm/Redis.cpp`, `src/comm/S3.cpp`): the same idea as the sequenced
@@ -480,10 +487,10 @@ reverted when reasoning about "what the checkpointing work cost":
 ## Known defects
 
 Confirmed by review, unfixed as of 2026-08-17. Do not rediscover these. `TODO.md` at the repo root
-carries the full work list this is drawn from — 48 items including the structural duplication, the
-dead wire fields, the performance work and the doc corrections. **Both checkpoint-survival
-mechanisms are being kept and benchmarked against each other**, so nothing in `TODO.md` proposes
-dropping either.
+carries the full work list this is drawn from — including the structural duplication, the dead
+wire fields, the performance work, the doc corrections, and the items a same-day second-pass
+review added (marked *(2nd pass)* there). **Both checkpoint-survival mechanisms are being kept and
+benchmarked against each other**, so nothing in `TODO.md` proposes dropping either.
 
 - `src/comm/TcpChannelBase.cpp:1088` — `maybe_send_ack` sits outside the enclosing `try` in
   `service_established_links`, and calls `write_all`. An ack whose socket had 1..71 bytes of room
@@ -526,6 +533,11 @@ dropping either.
 - `src/comm/PeerRegistry.cpp:216`, `:273`, `:284` — every failure is reported as
   `"DirectTCP: registry error: ..."`, including when the caller is `DrainTCP` or
   `RedisDrainCoordinator`.
+- `src/comm/DrainCoordinator.cpp:96`/`:101` — the members hash is write-only in production:
+  `publish_member` runs at arm (`DrainTCP.cpp:311`) and after every restore (`:1814`), but
+  nothing in `src/` calls `members()` — discovery goes through the transport registry via
+  `lookup_peer`. Its only reader is a test fake, so `MemberRecord::decode` and `members()` are
+  dead and each publish is a wasted Redis round trip.
 
 ## Structural notes for anyone extending this
 
@@ -534,20 +546,29 @@ dropping either.
   drain (coordinated quiesce, zero added bytes, any unplanned death is terminal) are independent
   solutions to surviving a criu freeze. Nothing in the tree yet benchmarks one against the other,
   so the choice between them is currently an argument rather than a measurement.
-- **`DrainTCP` derives from `PeerToPeer`, not `TcpChannelBase`**, and so re-implements listener
+- **`DrainTCP` derives from `PeerToPeer`, not `TcpChannelBase`**, and re-implements listener
   bind, registry publish/parse, non-blocking dial, socket options and the cost model — the
   listener bind block exists three times in the tree, twice inside `DrainTCP.cpp` alone
-  (`ensure_started` and `rebind_listener`). Of the two reasons given at `DrainTCP.h:26`, only the
-  first holds: the base throws `LinkReplaced` and restarts at a frame boundary where drain must
-  resume at a byte offset, which is a genuine conflict — but it constrains only the data path.
-  The second reason (framing/retention cost) is **false as written**: both flags default off and
-  `send_object` branches to `write_all` before any frame work, so an unconfigured
-  `TcpChannelBase` already has a zero-overhead hot path.
+  (`ensure_started` and `rebind_listener`). Do not blame the parenting choice for most of that:
+  `TcpChannelBase` owns none of the establishment plumbing (no listener, registry, dial or
+  accept — all of it lives in the sibling `DirectTCP`, behind the pure-virtual `establish()`),
+  so deriving from the base would have recovered only `apply_socket_options`, the cost-model
+  getters and the model-param parse, ~40 lines. The ~160–240 genuinely duplicated lines exist
+  because establishment was never extracted into a shared helper (TODO §2); reparenting is not
+  the fix. Of the two reasons given at `DrainTCP.h:26`, only the first holds: the base throws
+  `LinkReplaced` and restarts at a frame boundary where drain must resume at a byte offset,
+  which is a genuine conflict — but it constrains only the data path. The second reason
+  (framing/retention cost) is **false as written**: both flags default off and `send_object`
+  branches to `write_all` before any frame work, so an unconfigured `TcpChannelBase` already has
+  a zero-overhead hot path.
 - **A vanilla user links the whole migration stack.** `Channel::get_channel` references every
   compiled-in backend, so `DrainTCP.cpp.o`, `MigrationTrigger.cpp.o` and `DrainCoordinator.cpp.o`
-  are pulled into any application regardless of config — measured at +448 KB of `.text`. The only
-  way to avoid it is `FMI_ENABLE_REDIS=OFF`, which also removes the `Redis` channel; note that
-  option gates hiredis and *everything* depending on it, not just the Redis backend.
+  are pulled into any application regardless of config — those three TUs measure ~129 KB of
+  `.text` (~160 KB of allocated sections) at `-O2`. (The +448 KB figure previously quoted here is
+  the *whole branch's* static-link `.text` growth — sequenced links, DirectTCP and store recovery
+  included — most of which no config or drain-only build option would remove.) The only way to
+  avoid it is `FMI_ENABLE_REDIS=OFF`, which also removes the `Redis` channel; note that option
+  gates hiredis and *everything* depending on it, not just the Redis backend.
 - Constructing a `DrainTCP` channel starts its control thread even when `drain` is `false`,
   because `register_channel` calls `set_incarnation`, which calls `ensure_started`.
 
