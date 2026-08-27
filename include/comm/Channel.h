@@ -100,12 +100,33 @@ namespace FMI::Comm {
         //! Helper utility to set the communicator name, should be set before first collective operation to avoid conflicts with empty communicator name.
         void set_comm_name(std::string communication_name) {comm_name = communication_name; }
 
-        //! Which lineage of this rank the channel belongs to; see SequencedLink::set_incarnation.
+        //! Which lineage of this rank the channel belongs to. Default: ignore it.
         /*!
-         * A no-op for backends that keep no per-link state across a process replacement.
-         * Transports that do (the sequenced TCP link layer) use it to tell a restored peer,
-         * which they must reconcile with, from a replacement peer, which they must start
-         * again with, from a superseded one, which they must refuse.
+         * READ THIS BEFORE DELETING THIS VIRTUAL OR ITS CALL IN
+         * Communicator::register_channel. The name is now misleading in a way that has already
+         * caught people out, and the two things it does are unrelated:
+         *
+         *  - As a lineage tag it is vestigial. The sequenced link layer used to carry an
+         *    incarnation in its handshake to tell a restored peer (reconcile) from a replacement
+         *    (start again) from a superseded one (refuse). Nothing ever produced a non-zero
+         *    value — the control plane that did was deleted and never replaced — so every
+         *    comparison was 0 against 0, and wire version 4 removed the field. TcpChannelBase no
+         *    longer overrides this at all.
+         *
+         *  - For DrainTCP it is the ARMING HOOK, and it is load-bearing. register_channel calls
+         *    it last, after peer_id/num_peers/comm_name, so it is the first instant a channel may
+         *    legally bind a listener and publish itself. DrainTCP::set_incarnation therefore
+         *    calls ensure_started(), which binds the listener, publishes to the registry, starts
+         *    the control thread and attaches the MigrationTrigger. Its incarnation is separately
+         *    live — bumped on every restore and carried in DrainTCP's OWN once-per-connection
+         *    hello (DrainProtocol.h ResumeRecord), which has nothing to do with LinkFrame.h;
+         *    DrainTCP includes neither LinkFrame.h nor SequencedLink.h. It fences a late leave
+         *    notice against a link that already belongs to a newer lineage.
+         *
+         * So removing this virtual, or the register_channel call, does not tidy away dead
+         * lineage plumbing: it silently disarms drain migration, deferring the listener bind to
+         * the first data-path call. A compute-bound rank then stops answering dials before its
+         * first collective, and is absent from the registry when its peers look for it.
          */
         virtual void set_incarnation(std::uint64_t) {}
 

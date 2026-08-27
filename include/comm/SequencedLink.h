@@ -168,46 +168,24 @@ namespace FMI::Comm {
 
         // ---- (re-)establishment ------------------------------------------------------
 
-        //! Which lineage of the local rank owns this link state (contract 3).
-        /*!
-         * Set once, before the link carries anything, by whatever supplies the rank's lineage.
-         * A process restored from a checkpoint never re-enters this path, so it keeps the
-         * incarnation its image was taken with — which is precisely the property that lets its
-         * peers tell "restored, reconcile" from "replaced, start again".
-         *
-         * NOTE: nothing supplies a non-zero lineage today. The epoch protocol that used to
-         * claim one per process was removed and no coordinator has replaced it, so every
-         * process presents 0 and only the same-lineage branch of reconcile() is reachable.
-         * The field stays on the wire (frame_wire_version 3) so a decentralised coordinator
-         * can populate it without a format change.
-         */
-        void set_incarnation(std::uint64_t value) { local_incarnation = value; }
-        [[nodiscard]] std::uint64_t incarnation() const { return local_incarnation; }
-        [[nodiscard]] std::uint64_t known_peer_incarnation() const { return peer_incarnation; }
-
-        [[nodiscard]] HandshakePayload local_handshake(std::uint64_t policy_fingerprint = 0) const;
+        [[nodiscard]] HandshakePayload local_handshake() const;
 
         //! Adopt the peer's cumulative ack and reject impossible states loudly.
         /*!
-         * Also decides, from the incarnation pair, *which* peer this is:
-         *   same lineage    — reconcile sequences, replay the unacked suffix (the CRIU case);
-         *   newer lineage   — the peer restarted from nothing, so this side starts again too;
-         *   older lineage   — the peer has already been replaced and is a zombie: refused.
-         * Refusing the last one is the whole point of the incarnation. A zombie's sequences
-         * are internally consistent, so nothing else in the handshake can tell it apart from
-         * the legitimate peer.
+         * The peer's next_expected_seq doubles as a cumulative ack, which is what reconciles
+         * two ranks whose final acks crossed while the link was down. It is refused when it
+         * names a sequence this side never produced, or one already pruned from retention —
+         * both impossible states rather than recoverable ones.
+         *
+         * Wire version 4 removed the lineage arm of this function along with the incarnation
+         * pair it read. It distinguished "restored, reconcile" from "replaced, start again",
+         * but nothing ever produced a non-zero incarnation, so every comparison was 0 against
+         * 0 and only the path below was reachable. Restoring that behaviour means restoring a
+         * producer first; see the note on HandshakePayload.
          *
          * @param error set to a human-readable reason when the handshake is rejected.
          */
         bool reconcile(const HandshakePayload& peer, std::string& error);
-
-        //! Forget everything about the stream, keeping the configuration and the incarnations.
-        /*!
-         * What "the peer restarted" means for link state: its counters are back at zero, so
-         * ours must be too, and the frames we still hold for its predecessor are owed to a
-         * process that no longer exists.
-         */
-        void reset_stream();
 
         // ---- checkpoint / replacement seeding ----------------------------------------
 
@@ -232,8 +210,6 @@ namespace FMI::Comm {
         std::uint64_t acked_to_peer = 0;
 
         // identity (contract 3)
-        std::uint64_t local_incarnation = 0;
-        std::uint64_t peer_incarnation = 0;
         struct Committed {
             FrameHeader header;
             std::vector<char> payload;

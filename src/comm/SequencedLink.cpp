@@ -27,8 +27,8 @@ namespace {
 
 namespace {
     //! Snapshot format tag. Bumped whenever the serialization below changes shape.
-    //! '2' added the incarnation pair.
-    constexpr char snapshot_version = '2';
+    //! '2' added the incarnation pair; '3' removed it again with wire version 4.
+    constexpr char snapshot_version = '3';
 }
 
 bool FMI::Comm::SequencedLink::send_blocked() const {
@@ -93,20 +93,6 @@ bool FMI::Comm::SequencedLink::ack_due(std::uint64_t interval) const {
         return next_recv > acked_to_peer;
     }
     return next_recv >= acked_to_peer + interval;
-}
-
-void FMI::Comm::SequencedLink::reset_stream() {
-    FMI_LTRACE("RESET_STREAM send=%llu recv=%llu retained=%zu lanes=%zu/%zu",
-               (unsigned long long) next_send, (unsigned long long) next_recv,
-               retention.size(), lanes[0].size(), lanes[1].size());
-    next_send = 0;
-    retention.clear();
-    retention_bytes = 0;
-    next_recv = 0;
-    ack_safe_seq = 0;
-    acked_to_peer = 0;
-    lanes[0].clear();
-    lanes[1].clear();
 }
 
 void FMI::Comm::SequencedLink::on_ack(std::uint64_t cumulative) {
@@ -219,14 +205,11 @@ std::size_t FMI::Comm::SequencedLink::pending(Lane lane) const {
 }
 
 FMI::Comm::HandshakePayload
-FMI::Comm::SequencedLink::local_handshake(std::uint64_t policy_fingerprint) const {
+FMI::Comm::SequencedLink::local_handshake() const {
     HandshakePayload h;
     h.next_send_seq = next_send;
     h.next_expected_seq = next_recv;
     h.lowest_retained = lowest_retained();
-    h.policy_fingerprint = policy_fingerprint;
-    h.incarnation = local_incarnation;
-    h.peer_incarnation = peer_incarnation;
     return h;
 }
 
@@ -234,30 +217,6 @@ bool FMI::Comm::SequencedLink::reconcile(const HandshakePayload& peer, std::stri
     if (peer.wire_version != frame_wire_version) {
         error = "handshake wire version mismatch";
         return false;
-    }
-    // Lineage before sequences: a fresh incarnation's counters are legitimately zero, and the
-    // sequence checks below would read that as a peer which had forgotten what we still owe.
-    if (peer.incarnation < peer_incarnation) {
-        error = "peer claims incarnation " + std::to_string(peer.incarnation)
-                + " which incarnation " + std::to_string(peer_incarnation)
-                + " has already superseded";
-        return false;
-    }
-    if (peer.peer_incarnation > local_incarnation) {
-        // The peer has already reconciled with a later incarnation of *this* rank, so this
-        // process is the zombie. It must not be allowed to serve the rank alongside its
-        // replacement.
-        error = "peer is talking to incarnation " + std::to_string(peer.peer_incarnation)
-                + " of this rank, but this process is incarnation "
-                + std::to_string(local_incarnation);
-        return false;
-    }
-    if (peer.incarnation > peer_incarnation) {
-        // The peer restarted from nothing. A delivery obligation is owed to a lineage, not to
-        // a rank number, so what we retained for its predecessor is discharged, not replayed.
-        reset_stream();
-        peer_incarnation = peer.incarnation;
-        return true;
     }
     if (peer.next_expected_seq > next_send) {
         error = "peer expects sequence " + std::to_string(peer.next_expected_seq)
@@ -284,8 +243,7 @@ bool FMI::Comm::SequencedLink::reconcile(const HandshakePayload& peer, std::stri
 
 std::string FMI::Comm::SequencedLink::snapshot() const {
     std::ostringstream out;
-    out << snapshot_version << ' ' << next_send << ' ' << next_recv << ' ' << ack_safe_seq
-        << ' ' << local_incarnation << ' ' << peer_incarnation;
+    out << snapshot_version << ' ' << next_send << ' ' << next_recv << ' ' << ack_safe_seq;
     return out.str();
 }
 
@@ -296,16 +254,14 @@ bool FMI::Comm::SequencedLink::seed(const std::string& blob) {
     if (!in || version != snapshot_version) {
         return false;
     }
-    std::uint64_t send = 0, recv = 0, safe = 0, mine = 0, theirs = 0;
-    in >> send >> recv >> safe >> mine >> theirs;
+    std::uint64_t send = 0, recv = 0, safe = 0;
+    in >> send >> recv >> safe;
     if (!in) {
         return false;
     }
     next_send = send;
     next_recv = recv;
     ack_safe_seq = safe;
-    local_incarnation = mine;
-    peer_incarnation = theirs;
     // Nothing has been told to the peer over the link this state is being seeded onto.
     acked_to_peer = 0;
     return true;

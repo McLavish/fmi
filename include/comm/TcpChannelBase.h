@@ -51,8 +51,6 @@ namespace FMI::Comm {
 
         void finalize() override;
 
-        void set_incarnation(std::uint64_t value) override;
-
     protected:
         //! Establish a connection to exactly @p partner_id.
         /*!
@@ -254,9 +252,6 @@ namespace FMI::Comm {
 
         //! Commits between standalone acks. Zero means "ack whenever anything is outstanding".
         std::uint32_t link_ack_interval = 32;
-
-        //! The lineage of this rank that owns the link state; see SequencedLink::set_incarnation.
-        std::uint64_t local_incarnation = 0;
 
         //! Offer this end's link state on a fresh link and replay what it owes. Reads nothing.
         void exchange_handshake(Utils::peer_num partner_id);

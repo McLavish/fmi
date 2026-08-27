@@ -357,7 +357,6 @@ BOOST_AUTO_TEST_CASE(handshake_payload_roundtrips) {
     h.next_send_seq = 12;
     h.next_expected_seq = 7;
     h.lowest_retained = 5;
-    h.policy_fingerprint = 0xDEADBEEFULL;
 
     std::vector<char> buf(handshake_bytes);
     encode_handshake(h, buf.data());
@@ -366,7 +365,6 @@ BOOST_AUTO_TEST_CASE(handshake_payload_roundtrips) {
     BOOST_CHECK_EQUAL(d.next_send_seq, 12u);
     BOOST_CHECK_EQUAL(d.next_expected_seq, 7u);
     BOOST_CHECK_EQUAL(d.lowest_retained, 5u);
-    BOOST_CHECK_EQUAL(d.policy_fingerprint, 0xDEADBEEFULL);
 }
 
 // ------------------------------------------------------ snapshot / seed

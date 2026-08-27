@@ -28,6 +28,8 @@ namespace FMI {
         c->set_peer_id(peer_id);
         c->set_num_peers(num_peers);
         c->set_comm_name(comm_name);
+        // Must stay last, and must stay: for DrainTCP this call is the arming hook that starts
+        // the control thread, not lineage bookkeeping. See Channel::set_incarnation.
         c->set_incarnation(incarnation);
         channels[name] = c;
     }
