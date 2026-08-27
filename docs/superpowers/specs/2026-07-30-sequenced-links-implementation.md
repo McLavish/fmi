@@ -303,7 +303,7 @@ be found by a wedge:
   the peer just declared it holds, so skipping it is correct. This hazard predates R9 (any
   nested pump with a different skip could reach the prune) but the POLLOUT rule made it
   routine.
-- **A full 72-byte peek that fails to decode marks the link suspect.** The same bytes will
+- **A full header-sized peek that fails to decode marks the link suspect.** The same bytes will
   be there forever — waiting cannot realign a stream — so servicing hands the link to the
   aged redial (dialer side) while the application's own read of the same bytes throws loudly
   and repairs (listener side). Before this, a desynchronised link wedged silently for the

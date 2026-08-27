@@ -100,6 +100,17 @@ hit.
 
 Every DATA frame carries:
 
+> **As built, this table diverges from the shipped header — see `include/comm/LinkFrame.h`.**
+> `run_id`, `fragment_offset` and `fragment_length` were never implemented. The transport shipped
+> a `fragment_index` instead, which is exactly what the normative paragraph below rejects, and a
+> `payload_length` alongside `total_length`. Since no fragmentation feature ever landed, all of
+> that was dead weight, and `frame_wire_version` 4 removed it: `message_id`, `fragment_index`,
+> `total_length` and every padding byte are gone, `payload_length` absorbed the length term of the
+> identity, and the header is **42 bytes** rather than the 72 it grew to. The handshake lost
+> `policy_fingerprint` and the incarnation pair in the same change and is **30 bytes**. The
+> identity tuple this document argues for — lane, op_kind, collective_index, root, reduce_flags,
+> length — is intact and unchanged; only the fields nothing read were removed.
+
 | Field | Width | Meaning |
 |---|---|---|
 | `wire_version` | u16 | Protocol generation. A framed rank must never pair with a raw one. |

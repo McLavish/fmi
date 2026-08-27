@@ -39,7 +39,7 @@ Fix regardless of any structural decision. Ordered by severity.
 
 - [ ] **Servicing can throw out of `pump`, naming the wrong peer.**
   `src/comm/TcpChannelBase.cpp:1088` — `maybe_send_ack` sits outside the enclosing `try` and calls
-  `write_all`. An ack whose socket had 1..71 bytes of room raises while the application is waiting
+  `write_all`. An ack whose socket had 1..41 bytes of room raises while the application is waiting
   on a *different* peer, violating the "servicing must not throw" contract stated at
   `include/comm/TcpChannelBase.h:89`. Fix: `try{}catch(...){}` around the call.
 
@@ -257,39 +257,40 @@ into a shared helper; the first item below is the fix regardless of parentage.
 
 Under 1% of the added code *(measured)*, but concentrated and load-bearing on the wire.
 
-- [ ] **The incarnation lineage fence on the sequenced path.** ~124 lines + **16 wire bytes** of
-  the 56-byte handshake. Permanently `0` — its producer was the deleted control plane. All three
-  lineage branches of `SequencedLink::reconcile()` are unreachable (`0 > 0`), which makes
-  `reset_stream()` (`src/comm/SequencedLink.cpp:98`) dead with them. Spans
-  `include/comm/LinkFrame.h:324`, `include/comm/SequencedLink.h:171`,
-  `src/comm/SequencedLink.cpp:98,228,238,307`, `include/comm/TcpChannelBase.h:258`,
-  `src/comm/TcpChannelBase.cpp:45`, `include/comm/Channel.h:103`, `include/Communicator.h:190`,
-  `src/Communicator.cpp:31`.
-  **Keep `Channel::set_incarnation`** — `DrainTCP` overrides it (`src/comm/DrainTCP.cpp:353`) and
-  its incarnation is live, fencing late leave notices against a restored link. Only the
-  Communicator→Channel plumbing and the sequenced-side machinery go. A future lineage coordinator
-  should reintroduce a complete feature rather than keep half of a removed one alive indefinitely.
+- [x] **The incarnation lineage fence on the sequenced path.** **DONE** in `frame_wire_version` 4.
+  Removed along with `reset_stream()` and the ten-case `LinkIncarnations` suite that exercised it;
+  `snapshot_version` went `2` → `3`. It was correct code with no producer: permanently `0`, so all
+  three lineage branches of `SequencedLink::reconcile()` were unreachable.
+  **`Channel::set_incarnation` was kept, and the reason is stronger than this entry stated.** The
+  advice to drop "the Communicator→Channel plumbing" would have been a live bug: for `DrainTCP`
+  the plumbing *is* the override, and the override is its **arming hook** — it calls
+  `ensure_started()`, which binds the listener, publishes to the registry, starts the control
+  thread and attaches the `MigrationTrigger`. Dropping `src/Communicator.cpp:31` would defer all
+  of that to the first data-path call, so a compute-bound rank stops answering dials before its
+  first collective and is missing from the registry when peers look for it. Both sites now carry
+  comments saying so.
 
-- [ ] **`message_id` and `fragment_index`.** ~10 lines, **12 wire bytes**, header **72 → 56**
-  (still 8-aligned, no padding needed) — a **22% per-message header reduction** for about ten
-  lines of work. `message_id` (`include/comm/LinkFrame.h:96`) is written twice to the same value
-  as `transport_seq` and read by nothing; `fragment_index` (`:97`) is never set to a non-zero
-  value anywhere and implies a fragmentation feature the library does not have.
+- [x] **`message_id` and `fragment_index`.** **DONE** in `frame_wire_version` 4, and the cut went
+  further than this entry proposed: `total_length` (redundant with `payload_length` on every frame
+  a producer can emit — its identity role moved to `payload_length`), both reserved holes and the
+  tail padding went too. Header **72 → 42 bytes, a 41.7% per-message reduction**, with every
+  remaining byte carrying a field. A `static_assert` on `header_field_bytes` now pins the encoder's
+  widths to the size constant — necessary, because the pad loop that was silently absorbing any
+  under-write is gone.
 
-- [ ] **`HandshakePayload::policy_fingerprint`.** ~5 lines, **8 wire bytes**.
-  `include/comm/LinkFrame.h:323` — documented as a backend-policy mismatch detector; the only
-  production caller (`src/comm/TcpChannelBase.cpp:538`) passes the default `0` and `reconcile()`
-  never compares it. The protection is nonfunctional as shipped.
+- [x] **`HandshakePayload::policy_fingerprint`.** **DONE** in `frame_wire_version` 4, together with
+  the handshake's 2 reserved bytes and the incarnation pair: handshake **56 → 30 bytes**.
 
 - [ ] **`HandshakePayload::next_send_seq` and `lowest_retained` decide nothing.** *(2nd pass)*
-  **16 wire bytes** of the 56-byte handshake. The *transmitted* copies are read only by the
-  decode-time sanity check of each other (`include/comm/LinkFrame.h:390`, reject if
-  `lowest_retained > next_send_seq`) and a trace line (`src/comm/SequencedLink.cpp:273`);
+  **16 wire bytes** of the now 30-byte handshake. The *transmitted* copies are read only by the
+  decode-time sanity check of each other (`include/comm/LinkFrame.h`, reject if
+  `lowest_retained > next_send_seq`) and a trace line (`src/comm/SequencedLink.cpp`);
   `reconcile()` decides everything from `peer.next_expected_seq` alone. (The *local* methods of
-  the same names are load-bearing for replay — `src/comm/TcpChannelBase.cpp:559` — it is only the
-  wire copies that carry no decision.) With this pair, the incarnation pair and
-  `policy_fingerprint`, 40 of the 56 handshake bytes are dead: only 14 influence any outcome
-  *(measured)*. Either cross-check them against the replay bounds for real, or stop sending them.
+  the same names are load-bearing for replay — it is only the wire copies that carry no decision.)
+  Of the 30 remaining bytes, 8 carry reconciliation semantics and 22 can only reject a malformed
+  handshake. Either cross-check them against the replay bounds for real, or stop sending them.
+  Kept in the version 4 cut deliberately: this is a once-per-connection record, so the bytes buy
+  nothing measurable, and they are the only structural check on a peer that is lying.
 
 - [ ] **`ack_safe_seq` is a shadow of `next_recv`.** *(2nd pass)* ~12 lines plus a wrong class
   doc. Assigned `= next_recv` at both production write sites (`src/comm/SequencedLink.cpp:147`,
@@ -354,7 +355,7 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
 
 - [ ] **Every framed message costs two TCP segments.** `src/comm/TcpChannelBase.cpp:520` —
   `write_frame` issues two `write_all` calls, header then payload, with `TCP_NODELAY` set
-  unconditionally, so the 72-byte header leaves as its own segment. For the 4–8 byte fragments
+  unconditionally, so the 42-byte header leaves as its own segment. For the 4–8 byte fragments
   binomial-tree collectives are made of, this roughly doubles packet count.
 
   **The split is deliberate and the obvious fix is wrong.** Do not assemble header and payload into
@@ -481,8 +482,10 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
 - [ ] **Stale API docs in `DirectTCP.h`.** `:145` documents an `expect_sender` parameter the
   signature does not have; `:121` has two leftover summary lines for `accept_one`.
 
-- [ ] **`LinkFrame.h:72`** claims `encode_header_checked()` "asserts the two agree" — it contains
-  no assertion (`:224`).
+- [x] **`LinkFrame.h`'s header-size comment** claimed `encode_header_checked()` "asserts the two
+  agree" when it contained no assertion. **DONE** in `frame_wire_version` 4: `encode_header` now
+  returns the bytes written, `encode_header_checked` asserts on them, and a `static_assert` pins
+  `header_field_bytes` to `frame_header_bytes` at compile time.
 
 - [ ] **`PeerRegistry.h:18`** describes itself as "a minimal Redis client for the peer registry",
   but lines 74–190 (`xadd`, `tail_id`, `xread_after`, `set_nx_px`, `del_if_equal`, ~117 lines, 40%

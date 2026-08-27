@@ -123,11 +123,13 @@ cd build/tests
 ./Boost_Tests_run --list_content                   # list all suites/cases
 ```
 
-Seventeen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
-`Channels`, `Communicator`, `LinkLayer`, `LinkRecovery`, `LinkLiveness`, `LinkIncarnations`,
+Sixteen suites, one per file under `tests/`, the suite name being the file name in CamelCase:
+`Channels`, `Communicator`, `LinkLayer`, `LinkRecovery`, `LinkLiveness`,
 `FramedTransport`, `TransportRecovery`, `OperationIdentity`, `ProtocolValidation`,
 `ProtocolEdgeCases`, `ProtocolFuzz`, `CheckpointFreezePoints`, `ClientServerRecovery`,
 `S3Backend`, `DrainTransport`, `DrainMigration`.
+(`LinkIncarnations` was removed with `frame_wire_version` 4: all ten of its cases exercised the
+incarnation lineage fence, which no longer exists.)
 (`tests/client.cpp` is a standalone sample, not a suite, and is not compiled into the binary.)
 `S3Backend` only exists in an `FMI_ENABLE_S3=ON` build, and splits in two: the cases that need a
 working store skip green unless `FMI_S3_TEST_BUCKET` names one (plus optional
@@ -345,28 +347,50 @@ The dependency direction is: user API → channel policy → channel → transpo
   only advance once a payload is in the application's buffer (not at header parse), and
   retention must be released on links the peer never writes back to, or the sender's window
   fills and a binomial tree deadlocks from three ranks up.
-  - `LinkFrame`/`SequencedLink` also carry an **incarnation**, a lineage fence distinguishing
-    "the same process, restored" from "a different process now serving this rank". On this path
-    it is permanently `0`: its producer was the deleted control plane and nothing has replaced
-    it, so the field is inert rather than absent — see the comment on
-    `Communicator::incarnation`. All three lineage branches of `SequencedLink::reconcile()` are
-    therefore unreachable (`0 > 0`), which makes `reset_stream()` dead with them, and the pair
-    costs 16 of the 56 handshake bytes. Removing it is ~124 lines, but `Channel::set_incarnation`
-    must survive the cut: **`DrainTCP` overrides it and its incarnation is live**, fencing late
-    leave notices against a restored link (`src/comm/DrainTCP.cpp:353`). The drain runtime is the
-    producer this layer never got.
-  - Three more header fields are inert, and cost wire bytes for nothing: `message_id` (written
-    to the same value as `transport_seq`, read by nothing, 8 bytes), `fragment_index` (never set
-    non-zero anywhere — it implies a fragmentation feature that does not exist, 4 bytes) and
-    `HandshakePayload::policy_fingerprint` (documented as a backend-policy mismatch detector,
-    always defaulted to zero and never compared, 8 bytes). Dropping `message_id` and
-    `fragment_index` takes the frame header from 72 to 56 bytes, still 8-aligned. The 56-byte
-    handshake is thinner than it looks, too: the transmitted `next_send_seq`/`lowest_retained`
-    pair is read only by a decode-time sanity check of each other (`LinkFrame.h:390`) and a trace
-    line — `reconcile()` decides from `next_expected_seq` alone (the *local* methods of those
-    names are load-bearing for replay; only the wire copies decide nothing) — so with the
-    incarnation pair and `policy_fingerprint` dead, only 14 of the 56 bytes influence any
-    outcome. Relatedly, `ack_safe_seq` is assigned `= next_recv` at both production write sites,
+  - **`frame_wire_version` is 4, and the header is 42 bytes** (was 72 at version 3). Version 4
+    removed every field no production read consulted: `message_id` (8 B, written from the same
+    `next_send_seq()` call as `transport_seq` and equal to it by construction), `fragment_index`
+    (4 B, a placeholder for a fragmentation feature that does not exist — and one the design doc
+    had rejected in favour of `fragment_offset`+`fragment_length`), two reserved holes and the
+    tail padding (10 B, never written non-zero, never validated, and aligning nothing: the codec
+    is byte-at-a-time and `write_frame` issues header and payload as separate writes), and
+    `total_length` (8 B, written from the same `len` as `payload_length` on the next line, so
+    equal on every frame a producer can emit). `total_length`'s identity role moved to
+    `payload_length`, so `same_identity` compares the same quantity it always did. Every one of
+    the 42 bytes now carries a field. The `payload_length > total_length` decode rule went with
+    it — that state is now unrepresentable rather than merely rejected.
+  - **The handshake is 30 bytes** (was 56). Version 4 also dropped `policy_fingerprint` (8 B,
+    documented as a backend-policy mismatch detector, never computed and never compared) and the
+    **incarnation pair** (16 B) — a lineage fence distinguishing "the same process, restored"
+    from "a different process now serving this rank", which was correct code with no producer:
+    permanently `0`, so all three lineage branches of `SequencedLink::reconcile()` were
+    unreachable and `reset_stream()` was dead with them. `snapshot_version` went `2` → `3`
+    accordingly. What remains is thinner than it looks: `reconcile()` decides from
+    `next_expected_seq` alone, and the transmitted `next_send_seq`/`lowest_retained` pair is read
+    only by a decode-time sanity check of each other (`LinkFrame.h`) — the *local* methods of
+    those names are load-bearing for replay; only the wire copies decide nothing.
+  - **`Channel::set_incarnation` survived the cut and must keep surviving**, even though the
+    sequenced path no longer has an incarnation and `TcpChannelBase` no longer overrides it.
+    **`DrainTCP` overrides it and uses it as its arming hook**: the override calls
+    `ensure_started()`, which binds the listener, publishes to the registry, starts the control
+    thread and attaches the `MigrationTrigger` (`src/comm/DrainTCP.cpp:353`). Its incarnation is
+    separately live — bumped on every restore, carried in DrainTCP's *own* once-per-connection
+    hello (`DrainProtocol.h` `ResumeRecord`), and used to fence late leave notices. DrainTCP
+    includes neither `LinkFrame.h` nor `SequencedLink.h`, so the two incarnations only ever
+    shared a name. Deleting this virtual, or its call in `Communicator::register_channel`, as
+    "dead lineage plumbing" silently disarms drain migration.
+  - `magic` and `wire_version` are deliberately **kept** although neither carries information
+    between conforming peers: `magic` is the only detector of a raw/unframed peer and of a
+    desynchronised stream, and `wire_version` is the fence that makes format changes safe. Both
+    keep their offsets across versions and both decoders check them first, so an old and a new
+    binary refuse each other as `BadVersion` in both directions rather than misparsing.
+  - `header_field_bytes`/`handshake_field_bytes` plus their `static_assert`s pin the encoders'
+    field widths to the size constants. This matters now that the headers are exactly their field
+    sums: the old `while (off < frame_header_bytes)` pad loop was silently absorbing any
+    under-write, and without it a mistaken edit would overflow the fixed
+    `char[frame_header_bytes]` every caller declares. `encode_header` returns the bytes written
+    and `encode_header_checked` asserts on them.
+  - Relatedly, `ack_safe_seq` is assigned `= next_recv` at both production write sites,
     so the separate "safe to prune" watermark `SequencedLink.h` documents is not maintained.
 
 - **Store-family recovery** (`include/comm/RecoverableClientServer.h`,
@@ -493,7 +517,7 @@ review added (marked *(2nd pass)* there). **Both checkpoint-survival mechanisms 
 benchmarked against each other**, so nothing in `TODO.md` proposes dropping either.
 
 - `src/comm/TcpChannelBase.cpp:1088` — `maybe_send_ack` sits outside the enclosing `try` in
-  `service_established_links`, and calls `write_all`. An ack whose socket had 1..71 bytes of room
+  `service_established_links`, and calls `write_all`. An ack whose socket had 1..41 bytes of room
   throws while the application waits on a *different* peer, violating the "servicing must not
   throw" contract stated at `TcpChannelBase.h:89`.
 - `src/comm/DrainTCP.cpp:1610` — if `take_establish_gate()` throws, the catch clears
@@ -542,7 +566,7 @@ benchmarked against each other**, so nothing in `TODO.md` proposes dropping eith
 ## Structural notes for anyone extending this
 
 - **Two mechanisms solve the same problem.** Sequenced links (retention/replay, survives an
-  unplanned death, costs a 72-byte header and a retention copy per message) and neighborhood
+  unplanned death, costs a 42-byte header and a retention copy per message) and neighborhood
   drain (coordinated quiesce, zero added bytes, any unplanned death is terminal) are independent
   solutions to surviving a criu freeze. Nothing in the tree yet benchmarks one against the other,
   so the choice between them is currently an argument rather than a measurement.
