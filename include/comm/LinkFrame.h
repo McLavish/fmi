@@ -2,6 +2,7 @@
 #define FMI_LINKFRAME_H
 
 #include <cstddef>
+#include <cassert>
 #include <cstdint>
 #include <string>
 
@@ -63,15 +64,41 @@ namespace FMI::Comm {
     inline constexpr std::uint32_t frame_magic = 0x32494D46u;
 
     //! Protocol generation. A framed rank must never interoperate with a raw one.
-    //! 3 added the incarnation pair to the handshake (contract 3).
-    inline constexpr std::uint16_t frame_wire_version = 3;
+    //! 3 added the incarnation pair to the handshake (contract 3). 4 dropped the fields that
+    //! nothing read — message_id, fragment_index, total_length and every padding byte — taking
+    //! the header from 72 to 42 bytes.
+    inline constexpr std::uint16_t frame_wire_version = 4;
 
     //! Serialized header size. Fixed: every frame starts with exactly this many bytes.
     /*!
-     * Field widths below sum to 68; the frame is padded to 72 so a payload copied directly
-     * after the header stays 8-byte aligned. encode_header_checked() asserts the two agree.
+     * Every byte carries a field: there is no padding and no reserved region. Nothing in the
+     * transport overlays a struct on these bytes — the codec below is explicit little-endian
+     * byte-at-a-time, and write_frame issues the header and the payload as two separate
+     * writes — so the header has no alignment obligation to meet.
+     *
+     * header_field_bytes is the sum of the put_* widths in encode_header, and the static_assert
+     * pairing the two is the only thing standing between a mistaken edit and a silent overflow
+     * of the fixed char[frame_header_bytes] buffers every caller declares. Keep them together.
      */
-    inline constexpr std::size_t frame_header_bytes = 72;
+    inline constexpr std::size_t frame_header_bytes = 42;
+
+    //! The put_* widths in encode_header, summed in the order they appear there.
+    inline constexpr std::size_t header_field_bytes =
+            4       // magic
+            + 2     // wire_version
+            + 1     // lane
+            + 1     // op_kind
+            + 1     // flags
+            + 1     // frame_type
+            + 8     // collective_index
+            + 4     // root
+            + 4     // payload_length
+            + 8     // transport_seq
+            + 8;    // cumulative_ack
+    static_assert(header_field_bytes == frame_header_bytes,
+                  "encode_header's field widths must sum to frame_header_bytes: every caller "
+                  "encodes into a fixed char[frame_header_bytes], so a mismatch is an overflow "
+                  "or a short frame, with no diagnostic at either end");
 
     //! Serialized HandshakePayload size — the payload of every Handshake frame, exactly.
     inline constexpr std::size_t handshake_bytes = 56;
@@ -89,15 +116,11 @@ namespace FMI::Comm {
         //! Collective root; the destination rank for p2p.
         std::uint32_t root = 0;
         //! Reduction flags. They select entirely different collective algorithms
-        //! (Communicator.h:103/:128), so a mismatch is an identity mismatch, not a nuance.
+        //! (PeerToPeer.cpp:36/:87/:133), so a mismatch is an identity mismatch, not a nuance.
         bool commutative = false;
         bool associative = false;
-        //! Per-lane, per-directed-pair job-lifetime ordinal. Never reset.
-        std::uint64_t message_id = 0;
-        std::uint32_t fragment_index = 0;
-        //! Length of the whole logical message, which may span several fragments.
-        std::uint64_t total_length = 0;
-        //! Length of this frame's payload.
+        //! Length of this frame's payload, and — since a message is never fragmented — of the
+        //! whole logical message. It is therefore part of message identity as well as framing.
         std::uint32_t payload_length = 0;
         //! Link-scoped reliability sequence. Job-lifetime, never reset.
         std::uint64_t transport_seq = 0;
@@ -128,8 +151,12 @@ namespace FMI::Comm {
 
     //! True when the two frames describe the same logical operation.
     /*!
-     * transport_seq, fragment_index and payload_length are deliberately excluded: they are
-     * reliability-layer or fragmentation detail, not identity.
+     * transport_seq is deliberately excluded: it is reliability-layer detail, not identity.
+     *
+     * payload_length carries the length term of the identity, a role the removed total_length
+     * used to hold. The two were written from the same value on adjacent lines for every frame
+     * any producer could emit, so folding one into the other preserves the comparison exactly
+     * while costing four wire bytes instead of twelve.
      */
     inline bool same_identity(const FrameHeader& a, const FrameHeader& b) {
         return a.lane == b.lane
@@ -138,7 +165,7 @@ namespace FMI::Comm {
                && a.root == b.root
                && a.commutative == b.commutative
                && a.associative == b.associative
-               && a.total_length == b.total_length;
+               && a.payload_length == b.payload_length;
     }
 
     namespace detail {
@@ -194,7 +221,8 @@ namespace FMI::Comm {
     }
 
     //! Serialize a header into exactly frame_header_bytes bytes. @p out must have room.
-    inline void encode_header(const FrameHeader& h, char* out) {
+    //! Returns the bytes written, which is frame_header_bytes on every path.
+    inline std::size_t encode_header(const FrameHeader& h, char* out) {
         std::size_t off = 0;
         detail::put_u32(out, off, frame_magic);
         detail::put_u16(out, off, h.wire_version);
@@ -205,25 +233,25 @@ namespace FMI::Comm {
         if (h.associative) flags |= flag_associative;
         detail::put_u8(out, off, flags);
         detail::put_u8(out, off, static_cast<std::uint8_t>(h.frame_type));
-        detail::put_u16(out, off, 0);  // reserved
         detail::put_u64(out, off, h.collective_index);
         detail::put_u32(out, off, h.root);
-        detail::put_u32(out, off, h.fragment_index);
-        detail::put_u64(out, off, h.message_id);
-        detail::put_u64(out, off, h.total_length);
         detail::put_u32(out, off, h.payload_length);
-        detail::put_u32(out, off, 0);  // reserved
         detail::put_u64(out, off, h.transport_seq);
         detail::put_u64(out, off, h.cumulative_ack);
-        while (off < frame_header_bytes) {
-            detail::put_u8(out, off, 0);  // tail padding to frame_header_bytes
-        }
+        return off;
     }
 
-    //! encode_header, returning the bytes written so callers and tests can assert the size.
+    //! encode_header, asserting the bytes written match the advertised frame size.
+    /*!
+     * The static_assert above is the compile-time half of that guarantee; this is the runtime
+     * half, for a put_* whose width does not match the arithmetic. Both exist because every
+     * caller writes into a fixed char[frame_header_bytes] and nothing else would catch a
+     * short or long encode.
+     */
     inline std::size_t encode_header_checked(const FrameHeader& h, char* out) {
-        encode_header(h, out);
-        return frame_header_bytes;
+        const std::size_t written = encode_header(h, out);
+        assert(written == frame_header_bytes);
+        return written;
     }
 
     //! Parse a header, validating everything before the caller allocates for the payload.
@@ -263,24 +291,14 @@ namespace FMI::Comm {
             return DecodeStatus::BadFrameType;
         }
         out.frame_type = static_cast<FrameType>(type);
-        detail::get_u16(in, off);  // reserved
         out.collective_index = detail::get_u64(in, off);
         out.root = detail::get_u32(in, off);
-        out.fragment_index = detail::get_u32(in, off);
-        out.message_id = detail::get_u64(in, off);
-        out.total_length = detail::get_u64(in, off);
         out.payload_length = detail::get_u32(in, off);
-        detail::get_u32(in, off);  // reserved
         out.transport_seq = detail::get_u64(in, off);
         out.cumulative_ack = detail::get_u64(in, off);
 
         if (out.payload_length > max_payload) {
             return DecodeStatus::PayloadTooLarge;
-        }
-        // A fragment can never claim more bytes than the message it belongs to, and a
-        // zero-length message must not arrive carrying a payload.
-        if (out.payload_length > out.total_length) {
-            return DecodeStatus::Inconsistent;
         }
         // The P2P lane has no collective identity; a frame claiming one is malformed.
         if (out.lane == Lane::P2P && out.collective_index != 0) {
@@ -289,7 +307,7 @@ namespace FMI::Comm {
         // An ack is a pure watermark: it carries nothing and occupies no sequence, so a
         // payload or a claimed sequence on one means the stream is not what it says it is.
         if (out.frame_type == FrameType::Ack &&
-            (out.payload_length != 0 || out.total_length != 0 || out.transport_seq != 0)) {
+            (out.payload_length != 0 || out.transport_seq != 0)) {
             return DecodeStatus::Inconsistent;
         }
         // A handshake's payload is the fixed-size HandshakePayload and nothing else. Every
@@ -347,7 +365,6 @@ namespace FMI::Comm {
         h.frame_type = FrameType::Handshake;
         h.lane = Lane::P2P;
         h.op_kind = OpKind::Send;
-        h.total_length = handshake_bytes;
         h.payload_length = handshake_bytes;
         return h;
     }

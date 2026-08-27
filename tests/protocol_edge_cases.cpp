@@ -328,7 +328,7 @@ BOOST_AUTO_TEST_CASE(two_communicators_in_one_process_do_not_share_identity_stat
 // ---------------------------------------------- degenerate and inconsistent programs
 
 BOOST_AUTO_TEST_CASE(a_zero_length_message_is_legitimate_and_round_trips) {
-    // Empty payloads are valid: total_length 0 with payload_length 0 is a well-formed frame.
+    // Empty payloads are valid: payload_length 0 is a well-formed frame.
     auto program = [](FMI::Communicator& comm, int rank, RankResult& r) {
         std::vector<int> empty;
         FMI::Comm::Data<std::vector<int>> nothing(empty);
@@ -342,7 +342,7 @@ BOOST_AUTO_TEST_CASE(a_zero_length_message_is_legitimate_and_round_trips) {
 
 BOOST_AUTO_TEST_CASE(ranks_disagreeing_on_a_collective_buffer_size_are_caught_when_framed) {
     // A genuine and easy-to-make user error: ranks pass differently sized buffers to the same
-    // collective. total_length is part of message identity, so the framed transport refuses it.
+    // collective. payload_length is part of message identity, so the framed transport refuses it.
     // Unframed there is nothing to compare against and the receiver simply takes whatever
     // bytes arrive, which is how this corrupts silently today.
     constexpr int num_peers = 2;

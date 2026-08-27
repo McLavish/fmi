@@ -64,20 +64,19 @@ namespace {
 
         void reconnect() { connect(); }
 
-        static FrameHeader identity(std::uint64_t message_id, std::size_t len) {
+        static FrameHeader identity(std::size_t len) {
             FrameHeader h;
             h.lane = Lane::P2P;
             h.op_kind = OpKind::Send;
             h.root = 1;
-            h.message_id = message_id;
-            h.total_length = len;
+            h.payload_length = static_cast<std::uint32_t>(len);
             return h;
         }
 
         //! Application send: retain first, then put the bytes on the wire.
         bool post(const std::string& body) {
             FrameHeader stamped;
-            if (!sender.admit(identity(posted.size(), body.size()), body.data(), body.size(),
+            if (!sender.admit(identity(body.size()), body.data(), body.size(),
                               stamped)) {
                 return false;   // window or retention cap
             }
@@ -117,8 +116,8 @@ namespace {
                 const Accept a = receiver.accept(h, body.data());
                 if (a == Accept::Delivered) {
                     // The application consumes it immediately in this harness.
-                    std::string dst(h.total_length, '\0');
-                    FrameHeader expected = identity(h.message_id, h.total_length);
+                    std::string dst(h.payload_length, '\0');
+                    FrameHeader expected = identity(h.payload_length);
                     BOOST_REQUIRE(receiver.deliver_into(expected, dst.data(), dst.size())
                                   == Accept::Delivered);
                     consumed.push_back(dst);

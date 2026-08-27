@@ -144,7 +144,6 @@ namespace {
         h.op_kind = OpKind::Send;
         h.collective_index = 0;
         h.root = dest;
-        h.total_length = 4;
         h.payload_length = 4;
         h.transport_seq = seq;
         return h;

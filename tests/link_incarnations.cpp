@@ -30,7 +30,6 @@ namespace {
         link.set_incarnation(incarnation);
         for (int i = 0; i < sent; i++) {
             FrameHeader identity;
-            identity.total_length = 4;
             FrameHeader stamped;
             const int payload = i;
             BOOST_REQUIRE(link.admit(identity, reinterpret_cast<const char*>(&payload), 4, stamped));
@@ -38,7 +37,6 @@ namespace {
         for (int i = 0; i < received; i++) {
             FrameHeader arriving;
             arriving.transport_seq = static_cast<std::uint64_t>(i);
-            arriving.total_length = 4;
             arriving.payload_length = 4;
             BOOST_REQUIRE(link.classify(arriving) == SequencedLink::Accept::Delivered);
             link.commit_inline(arriving);

@@ -34,7 +34,6 @@ namespace {
         h.root = 1;
         h.commutative = true;
         h.associative = true;
-        h.total_length = 16;
         h.payload_length = 16;
         return h;
     }
@@ -87,19 +86,17 @@ BOOST_AUTO_TEST_CASE(identity_differs_on_associative_alone) {
     BOOST_CHECK(!same_identity(a, b));
 }
 
-BOOST_AUTO_TEST_CASE(identity_differs_on_total_length_alone) {
+BOOST_AUTO_TEST_CASE(identity_differs_on_payload_length_alone) {
     FrameHeader a = base_collective(), b = a;
-    b.total_length = a.total_length * 2;
+    b.payload_length = a.payload_length * 2;
     BOOST_CHECK(!same_identity(a, b));
 }
 
 BOOST_AUTO_TEST_CASE(identity_ignores_reliability_fields) {
-    // transport_seq, message_id and fragment_index are reliability/fragmentation detail. Two
-    // frames of the same logical message that differ in them are still the same identity.
+    // transport_seq is reliability-layer detail. Two frames of the same logical message that
+    // differ in it are still the same identity.
     FrameHeader a = base_collective(), b = a;
     b.transport_seq = a.transport_seq + 99;
-    b.message_id = a.message_id + 5;
-    b.fragment_index = a.fragment_index + 2;
     BOOST_CHECK(same_identity(a, b));
 }
 
@@ -114,7 +111,7 @@ BOOST_AUTO_TEST_CASE(a_later_iteration_of_the_same_collective_is_refused) {
     // Sender is in bcast #0; receiver has already moved on to bcast #1.
     BOOST_REQUIRE(sender.admit(
             [] { FrameHeader h; h.lane = Lane::Collective; h.op_kind = OpKind::Bcast;
-                 h.collective_index = 0; h.root = 0; h.total_length = 4; return h; }(),
+                 h.collective_index = 0; h.root = 0; h.payload_length = 4; return h; }(),
             body.data(), body.size(), stamped));
     BOOST_REQUIRE(receiver.accept(stamped, body.data()) == Accept::Delivered);
 
@@ -123,7 +120,6 @@ BOOST_AUTO_TEST_CASE(a_later_iteration_of_the_same_collective_is_refused) {
     expected.op_kind = OpKind::Bcast;
     expected.collective_index = 1;
     expected.root = 0;
-    expected.total_length = 4;
     char dst[4] = {0};
     BOOST_CHECK(receiver.deliver_into(expected, dst, 4) == Accept::IdentityMismatch);
 }
@@ -138,7 +134,6 @@ BOOST_AUTO_TEST_CASE(a_collective_with_a_different_root_is_refused) {
     sent.op_kind = OpKind::Gather;
     sent.collective_index = 0;
     sent.root = 0;
-    sent.total_length = 4;
     BOOST_REQUIRE(sender.admit(sent, body.data(), body.size(), stamped));
     BOOST_REQUIRE(receiver.accept(stamped, body.data()) == Accept::Delivered);
 
@@ -158,14 +153,13 @@ BOOST_AUTO_TEST_CASE(a_payload_of_the_wrong_size_is_refused_and_writes_nothing) 
     sent.lane = Lane::P2P;
     sent.op_kind = OpKind::Send;
     sent.root = 1;
-    sent.total_length = 4;
     FrameHeader stamped;
     BOOST_REQUIRE(sender.admit(sent, body.data(), body.size(), stamped));
     BOOST_REQUIRE(receiver.accept(stamped, body.data()) == Accept::Delivered);
 
     char dst[8];
     std::memset(dst, 0xEE, sizeof dst);
-    // Identity says total_length 4, but the caller asks for 8 bytes.
+    // Identity says payload_length 4, but the caller asks for 8 bytes.
     FrameHeader expected = sent;
     BOOST_CHECK(receiver.deliver_into(expected, dst, 8) == Accept::IdentityMismatch);
     for (unsigned char c : dst) {
@@ -238,9 +232,7 @@ namespace {
         h.lane = Lane::P2P;
         h.op_kind = OpKind::Send;
         h.root = 1;
-        h.total_length = len;
         h.payload_length = len;
-        h.message_id = seq;
         h.transport_seq = seq;
         return h;
     }
@@ -310,7 +302,6 @@ BOOST_AUTO_TEST_CASE(a_frame_claiming_more_payload_than_the_buffer_is_rejected) 
     Wire w(true);
     FrameHeader h = wire_p2p(0, 4);
     h.payload_length = 1u << 20;
-    h.total_length = 1u << 20;
     char hdr[frame_header_bytes];
     encode_header(h, hdr);
     w.poke(hdr, sizeof hdr);
@@ -409,10 +400,11 @@ BOOST_AUTO_TEST_CASE(a_future_wire_version_is_rejected_even_when_the_identity_ma
     BOOST_CHECK_EQUAL(got, 0);
 }
 
-BOOST_AUTO_TEST_CASE(a_fragment_longer_than_its_message_is_rejected_before_it_desynchronises) {
-    // payload_length exceeds total_length while total_length still matches what we expect, so
-    // the identity check passes. Reading only total_length bytes would leave the surplus in
-    // the stream and desynchronise every subsequent frame on this link.
+BOOST_AUTO_TEST_CASE(a_frame_claiming_more_payload_than_expected_is_rejected_before_it_desynchronises) {
+    // payload_length is the only length on the wire and is part of message identity, so a frame
+    // claiming more than the receiver asked for is refused outright. Accepting it and reading
+    // only the expected bytes would leave the surplus in the stream and desynchronise every
+    // subsequent frame on this link.
     Wire w(true);
     FrameHeader h = wire_p2p(0, 4);
     h.payload_length = 8;   // claims more payload than the message contains
@@ -428,11 +420,11 @@ BOOST_AUTO_TEST_CASE(a_fragment_longer_than_its_message_is_rejected_before_it_de
                       std::runtime_error);
 }
 
-BOOST_AUTO_TEST_CASE(a_fragment_shorter_than_its_message_is_rejected_before_it_desynchronises) {
-    // The mirror of the case above, and the more dangerous direction: payload_length is BELOW
-    // total_length, so the identity check still passes and the receiver would go on to read
-    // total_length bytes — swallowing the head of the following frame as if it were the tail
-    // of this one, and shifting every message on the link from then on.
+BOOST_AUTO_TEST_CASE(a_frame_claiming_less_payload_than_expected_is_rejected_before_it_desynchronises) {
+    // The mirror of the case above, and the more dangerous direction: a receiver that trusted
+    // its own expectation over the frame's declared length would read past this frame —
+    // swallowing the head of the following frame as if it were the tail of this one, and
+    // shifting every message on the link from then on.
     Wire w(true);
     FrameHeader h = wire_p2p(0, 4);
     h.payload_length = 2;   // claims less payload than the message needs
@@ -493,7 +485,6 @@ BOOST_AUTO_TEST_CASE(an_ack_frame_carrying_a_payload_is_reported_as_malformed_no
     Wire w(true);
     FrameHeader forged = make_ack(0);
     forged.payload_length = 4;
-    forged.total_length = 4;
     char hdr[frame_header_bytes];
     encode_header(forged, hdr);
     w.poke(hdr, sizeof hdr);

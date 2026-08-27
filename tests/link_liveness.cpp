@@ -71,7 +71,6 @@ BOOST_AUTO_TEST_CASE(a_receiver_offers_an_ack_before_the_senders_window_fills) {
     for (int i = 0; i < 4; i++) {
         FrameHeader arriving;
         arriving.transport_seq = static_cast<std::uint64_t>(i);
-        arriving.total_length = 4;
         arriving.payload_length = 4;
         link.commit_inline(arriving);
     }
@@ -95,7 +94,6 @@ BOOST_AUTO_TEST_CASE(an_ack_frame_claiming_a_payload_is_malformed) {
     // Otherwise an ack would be a way to inject bytes the receiver never accounts for.
     FrameHeader forged = make_ack(3);
     forged.payload_length = 8;
-    forged.total_length = 8;
     char wire[frame_header_bytes];
     encode_header(forged, wire);
     FrameHeader got;

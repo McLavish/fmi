@@ -235,7 +235,6 @@ namespace {
         h.root = op.root;
         h.commutative = op.commutative;
         h.associative = op.associative;
-        h.total_length = len;
         h.payload_length = static_cast<std::uint32_t>(len);
         return h;
     }
@@ -245,7 +244,7 @@ namespace {
                + " op=" + std::to_string(static_cast<int>(h.op_kind))
                + " collective=" + std::to_string(h.collective_index)
                + " root=" + std::to_string(h.root)
-               + " len=" + std::to_string(h.total_length);
+               + " len=" + std::to_string(h.payload_length);
     }
 }
 
@@ -614,7 +613,6 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
 
     FrameHeader header = expected_identity(buf.len);
     if (!recover_links) {
-        header.message_id = links[rcpt_id].next_send_seq();
         header.transport_seq = links[rcpt_id].next_send_seq();
         header.cumulative_ack = links[rcpt_id].next_received();
         links[rcpt_id].note_sent();
@@ -624,7 +622,6 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
 
     // The retained copy exists before a single byte reaches the socket: once this returns the
     // message is a delivery obligation even if the peer has not started its receive.
-    header.message_id = links[rcpt_id].next_send_seq();
     FrameHeader stamped;
     if (!links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {
         // The window is full. On a link that carries traffic both ways this never happens,
@@ -880,7 +877,6 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
                                      std::to_string(sender_id) + " (decode status " +
                                      std::to_string(static_cast<int>(status)) +
                                      ", declared payload " + std::to_string(arrived.payload_length) +
-                                     ", declared total " + std::to_string(arrived.total_length) +
                                      ", expecting " + std::to_string(buf.len) + " bytes for [" +
                                      describe(expected_identity(buf.len)) + "])");
         }
@@ -949,9 +945,9 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
                                      describe(expected) + "] but received [" +
                                      describe(arrived) + "]");
         }
-        // Identity matched on total_length, so an unfragmented frame must carry exactly the
-        // bytes the application is waiting for. A frame that claims fewer would leave the rest
-        // of the buffer holding whatever the next frame's header happens to be.
+        // payload_length is part of identity, so same_identity already agreed on the length;
+        // this re-checks it against the application's own buffer, which is what catches a
+        // receiver sizing the operation differently from the sender.
         if (arrived.payload_length != buf.len) {
             throw std::runtime_error(transport_tag + ": frame from peer " + std::to_string(sender_id) +
                                      " declares " + std::to_string(arrived.payload_length) +
@@ -1169,7 +1165,7 @@ bool FMI::Comm::TcpChannelBase::service_established_links(Utils::peer_num skip) 
                                      static_cast<int>(svc_status), hex);
                     }
                 }
-                // A full 72-byte peek that does not decode is a desynchronised stream, and
+                // A full frame_header_bytes peek that does not decode is a desynchronised stream, and
                 // waiting cannot fix it — the same bytes will be there forever. Mark the
                 // link suspect exactly as a dead peek would: the dialer's aged redial tears
                 // it down and the replay restores alignment, and if this side is the

@@ -15,14 +15,13 @@ using Accept = SequencedLink::Accept;
 
 namespace {
     //! Identity of an application-level point-to-point message.
-    FrameHeader p2p(std::uint64_t message_id, std::uint32_t dest, std::uint64_t len) {
+    FrameHeader p2p(std::uint32_t dest, std::uint64_t len) {
         FrameHeader h;
         h.lane = Lane::P2P;
         h.op_kind = OpKind::Send;
         h.collective_index = 0;
         h.root = dest;
-        h.message_id = message_id;
-        h.total_length = len;
+        h.payload_length = static_cast<std::uint32_t>(len);
         return h;
     }
 
@@ -36,7 +35,7 @@ namespace {
         h.root = root;
         h.commutative = commutative;
         h.associative = associative;
-        h.total_length = len;
+        h.payload_length = static_cast<std::uint32_t>(len);
         return h;
     }
 
@@ -49,10 +48,7 @@ namespace {
 // ---------------------------------------------------------------- codec
 
 BOOST_AUTO_TEST_CASE(codec_roundtrip_preserves_every_field) {
-    FrameHeader h = collective(OpKind::Reduce, 42, 3, 128, false, true);
-    h.message_id = 9;
-    h.fragment_index = 4;
-    h.payload_length = 64;
+    FrameHeader h = collective(OpKind::Reduce, 42, 3, 64, false, true);
     h.transport_seq = 77;
 
     std::vector<char> buf(frame_header_bytes);
@@ -61,8 +57,6 @@ BOOST_AUTO_TEST_CASE(codec_roundtrip_preserves_every_field) {
     FrameHeader d;
     BOOST_REQUIRE(decode_header(buf.data(), buf.size(), 1u << 20, d) == DecodeStatus::Ok);
     BOOST_CHECK(same_identity(h, d));
-    BOOST_CHECK_EQUAL(d.message_id, 9u);
-    BOOST_CHECK_EQUAL(d.fragment_index, 4u);
     BOOST_CHECK_EQUAL(d.payload_length, 64u);
     BOOST_CHECK_EQUAL(d.transport_seq, 77u);
     BOOST_CHECK_EQUAL(d.commutative, false);
@@ -70,7 +64,7 @@ BOOST_AUTO_TEST_CASE(codec_roundtrip_preserves_every_field) {
 }
 
 BOOST_AUTO_TEST_CASE(a_truncated_header_is_rejected_not_read) {
-    FrameHeader h = p2p(0, 1, 8);
+    FrameHeader h = p2p(1, 8);
     std::vector<char> buf(frame_header_bytes);
     encode_header(h, buf.data());
 
@@ -81,7 +75,7 @@ BOOST_AUTO_TEST_CASE(a_truncated_header_is_rejected_not_read) {
 }
 
 BOOST_AUTO_TEST_CASE(bad_magic_and_bad_version_are_rejected) {
-    FrameHeader h = p2p(0, 1, 8);
+    FrameHeader h = p2p(1, 8);
     std::vector<char> buf(frame_header_bytes);
     encode_header(h, buf.data());
     FrameHeader d;
@@ -103,7 +97,7 @@ BOOST_AUTO_TEST_CASE(bad_magic_and_bad_version_are_rejected) {
 }
 
 BOOST_AUTO_TEST_CASE(an_oversized_payload_is_rejected_before_allocation) {
-    FrameHeader h = p2p(0, 1, 1u << 30);
+    FrameHeader h = p2p(1, 1u << 30);
     h.payload_length = 1u << 30;
     std::vector<char> buf(frame_header_bytes);
     encode_header(h, buf.data());
@@ -112,15 +106,12 @@ BOOST_AUTO_TEST_CASE(an_oversized_payload_is_rejected_before_allocation) {
     BOOST_CHECK(decode_header(buf.data(), buf.size(), 4096, d) == DecodeStatus::PayloadTooLarge);
 }
 
-BOOST_AUTO_TEST_CASE(a_fragment_larger_than_its_message_is_inconsistent) {
-    FrameHeader h = p2p(0, 1, 10);
-    h.payload_length = 99;
-    std::vector<char> buf(frame_header_bytes);
-    encode_header(h, buf.data());
-
-    FrameHeader d;
-    BOOST_CHECK(decode_header(buf.data(), buf.size(), 1u << 20, d) == DecodeStatus::Inconsistent);
-}
+// There is no "fragment larger than its message" case any more. It checked
+// payload_length > total_length, and with wire version 4 carrying a single length field a frame
+// can no longer contradict itself about its own size — the state is unrepresentable rather than
+// merely rejected. A peer that lies about payload_length is still caught, one layer up, by
+// same_identity and by the receiver's own buffer-length check; see
+// ProtocolValidation/a_frame_claiming_{more,less}_payload_than_expected_is_rejected_before_it_desynchronises.
 
 // ------------------------------------------------------- retention and replay
 
@@ -129,7 +120,7 @@ BOOST_AUTO_TEST_CASE(a_cumulative_ack_trims_exactly_the_acked_prefix) {
     const std::string body = "abcd";
     FrameHeader stamped;
     for (int i = 0; i < 4; ++i) {
-        BOOST_REQUIRE(link.admit(p2p(i, 1, body.size()), body.data(), body.size(), stamped));
+        BOOST_REQUIRE(link.admit(p2p(1, body.size()), body.data(), body.size(), stamped));
     }
     BOOST_CHECK_EQUAL(link.replay_suffix().size(), 4u);
     BOOST_CHECK_EQUAL(link.lowest_retained(), 0u);
@@ -147,7 +138,7 @@ BOOST_AUTO_TEST_CASE(replay_yields_exactly_the_unacked_suffix_in_order) {
     FrameHeader stamped;
     for (int i = 0; i < 5; ++i) {
         const std::string body(1, static_cast<char>('a' + i));
-        BOOST_REQUIRE(link.admit(p2p(i, 1, body.size()), body.data(), body.size(), stamped));
+        BOOST_REQUIRE(link.admit(p2p(1, body.size()), body.data(), body.size(), stamped));
     }
     link.on_ack(3);
 
@@ -164,7 +155,7 @@ BOOST_AUTO_TEST_CASE(a_replayed_frame_dedups_instead_of_delivering_twice) {
     SequencedLink receiver{{8, 1u << 20, 1u << 20}};
     const std::string body = "payload";
     FrameHeader stamped;
-    BOOST_REQUIRE(sender.admit(p2p(0, 1, body.size()), body.data(), body.size(), stamped));
+    BOOST_REQUIRE(sender.admit(p2p(1, body.size()), body.data(), body.size(), stamped));
 
     BOOST_CHECK(offer(receiver, stamped, body) == Accept::Delivered);
     BOOST_CHECK_EQUAL(receiver.pending(Lane::P2P), 1u);
@@ -176,7 +167,7 @@ BOOST_AUTO_TEST_CASE(a_replayed_frame_dedups_instead_of_delivering_twice) {
 
 BOOST_AUTO_TEST_CASE(a_true_gap_is_fatal_rather_than_silently_accepted) {
     SequencedLink receiver{{8, 1u << 20, 1u << 20}};
-    FrameHeader h = p2p(0, 1, 4);
+    FrameHeader h = p2p(1, 4);
     h.payload_length = 4;
     h.transport_seq = 3;   // 0..2 never arrived
     BOOST_CHECK(offer(receiver, h, "abcd") == Accept::FatalGap);
@@ -186,7 +177,7 @@ BOOST_AUTO_TEST_CASE(the_ack_watermark_only_covers_committed_frames) {
     SequencedLink receiver{{8, 1u << 20, 1u << 20}};
     BOOST_CHECK_EQUAL(receiver.ack_safe(), 0u);
 
-    FrameHeader h = p2p(0, 1, 1);
+    FrameHeader h = p2p(1, 1);
     h.payload_length = 1;
     h.transport_seq = 0;
     BOOST_REQUIRE(offer(receiver, h, "z") == Accept::Delivered);
@@ -205,7 +196,7 @@ BOOST_AUTO_TEST_CASE(a_one_byte_p2p_send_cannot_satisfy_a_collective_receive) {
     SequencedLink receiver{{8, 1u << 20, 1u << 20}};
     const std::string one = "A";
     FrameHeader stamped;
-    BOOST_REQUIRE(sender.admit(p2p(0, 1, 1), one.data(), 1, stamped));
+    BOOST_REQUIRE(sender.admit(p2p(1, 1), one.data(), 1, stamped));
     BOOST_REQUIRE(offer(receiver, stamped, one) == Accept::Delivered);
 
     // The application is inside a barrier, waiting on the collective lane.
@@ -214,7 +205,7 @@ BOOST_AUTO_TEST_CASE(a_one_byte_p2p_send_cannot_satisfy_a_collective_receive) {
                 == Accept::FatalGap);
     // The p2p frame is untouched and still available to the receive it actually belongs to.
     BOOST_CHECK_EQUAL(receiver.pending(Lane::P2P), 1u);
-    BOOST_CHECK(receiver.deliver_into(p2p(0, 1, 1), &dst, 1) == Accept::Delivered);
+    BOOST_CHECK(receiver.deliver_into(p2p(1, 1), &dst, 1) == Accept::Delivered);
     BOOST_CHECK_EQUAL(dst, 'A');
 }
 
@@ -272,7 +263,7 @@ BOOST_AUTO_TEST_CASE(a_matching_receive_on_each_lane_drains_independently) {
     SequencedLink receiver{{8, 1u << 20, 1u << 20}};
     FrameHeader stamped;
     const std::string p = "P", c = "C";
-    BOOST_REQUIRE(sender.admit(p2p(0, 1, 1), p.data(), 1, stamped));
+    BOOST_REQUIRE(sender.admit(p2p(1, 1), p.data(), 1, stamped));
     BOOST_REQUIRE(offer(receiver, stamped, p) == Accept::Delivered);
     BOOST_REQUIRE(sender.admit(collective(OpKind::Barrier, 0, 0, 1), c.data(), 1, stamped));
     BOOST_REQUIRE(offer(receiver, stamped, c) == Accept::Delivered);
@@ -283,7 +274,7 @@ BOOST_AUTO_TEST_CASE(a_matching_receive_on_each_lane_drains_independently) {
     BOOST_CHECK(receiver.deliver_into(collective(OpKind::Barrier, 0, 0, 1), &dst, 1)
                 == Accept::Delivered);
     BOOST_CHECK_EQUAL(dst, 'C');
-    BOOST_CHECK(receiver.deliver_into(p2p(0, 1, 1), &dst, 1) == Accept::Delivered);
+    BOOST_CHECK(receiver.deliver_into(p2p(1, 1), &dst, 1) == Accept::Delivered);
     BOOST_CHECK_EQUAL(dst, 'P');
 }
 
@@ -293,23 +284,23 @@ BOOST_AUTO_TEST_CASE(the_window_bounds_outstanding_frames) {
     SequencedLink link{{2, 1u << 20, 1u << 20}};
     const std::string body = "x";
     FrameHeader stamped;
-    BOOST_CHECK(link.admit(p2p(0, 1, 1), body.data(), 1, stamped));
-    BOOST_CHECK(link.admit(p2p(1, 1, 1), body.data(), 1, stamped));
+    BOOST_CHECK(link.admit(p2p(1, 1), body.data(), 1, stamped));
+    BOOST_CHECK(link.admit(p2p(1, 1), body.data(), 1, stamped));
     BOOST_CHECK(link.send_blocked());
-    BOOST_CHECK(!link.admit(p2p(2, 1, 1), body.data(), 1, stamped));
+    BOOST_CHECK(!link.admit(p2p(1, 1), body.data(), 1, stamped));
 
     link.on_ack(1);
     BOOST_CHECK(!link.send_blocked());
-    BOOST_CHECK(link.admit(p2p(2, 1, 1), body.data(), 1, stamped));
+    BOOST_CHECK(link.admit(p2p(1, 1), body.data(), 1, stamped));
 }
 
 BOOST_AUTO_TEST_CASE(the_retention_cap_blocks_admission_without_discarding) {
     SequencedLink link{{64, 1u << 20, 8}};
     const std::string body(8, 'y');
     FrameHeader stamped;
-    BOOST_REQUIRE(link.admit(p2p(0, 1, body.size()), body.data(), body.size(), stamped));
+    BOOST_REQUIRE(link.admit(p2p(1, body.size()), body.data(), body.size(), stamped));
     BOOST_CHECK(link.send_blocked());
-    BOOST_CHECK(!link.admit(p2p(1, 1, body.size()), body.data(), body.size(), stamped));
+    BOOST_CHECK(!link.admit(p2p(1, body.size()), body.data(), body.size(), stamped));
     // Crucially the retained frame is still owed to the peer; the cap never drops it.
     BOOST_CHECK_EQUAL(link.replay_suffix().size(), 1u);
     BOOST_CHECK_EQUAL(link.retained_bytes(), 8u);
@@ -319,7 +310,7 @@ BOOST_AUTO_TEST_CASE(a_frame_larger_than_the_configured_maximum_is_refused) {
     SequencedLink link{{8, 4, 1u << 20}};
     const std::string body(16, 'z');
     FrameHeader stamped;
-    BOOST_CHECK(!link.admit(p2p(0, 1, body.size()), body.data(), body.size(), stamped));
+    BOOST_CHECK(!link.admit(p2p(1, body.size()), body.data(), body.size(), stamped));
 }
 
 // ------------------------------------------------------------ handshake
@@ -329,7 +320,7 @@ BOOST_AUTO_TEST_CASE(a_handshake_prunes_retention_the_peer_already_holds) {
     const std::string body = "q";
     FrameHeader stamped;
     for (int i = 0; i < 3; ++i) {
-        BOOST_REQUIRE(sender.admit(p2p(i, 1, 1), body.data(), 1, stamped));
+        BOOST_REQUIRE(sender.admit(p2p(1, 1), body.data(), 1, stamped));
     }
     BOOST_CHECK_EQUAL(sender.replay_suffix().size(), 3u);
 
@@ -347,7 +338,7 @@ BOOST_AUTO_TEST_CASE(an_impossible_handshake_aborts_loudly) {
     SequencedLink sender{{8, 1u << 20, 1u << 20}};
     const std::string body = "q";
     FrameHeader stamped;
-    BOOST_REQUIRE(sender.admit(p2p(0, 1, 1), body.data(), 1, stamped));
+    BOOST_REQUIRE(sender.admit(p2p(1, 1), body.data(), 1, stamped));
 
     std::string error;
     HandshakePayload ahead;
@@ -385,9 +376,9 @@ BOOST_AUTO_TEST_CASE(snapshot_and_seed_roundtrip_the_watermarks) {
     const std::string body = "s";
     FrameHeader stamped;
     for (int i = 0; i < 3; ++i) {
-        BOOST_REQUIRE(link.admit(p2p(i, 1, 1), body.data(), 1, stamped));
+        BOOST_REQUIRE(link.admit(p2p(1, 1), body.data(), 1, stamped));
     }
-    FrameHeader in = p2p(0, 0, 1);
+    FrameHeader in = p2p(0, 1);
     in.payload_length = 1;
     in.transport_seq = 0;
     BOOST_REQUIRE(link.accept(in, body.data()) == Accept::Delivered);
