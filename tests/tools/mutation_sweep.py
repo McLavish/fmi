@@ -19,10 +19,34 @@ import signal, subprocess, sys, os
 WT="/home/luca/fmi-sequenced-links"
 # Cheapest and most discriminating first: a killed mutation stops at the first failing suite,
 # so ordering decides whether the sweep takes forty minutes or four hours.
-SUITES=["LinkLayer","LinkIncarnations","ProtocolValidation","OperationIdentity",
+SUITES=["LinkLayer","ProtocolValidation","OperationIdentity",
         "CheckpointFreezePoints","LinkLiveness","LinkRecovery","TransportRecovery",
         "FramedTransport"]
 SUITE_TIMEOUT=180
+
+def preflight_suites():
+    """Refuse to run if any suite in SUITES no longer exists.
+
+    Boost.Test exits 200 -- not 0 -- for a filter that matches nothing, and the driver below
+    treats any non-zero exit as "this mutation was killed". A suite that has been renamed or
+    deleted therefore books EVERY mutant as KILLED and prints "SURVIVED: 0", which reads as a
+    clean ledger while testing nothing at all. That is exactly what happened when
+    LinkIncarnations was deleted, so this check exists to make it a loud startup failure.
+    """
+    r = subprocess.run(f"cd {WT}/build/tests && ./Boost_Tests_run --list_content",
+                       shell=True, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"mutation_sweep: cannot list suites in {WT}/build/tests -- is it built?")
+    # --list_content prints suites unindented and cases indented.
+    present = {ln.rstrip("*").strip() for ln in (r.stdout + r.stderr).splitlines()
+               if ln and not ln.startswith((" ", "\t"))}
+    missing = [s for s in SUITES if s not in present]
+    if missing:
+        sys.exit("mutation_sweep: these suites are in SUITES but not in the test binary: "
+                 + ", ".join(missing)
+                 + "\n  Boost.Test exits 200 for a filter matching nothing, and this driver reads"
+                   " any non-zero exit as a kill, so running now would report every mutant KILLED."
+                   "\n  Fix SUITES (and any MUTS entries that suite was pinning) before sweeping.")
 
 MUTS = [
  ("identity_ignores_op_kind","include/comm/LinkFrame.h",
@@ -329,6 +353,8 @@ CRIU_KILLED = {
 # far worse than a sweep that did not finish: it is a deliberately broken protocol that looks
 # like ordinary uncommitted work. Restored in a finally block, and on SIGINT/SIGTERM, because
 # killing this script mid-mutation is the normal way to stop it.
+preflight_suites()
+
 PRISTINE = {rel: open(os.path.join(WT, rel)).read() for _, rel, _, _ in MUTS}
 
 def restore_all():

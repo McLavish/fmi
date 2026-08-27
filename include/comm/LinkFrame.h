@@ -250,20 +250,23 @@ namespace FMI::Comm {
         detail::put_u32(out, off, h.payload_length);
         detail::put_u64(out, off, h.transport_seq);
         detail::put_u64(out, off, h.cumulative_ack);
+        // Here rather than only in encode_header_checked: both production callers
+        // (maybe_send_ack, write_frame) use the unchecked form, so an assert that lived only in
+        // the wrapper would never run outside the tests.
+        assert(off == frame_header_bytes);
         return off;
     }
 
-    //! encode_header, asserting the bytes written match the advertised frame size.
+    //! encode_header under its historical name, kept because tests assert on the return value.
     /*!
-     * The static_assert above is the compile-time half of that guarantee; this is the runtime
-     * half, for a put_* whose width does not match the arithmetic. Both exist because every
-     * caller writes into a fixed char[frame_header_bytes] and nothing else would catch a
-     * short or long encode.
+     * The size guarantee lives in encode_header itself now: a static_assert pairs
+     * header_field_bytes with frame_header_bytes at compile time, and an assert on the final
+     * offset catches a put_* whose width does not match that arithmetic. Both exist because
+     * every caller encodes into a fixed char[frame_header_bytes] and nothing else would notice
+     * a short or long encode.
      */
     inline std::size_t encode_header_checked(const FrameHeader& h, char* out) {
-        const std::size_t written = encode_header(h, out);
-        assert(written == frame_header_bytes);
-        return written;
+        return encode_header(h, out);
     }
 
     //! Parse a header, validating everything before the caller allocates for the payload.
@@ -373,6 +376,7 @@ namespace FMI::Comm {
         return h;
     }
 
+    //! Serialize a handshake into exactly handshake_bytes bytes. @p out must have room.
     inline void encode_handshake(const HandshakePayload& h, char* out) {
         std::size_t off = 0;
         detail::put_u32(out, off, frame_magic);
@@ -380,6 +384,9 @@ namespace FMI::Comm {
         detail::put_u64(out, off, h.next_send_seq);
         detail::put_u64(out, off, h.next_expected_seq);
         detail::put_u64(out, off, h.lowest_retained);
+        // The frame layer pins a Handshake frame's payload_length to handshake_bytes, so a
+        // short encode here is a frame the peer reads past the end of.
+        assert(off == handshake_bytes);
     }
 
     inline DecodeStatus decode_handshake(const char* in, std::size_t available,

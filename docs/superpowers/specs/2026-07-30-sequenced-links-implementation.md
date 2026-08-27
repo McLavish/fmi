@@ -92,18 +92,31 @@ Installed only when the current disposition is `SIG_DFL`, so an application's ow
 never displaced. Pinned by
 `CheckpointFreezePoints/a_restored_rank_survives_writing_to_a_connection_the_restore_dropped`.
 
-### R5 — Lineage is judged before sequences
+### R5 — Lineage is judged before sequences — **WITHDRAWN in `frame_wire_version` 4**
 
-> **Normative:** `reconcile` compares incarnations first. A peer whose incarnation is *below*
+> **This contract is no longer implemented, and the test that pinned it no longer exists.**
+> The incarnation pair was removed from `HandshakePayload` because nothing ever produced a
+> non-zero value: the epoch protocol that claimed a lineage per process was deleted and no
+> coordinator replaced it, so every comparison below was `0` against `0` and all three branches
+> were unreachable. `reset_stream()` and the `LinkIncarnations` suite went with them.
+>
+> The original text is kept below for whoever reinstates a lineage fence, because the *reasoning*
+> is still correct and is the reason the fence must come back together with a producer rather
+> than on its own.
+
+> ~~**Normative:** `reconcile` compares incarnations first. A peer whose incarnation is *below*
 > the one this side has already reconciled with is refused. A peer that reports talking to a
 > *higher* incarnation of this rank than this process holds means this process is the zombie,
 > and it refuses to serve. A peer whose incarnation is *above* what this side recorded has
-> restarted from nothing, so the stream resets on both sides.
+> restarted from nothing, so the stream resets on both sides.~~
 
-Order matters because a replacement legitimately arrives expecting sequence 0 while this side
-has pruned well past it. Judged as a same-lineage handshake that is an impossible state, and
-the legitimate replacement is rejected. Pinned by
-`LinkIncarnations/a_replacements_zero_sequences_would_be_rejected_without_the_lineage_check`.
+Order mattered because a replacement legitimately arrives expecting sequence 0 while this side
+has pruned well past it. Without the lineage arm that is judged as a same-lineage handshake in
+an impossible state, and the legitimate replacement is rejected. **That is the behaviour today:**
+`reconcile` now refuses such a peer with "peer expects sequence 0 which is below our lowest
+retained N". For the checkpoint-restore case this layer actually serves, a restored process
+carries its sequences inside the criu image and so never presents zero — which is why the
+`CheckpointFreezePoints` and `criu-transparent-checkpoint` evidence is unaffected.
 
 ### R6 — Delivery order is the lane's, not the socket's
 
@@ -398,7 +411,6 @@ layer: with TCPunch out of the build, the same collectives pass.
 | a severed link loses and duplicates nothing | `LinkRecovery`, `TransportRecovery` |
 | every freeze position is recoverable | `CheckpointFreezePoints` |
 | one-way links keep flowing | `LinkLiveness` |
-| lineage rules fence a zombie | `LinkIncarnations` |
 | **an unmodified FMI program survives a real checkpoint** | `runbooks/criu-transparent-checkpoint`, criu 4.2 |
 | the tests detect the faults they claim to | `tests/tools/mutation_sweep.py` |
 

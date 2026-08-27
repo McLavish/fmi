@@ -855,7 +855,7 @@ void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num se
         FrameHeader arrived;
         // The cap is the LINK's maximum frame, not the application's buffer. Using buf.len
         // here conflates two different limits and rejects any frame larger than the message
-        // being waited for — including a handshake frame, which is 56 bytes and arrives while
+        // being waited for — including a handshake frame, which is handshake_bytes and arrives while
         // the application is waiting for four. What the application's length actually
         // constrains is checked below, once the frame is known to be data.
         const DecodeStatus status =

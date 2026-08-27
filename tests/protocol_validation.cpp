@@ -120,6 +120,7 @@ BOOST_AUTO_TEST_CASE(a_later_iteration_of_the_same_collective_is_refused) {
     expected.op_kind = OpKind::Bcast;
     expected.collective_index = 1;
     expected.root = 0;
+    expected.payload_length = 4;   // differ in collective_index and NOTHING else
     char dst[4] = {0};
     BOOST_CHECK(receiver.deliver_into(expected, dst, 4) == Accept::IdentityMismatch);
 }
@@ -134,6 +135,7 @@ BOOST_AUTO_TEST_CASE(a_collective_with_a_different_root_is_refused) {
     sent.op_kind = OpKind::Gather;
     sent.collective_index = 0;
     sent.root = 0;
+    sent.payload_length = 4;       // so `expected` below differs in root and NOTHING else
     BOOST_REQUIRE(sender.admit(sent, body.data(), body.size(), stamped));
     BOOST_REQUIRE(receiver.accept(stamped, body.data()) == Accept::Delivered);
 
@@ -146,6 +148,14 @@ BOOST_AUTO_TEST_CASE(a_collective_with_a_different_root_is_refused) {
 BOOST_AUTO_TEST_CASE(a_payload_of_the_wrong_size_is_refused_and_writes_nothing) {
     // Kills a mutation that dropped the payload-size check in deliver_into. Without it a
     // shorter frame would memcpy into a larger application buffer, or vice versa.
+    //
+    // The identity here must MATCH, or same_identity short-circuits and the size check below is
+    // never reached — which is what silently unpinned this case when payload_length absorbed
+    // total_length's identity role. `sent` therefore carries the payload_length it is admitted
+    // with, so the ONLY disagreement left for deliver_into to find is the caller's `len`.
+    // Production cannot reach this state (expected_identity always builds payload_length from
+    // the caller's own buffer length, so same_identity would catch it first); the check is
+    // defence in depth, and this case is what keeps it honest.
     SequencedLink sender{{8, 1u << 20, 1u << 20}};
     SequencedLink receiver{{8, 1u << 20, 1u << 20}};
     const std::string body = "0123";
@@ -153,13 +163,14 @@ BOOST_AUTO_TEST_CASE(a_payload_of_the_wrong_size_is_refused_and_writes_nothing) 
     sent.lane = Lane::P2P;
     sent.op_kind = OpKind::Send;
     sent.root = 1;
+    sent.payload_length = 4;
     FrameHeader stamped;
     BOOST_REQUIRE(sender.admit(sent, body.data(), body.size(), stamped));
     BOOST_REQUIRE(receiver.accept(stamped, body.data()) == Accept::Delivered);
 
     char dst[8];
     std::memset(dst, 0xEE, sizeof dst);
-    // Identity says payload_length 4, but the caller asks for 8 bytes.
+    // Identity agrees in every field; the caller simply asks for 8 bytes of a 4-byte message.
     FrameHeader expected = sent;
     BOOST_CHECK(receiver.deliver_into(expected, dst, 8) == Accept::IdentityMismatch);
     for (unsigned char c : dst) {

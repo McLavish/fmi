@@ -209,7 +209,7 @@ namespace FMI::Comm {
         //! Highest cumulative ack this side has actually put on the wire.
         std::uint64_t acked_to_peer = 0;
 
-        // identity (contract 3)
+        //! A frame committed to a drain queue, waiting for the application to ask for it.
         struct Committed {
             FrameHeader header;
             std::vector<char> payload;

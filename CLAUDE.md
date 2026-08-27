@@ -382,8 +382,15 @@ The dependency direction is: user API → channel policy → channel → transpo
   - `magic` and `wire_version` are deliberately **kept** although neither carries information
     between conforming peers: `magic` is the only detector of a raw/unframed peer and of a
     desynchronised stream, and `wire_version` is the fence that makes format changes safe. Both
-    keep their offsets across versions and both decoders check them first, so an old and a new
-    binary refuse each other as `BadVersion` in both directions rather than misparsing.
+    keep their offsets across every version so far (0..3 and 4..5 of each record) and both
+    decoders check them before anything else.
+    The fence is **not symmetric**, and shrinking a header is why. A version 4 rank reading a
+    version 3 peer buffers 42 bytes, finds `wire_version` 3 and raises `BadVersion` at once. A
+    version 3 rank reading a version 4 peer is waiting for **72** bytes before it decodes
+    anything, so it raises `BadVersion` only once ≥72 bytes have arrived — and if the v4 side's
+    traffic is smaller than that and then goes quiet, the old rank blocks instead. Mixing builds
+    across a wire-version bump is a deployment error either way; the point is that in one
+    direction it can present as a hang rather than an error, so **rebuild every rank together**.
   - `header_field_bytes`/`handshake_field_bytes` plus their `static_assert`s pin the encoders'
     field widths to the size constants. This matters now that the headers are exactly their field
     sums: the old `while (off < frame_header_bytes)` pad loop was silently absorbing any
