@@ -21,6 +21,7 @@ set(FMI_EXAMPLE_NAMES
     jacobi
     npb_ep
     mantevo_hpccg
+    lulesh
     mixed_workload
     checkpoint_workload
     long_communicating_checkpoint

@@ -37,6 +37,9 @@ EXAMPLES=(
     # wall-clock cap: a slow TCPunch rendezvous should not be reported as a failed example.
     "npb_ep:--m 24 --timeout 360"
     "mantevo_hpccg:--nx 16 --ny 16 --nz 16 --max-iter 20"
+    # LULESH needs a perfect-cube rank count, so it overrides the suite-wide $RANKS (last flag
+    # wins). Size 10 runs its 575 cycles to completion in ~10 s on 8 local ranks over Redis.
+    "lulesh:--ranks 8 --size 10"
     "mixed_workload:--num-iterations 2 --sleep-min 0 --sleep-max 1"
     "checkpoint_workload:--num-iterations 2 --sleep-seconds 0 --num-collectives 2"
     "long_communicating_checkpoint:--num-iterations 5"

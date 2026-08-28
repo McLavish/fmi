@@ -9,7 +9,9 @@ The kernels are ports of the FMI example applications that live in GapRunner
 (`/home/luca/GapRunner/functions/cpp`) as rFaaS functions, but nothing of that execution model
 survives here: no rFaaS, no cereal, no gRPC, no hook contract and no central driver — just FMI
 plus a small shared header (`common/launcher.hpp`) for flag parsing, local multi-rank launching
-and the teardown handshake.
+and the teardown handshake. The one kernel with a different origin is `lulesh`: LLNL's LULESH 2.0
+as ported in [McLavish/LULESH_FMI](https://github.com/McLavish/LULESH_FMI), where the unchanged
+physics runs behind a small MPI-compatible layer over FMI; here it is squashed into one file.
 
 ## Prerequisites
 
@@ -96,6 +98,7 @@ examples additionally accept the common flags listed further down.
 | `jacobi` | 2D Jacobi stencil with halo exchange over a 200x200 grid, 30 timesteps | – (grid `N=200`, `T=30` compiled in) |
 | `npb_ep` | NAS Parallel Benchmarks EP kernel with a double `allreduce` | `--m` (28; use 24 locally) |
 | `mantevo_hpccg` | Mantevo HPCCG conjugate gradient solver | `--nx` `--ny` `--nz` (64), `--max-iter` (150), `--tolerance` (0.0) |
+| `lulesh` | LULESH 2.0 Sedov shock hydrodynamics: 26-neighbour halo exchange (`send`/`recv`) plus a `dt` `allreduce` every cycle | `--size` (30), `--iters` (9999999, i.e. to completion), `--regions` (11), `--balance` (1), `--cost` (1), `--progress` (0), `--expected-energy` (0 = unchecked; 8 ranks at size 30 give `7.130703e+05`) |
 | `mixed_workload` | Alternating sleep phases and collectives | `--num-iterations` (5), `--sleep-min` (1), `--sleep-max` (3) |
 | `checkpoint_workload` | Iterations of sleep + collectives, sized for checkpoint experiments | `--num-iterations` (1), `--sleep-seconds` (0), `--num-collectives` (0) |
 | `long_communicating_checkpoint` | Long `allreduce` loop that validates every iteration | `--num-iterations` (1000) |
@@ -119,6 +122,9 @@ guard also rejects an explicit `--rank` process, so a cross-machine run cannot s
   `0 <= --sleep-min <= --sleep-max`.
 - `mantevo_hpccg` requires `--nx`, `--ny`, `--nz` and `--max-iter` to be at least 1, and rejects
   sizes whose row or nonzero counts would overflow an `int`.
+- `lulesh` decomposes onto a cubic grid of ranks, so it needs a perfect-cube rank count (1, 8, 27
+  or 64 within the launcher's cap) and presets `--ranks` to 8 instead of the usual 4. `--size`,
+  `--iters` and `--regions` must be at least 1, `--balance` and `--cost` non-negative.
 - `avg`, `crashing`, `checkpoint_workload`, `long_communicating_checkpoint` and the
   `fixed_size_ckpt_*` pair run at any rank count from 1 up.
 
@@ -199,6 +205,9 @@ A few checks are rank-conditional, and in this mode they run only in the process
 - `npb_ep` and `mantevo_hpccg` — every rank verifies its own result (EP sums against the
   reference table; a finite residual and the expected iteration count), but the *cross-rank
   agreement* check over the gathered values is evaluated on rank 0 only.
+- `lulesh` — every rank checks that it advanced and holds a finite origin energy; the plane-0
+  symmetry check, the `--expected-energy` check and the cross-rank agreement of cycle count and
+  simulated time are evaluated on rank 0 only.
 - `communicating` — the gather result only exists on rank 0, so only rank 0 checks it. Every
   other collective in that example is checked on every rank.
 
@@ -212,7 +221,7 @@ full verdict.
   model decides per operation, and with the default hint (`cheap`) and `--memory 128` it picks
   **Direct** for small point-to-point messages — so this config **needs both Redis and tcpunchd
   on port 10000**. It does *not* fall back when a backend is unreachable: without tcpunchd,
-  `communicating`, `ring`, `jacobi`, `mantevo_hpccg` and `mixed_workload` fail with
+  `communicating`, `ring`, `jacobi`, `mantevo_hpccg`, `lulesh` and `mixed_workload` fail with
   `Connection with the rendezvous server failed`.
 - `config/fmi_examples_redis.json` — only Redis enabled (no tcpunchd needed).
 - `config/fmi_examples_direct.json` — only Direct enabled (needs tcpunchd on port 10000).
