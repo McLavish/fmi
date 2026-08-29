@@ -1,0 +1,1394 @@
+(00.000000) CRIU run id = 0xeffffffc000804d8
+(00.000037) Version: 3.19 (gitid 0)
+(00.000040) Running on criu-testing Linux 5.14.0-687.24.1+2.1.el9_8_ciq.x86_64 #1 SMP PREEMPT_DYNAMIC Tue Jul 14 23:31:43 UTC 2026 x86_64
+(00.000050) Loaded kdat cache from /run/user/1000/criu.kdat
+(00.000065) Hugetlb size 2 Mb is supported but cannot get dev's number
+(00.000071) Hugetlb size 1024 Mb is supported but cannot get dev's number
+(00.000266) ========================================
+(00.000275) Dumping processes (pid: 525507 comm: fmi_checkpoint_)
+(00.000276) ========================================
+(00.000277) Effective capability 24 missing
+(00.000280) Running pre-dump scripts
+(00.000297) irmap: Searching irmap cache in work dir
+(00.000302) No irmap-cache image
+(00.000303) irmap: Searching irmap cache in parent
+(00.000305) No parent images directory provided
+(00.000306) irmap: No irmap cache
+(00.000320) cpu: x86_family 26 x86_vendor_id AuthenticAMD x86_model_id AMD EPYC 9B45
+(00.000324) cpu: fpu: xfeatures_mask 0x2e5 xsave_size 2440 xsave_size_max 2440 xsaves_size 2440
+(00.000333) cpu: fpu: x87 floating point registers     xstate_offsets      0 / 0      xstate_sizes    160 / 160   
+(00.000335) cpu: fpu: AVX registers                    xstate_offsets    576 / 576    xstate_sizes    256 / 256   
+(00.000336) cpu: fpu: AVX-512 opmask                   xstate_offsets    832 / 832    xstate_sizes     64 / 64    
+(00.000337) cpu: fpu: AVX-512 Hi256                    xstate_offsets    896 / 896    xstate_sizes    512 / 512   
+(00.000338) cpu: fpu: AVX-512 ZMM_Hi256                xstate_offsets   1408 / 1408   xstate_sizes   1024 / 1024  
+(00.000338) cpu: fpu: Protection Keys User registers   xstate_offsets   2432 / 2432   xstate_sizes      8 / 8     
+(00.000339) cpu: fpu:1 fxsr:1 xsave:1 xsaveopt:1 xsavec:1 xgetbv1:1 xsaves:1
+(00.000389) vdso: VDSO detection turned off
+(00.000391) cg-prop: Parsing controller "cpu"
+(00.000392) cg-prop: 	Strategy "replace"
+(00.000394) cg-prop: 	Property "cpu.shares"
+(00.000394) cg-prop: 	Property "cpu.cfs_period_us"
+(00.000395) cg-prop: 	Property "cpu.cfs_quota_us"
+(00.000396) cg-prop: 	Property "cpu.rt_period_us"
+(00.000397) cg-prop: 	Property "cpu.rt_runtime_us"
+(00.000397) cg-prop: Parsing controller "memory"
+(00.000398) cg-prop: 	Strategy "replace"
+(00.000399) cg-prop: 	Property "memory.limit_in_bytes"
+(00.000399) cg-prop: 	Property "memory.memsw.limit_in_bytes"
+(00.000400) cg-prop: 	Property "memory.swappiness"
+(00.000400) cg-prop: 	Property "memory.soft_limit_in_bytes"
+(00.000401) cg-prop: 	Property "memory.move_charge_at_immigrate"
+(00.000401) cg-prop: 	Property "memory.oom_control"
+(00.000402) cg-prop: 	Property "memory.use_hierarchy"
+(00.000403) cg-prop: 	Property "memory.kmem.limit_in_bytes"
+(00.000404) cg-prop: 	Property "memory.kmem.tcp.limit_in_bytes"
+(00.000404) cg-prop: Parsing controller "cpuset"
+(00.000405) cg-prop: 	Strategy "replace"
+(00.000406) cg-prop: 	Property "cpuset.cpus"
+(00.000406) cg-prop: 	Property "cpuset.mems"
+(00.000407) cg-prop: 	Property "cpuset.memory_migrate"
+(00.000407) cg-prop: 	Property "cpuset.cpu_exclusive"
+(00.000408) cg-prop: 	Property "cpuset.mem_exclusive"
+(00.000408) cg-prop: 	Property "cpuset.mem_hardwall"
+(00.000409) cg-prop: 	Property "cpuset.memory_spread_page"
+(00.000409) cg-prop: 	Property "cpuset.memory_spread_slab"
+(00.000410) cg-prop: 	Property "cpuset.sched_load_balance"
+(00.000411) cg-prop: 	Property "cpuset.sched_relax_domain_level"
+(00.000411) cg-prop: Parsing controller "blkio"
+(00.000412) cg-prop: 	Strategy "replace"
+(00.000413) cg-prop: 	Property "blkio.weight"
+(00.000414) cg-prop: Parsing controller "freezer"
+(00.000414) cg-prop: 	Strategy "replace"
+(00.000415) cg-prop: Parsing controller "perf_event"
+(00.000415) cg-prop: 	Strategy "replace"
+(00.000416) cg-prop: Parsing controller "net_cls"
+(00.000417) cg-prop: 	Strategy "replace"
+(00.000417) cg-prop: 	Property "net_cls.classid"
+(00.000418) cg-prop: Parsing controller "net_prio"
+(00.000418) cg-prop: 	Strategy "replace"
+(00.000419) cg-prop: 	Property "net_prio.ifpriomap"
+(00.000420) cg-prop: Parsing controller "pids"
+(00.000423) cg-prop: 	Strategy "replace"
+(00.000424) cg-prop: 	Property "pids.max"
+(00.000424) cg-prop: Parsing controller "devices"
+(00.000425) cg-prop: 	Strategy "replace"
+(00.000425) cg-prop: 	Property "devices.list"
+(00.000438) Preparing image inventory (version 1)
+(00.000446) Add pid ns 1 pid 525528
+(00.000449) Add net ns 2 pid 525528
+(00.000453) Add ipc ns 3 pid 525528
+(00.000456) Add uts ns 4 pid 525528
+(00.000459) Add time ns 5 pid 525528
+(00.000465) Add mnt ns 6 pid 525528
+(00.000469) Add user ns 7 pid 525528
+(00.000472) Add cgroup ns 8 pid 525528
+(00.000479) Detected cgroup V1 freezer
+(00.000513) Seized task 525507, state 3
+(00.000514) seccomp: Collected tid_real 525507 mode 0
+(00.000525) 	Seizing 525507's 525509 thread
+(00.000544) seccomp: Collected tid_real 525509 mode 0
+(00.000545) 	Seizing 525507's 525511 thread
+(00.000561) seccomp: Collected tid_real 525511 mode 0
+(00.000565) Collected (3 attempts, 0 in_progress)
+(00.000575) Collected (4 attempts, 0 in_progress)
+(00.000582) Collected 525507 in 3 state
+(00.000605) net: Lock network
+(00.000636) 	type proc source proc mnt_id 23 s_dev 0x16 / @ ./proc flags 0x30000e options 
+(00.000641) 	type sysfs source sysfs mnt_id 24 s_dev 0x17 / @ ./sys flags 0x30000e options seclabel
+(00.000644) 	type devtmpfs source devtmpfs mnt_id 25 s_dev 0x6 / @ ./dev flags 0x1100002 options seclabel,size=15758644k,nr_inodes=3939661,mode=755,inode64
+(00.000646) 	type securityfs source securityfs mnt_id 26 s_dev 0x7 / @ ./sys/kernel/security flags 0x30000e options 
+(00.000649) 	type tmpfs source tmpfs mnt_id 27 s_dev 0x18 / @ ./dev/shm flags 0x1100006 options seclabel,inode64
+(00.000653) 	type devpts source devpts mnt_id 28 s_dev 0x19 / @ ./dev/pts flags 0x30000a options seclabel,gid=5,mode=620,ptmxmode=000
+(00.000658) 	type tmpfs source tmpfs mnt_id 29 s_dev 0x1a / @ ./run flags 0x1100006 options seclabel,size=6312928k,nr_inodes=819200,mode=755,inode64
+(00.000662) 	type cgroup2 source cgroup2 mnt_id 30 s_dev 0x1b / @ ./sys/fs/cgroup flags 0x30000e options seclabel,nsdelegate,memory_recursiveprot
+(00.000664) 	type pstore source pstore mnt_id 31 s_dev 0x1c / @ ./sys/fs/pstore flags 0x30000e options seclabel
+(00.000684) 	type efivarfs source efivarfs mnt_id 32 s_dev 0x1d / @ ./sys/firmware/efi/efivars flags 0x30000e options 
+(00.000687) 	type bpf source bpf mnt_id 33 s_dev 0x1e / @ ./sys/fs/bpf flags 0x30000e options mode=700
+(00.000690) 	type configfs source configfs mnt_id 68 s_dev 0x12 / @ ./sys/kernel/config flags 0x30000e options 
+(00.000692) 	type xfs source /dev/nvme0n1p2 mnt_id 73 s_dev 0x10300002 / @ ./ flags 0x300000 options seclabel,attr2,inode64,logbufs=8,logbsize=32k,noquota
+(00.000694) 	type selinuxfs source selinuxfs mnt_id 35 s_dev 0x15 / @ ./sys/fs/selinux flags 0x30000a options 
+(00.000698) 	type autofs source systemd-1 mnt_id 34 s_dev 0x1f / @ ./proc/sys/fs/binfmt_misc flags 0x300000 options fd=29,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=24855
+(00.000701) 	type hugetlbfs source hugetlbfs mnt_id 36 s_dev 0x20 / @ ./dev/hugepages flags 0x300000 options seclabel,pagesize=2M
+(00.000703) 	type mqueue source mqueue mnt_id 37 s_dev 0x14 / @ ./dev/mqueue flags 0x30000e options seclabel
+(00.000705) 	type debugfs source debugfs mnt_id 38 s_dev 0x8 / @ ./sys/kernel/debug flags 0x30000e options seclabel
+(00.000708) 	type tracefs source tracefs mnt_id 39 s_dev 0xd / @ ./sys/kernel/tracing flags 0x30000e options seclabel
+(00.000709) 	skipping fs mounted at /sys/kernel/tracing
+(00.000723) 	type fusectl source fusectl mnt_id 40 s_dev 0x21 / @ ./sys/fs/fuse/connections flags 0x30000e options 
+(00.000725) 	type ramfs source none mnt_id 63 s_dev 0x22 / @ ./run/credentials/systemd-sysctl.service flags 0x30000f options seclabel,mode=700
+(00.000727) 	type ramfs source none mnt_id 65 s_dev 0x23 / @ ./run/credentials/systemd-sysusers.service flags 0x30000f options seclabel,mode=700
+(00.000729) 	type ramfs source none mnt_id 67 s_dev 0x24 / @ ./run/credentials/systemd-tmpfiles-setup-dev.service flags 0x30000f options seclabel,mode=700
+(00.000732) 	type vfat source /dev/nvme0n1p1 mnt_id 90 s_dev 0x10300001 / @ ./boot/efi flags 0x300000 options fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=winnt,errors=remount-ro
+(00.000736) 	type ramfs source none mnt_id 123 s_dev 0x25 / @ ./run/credentials/systemd-tmpfiles-setup.service flags 0x30000f options seclabel,mode=700
+(00.000739) 	type tmpfs source tmpfs mnt_id 345 s_dev 0x29 / @ ./run/user/1000 flags 0x300006 options seclabel,size=3156460k,nr_inodes=789115,mode=700,uid=1000,gid=1005,inode64
+(00.000741) 	type binfmt_misc source binfmt_misc mnt_id 491 s_dev 0x2c / @ ./proc/sys/fs/binfmt_misc flags 0x30000e options 
+(00.000743) mnt: Building mountpoints tree
+(00.000744) mnt: 	Building plain mount tree
+(00.000745) mnt: 		Working on 491->34
+(00.000745) mnt: 		Working on 345->29
+(00.000746) mnt: 		Working on 123->29
+(00.000746) mnt: 		Working on 90->73
+(00.000747) mnt: 		Working on 67->29
+(00.000748) mnt: 		Working on 65->29
+(00.000748) mnt: 		Working on 63->29
+(00.000748) mnt: 		Working on 40->24
+(00.000749) mnt: 		Working on 38->24
+(00.000749) mnt: 		Working on 37->25
+(00.000750) mnt: 		Working on 36->25
+(00.000750) mnt: 		Working on 34->23
+(00.000751) mnt: 		Working on 35->24
+(00.000751) mnt: 		Working on 73->1
+(00.000752) mnt: 		Working on 68->24
+(00.000752) mnt: 		Working on 33->24
+(00.000753) mnt: 		Working on 32->24
+(00.000753) mnt: 		Working on 31->24
+(00.000754) mnt: 		Working on 30->24
+(00.000754) mnt: 		Working on 29->73
+(00.000755) mnt: 		Working on 28->25
+(00.000755) mnt: 		Working on 27->25
+(00.000756) mnt: 		Working on 26->24
+(00.000756) mnt: 		Working on 25->73
+(00.000757) mnt: 		Working on 24->73
+(00.000757) mnt: 		Working on 23->73
+(00.000758) mnt: 	Resorting children of 73 in mount order
+(00.000759) mnt: 	Resorting children of 90 in mount order
+(00.000759) mnt: 	Resorting children of 29 in mount order
+(00.000760) mnt: 	Resorting children of 345 in mount order
+(00.000761) mnt: 	Resorting children of 123 in mount order
+(00.000761) mnt: 	Resorting children of 67 in mount order
+(00.000762) mnt: 	Resorting children of 65 in mount order
+(00.000762) mnt: 	Resorting children of 63 in mount order
+(00.000763) mnt: 	Resorting children of 25 in mount order
+(00.000763) mnt: 	Resorting children of 37 in mount order
+(00.000764) mnt: 	Resorting children of 36 in mount order
+(00.000764) mnt: 	Resorting children of 28 in mount order
+(00.000765) mnt: 	Resorting children of 27 in mount order
+(00.000765) mnt: 	Resorting children of 24 in mount order
+(00.000766) mnt: 	Resorting children of 40 in mount order
+(00.000767) mnt: 	Resorting children of 32 in mount order
+(00.000767) mnt: 	Resorting children of 38 in mount order
+(00.000768) mnt: 	Resorting children of 35 in mount order
+(00.000768) mnt: 	Resorting children of 68 in mount order
+(00.000768) mnt: 	Resorting children of 33 in mount order
+(00.000769) mnt: 	Resorting children of 31 in mount order
+(00.000769) mnt: 	Resorting children of 30 in mount order
+(00.000770) mnt: 	Resorting children of 26 in mount order
+(00.000770) mnt: 	Resorting children of 23 in mount order
+(00.000771) mnt: 	Resorting children of 34 in mount order
+(00.000771) mnt: 	Resorting children of 491 in mount order
+(00.000772) mnt: Done:
+(00.000772) mnt: [./](73->1)
+(00.000773) mnt:  [./boot/efi](90->73)
+(00.000774) mnt:  <--
+(00.000774) mnt:  [./run](29->73)
+(00.000775) mnt:   [./run/user/1000](345->29)
+(00.000776) mnt:   <--
+(00.000776) mnt:   [./run/credentials/systemd-tmpfiles-setup.service](123->29)
+(00.000777) mnt:   <--
+(00.000777) mnt:   [./run/credentials/systemd-tmpfiles-setup-dev.service](67->29)
+(00.000778) mnt:   <--
+(00.000778) mnt:   [./run/credentials/systemd-sysusers.service](65->29)
+(00.000779) mnt:   <--
+(00.000779) mnt:   [./run/credentials/systemd-sysctl.service](63->29)
+(00.000780) mnt:   <--
+(00.000780) mnt:  <--
+(00.000781) mnt:  [./dev](25->73)
+(00.000781) mnt:   [./dev/mqueue](37->25)
+(00.000782) mnt:   <--
+(00.000782) mnt:   [./dev/hugepages](36->25)
+(00.000783) mnt:   <--
+(00.000783) mnt:   [./dev/pts](28->25)
+(00.000784) mnt:   <--
+(00.000784) mnt:   [./dev/shm](27->25)
+(00.000785) mnt:   <--
+(00.000786) mnt:  <--
+(00.000787) mnt:  [./sys](24->73)
+(00.000787) mnt:   [./sys/fs/fuse/connections](40->24)
+(00.000788) mnt:   <--
+(00.000788) mnt:   [./sys/firmware/efi/efivars](32->24)
+(00.000789) mnt:   <--
+(00.000789) mnt:   [./sys/kernel/debug](38->24)
+(00.000790) mnt:   <--
+(00.000790) mnt:   [./sys/fs/selinux](35->24)
+(00.000791) mnt:   <--
+(00.000791) mnt:   [./sys/kernel/config](68->24)
+(00.000792) mnt:   <--
+(00.000792) mnt:   [./sys/fs/bpf](33->24)
+(00.000793) mnt:   <--
+(00.000793) mnt:   [./sys/fs/pstore](31->24)
+(00.000794) mnt:   <--
+(00.000794) mnt:   [./sys/fs/cgroup](30->24)
+(00.000795) mnt:   <--
+(00.000795) mnt:   [./sys/kernel/security](26->24)
+(00.000796) mnt:   <--
+(00.000796) mnt:  <--
+(00.000797) mnt:  [./proc](23->73)
+(00.000797) mnt:   [./proc/sys/fs/binfmt_misc](34->23)
+(00.000798) mnt:    [./proc/sys/fs/binfmt_misc](491->34)
+(00.000798) mnt:    <--
+(00.000799) mnt:   <--
+(00.000799) mnt:  <--
+(00.000800) mnt: <--
+(00.000804) net: Collecting netns 2/525528
+(00.000927) unix: 	Collected: ino 18327 peer_ino 0 family    1 type    1 state 10 name /run/google-guest-agent/plugin-connections/GuestAgentCorePlugin_20260511.00.sock
+(00.000931) unix: 	Collected: ino 19992 peer_ino 0 family    1 type    1 state 10 name /run/google-guest-agent/plugin-connections/GuestTelemetryExtension_1.0.sock
+(00.000935) unix: 	Collected: ino 42070 peer_ino 0 family    1 type    2 state  7 name /run/user/1000/systemd/notify
+(00.000937) unix: 	Collected: ino 42073 peer_ino 0 family    1 type    1 state 10 name /run/user/1000/systemd/private
+(00.000938) unix: 	Collected: ino 42083 peer_ino 0 family    1 type    1 state 10 name /run/user/1000/bus
+(00.000939) unix: 	Collected: ino 2069 peer_ino 0 family    1 type    2 state  1 name /run/systemd/notify
+(00.000940) unix: 	Collected: ino 2074 peer_ino 0 family    1 type    1 state 10 name /run/systemd/userdb/io.systemd.DynamicUser
+(00.000941) unix: 	Collected: ino 2075 peer_ino 0 family    1 type    1 state 10 name /run/systemd/io.system.ManagedOOM
+(00.000944) unix: 	Collected: ino 2084 peer_ino 0 family    1 type    2 state  1 name /run/systemd/journal/dev-log
+(00.000945) unix: 	Collected: ino 2086 peer_ino 0 family    1 type    2 state  1 name /run/systemd/journal/socket
+(00.000946) unix: 	Collected: ino 2088 peer_ino 0 family    1 type    1 state 10 name /run/systemd/journal/stdout
+(00.000949) unix: 	Collected: ino 40244 peer_ino 0 family    1 type    1 state 10 name /tmp/code-insiders-9cb08ee0-429c-4878-8c23-e8476375407b
+(00.000952) unix: 	Collected: ino 170797496 peer_ino 0 family    1 type    1 state 10 name /tmp/cc-daemon-1000/1eb11d31/spare/6fd9e7f4.pty.sock
+(00.000954) unix: 	Collected: ino 170803249 peer_ino 0 family    1 type    1 state 10 name /tmp/cc-daemon-1000/1eb11d31/spare/8d0c54fa.pty.sock
+(00.000955) unix: 	Collected: ino 170803434 peer_ino 0 family    1 type    1 state 10 name /tmp/cc-daemon-1000/1eb11d31/spare/6fd9e7f4.claim.sock
+(00.000958) unix: 	Collected: ino 170802579 peer_ino 0 family    1 type    1 state 10 name /tmp/cc-daemon-1000/1eb11d31/spare/e0dcfa64.pty.sock
+(00.000959) unix: 	Collected: ino 25776 peer_ino 0 family    1 type    1 state 10 name /run/dbus/system_bus_socket
+(00.000960) unix: 	Collected: ino 25777 peer_ino 0 family    1 type    1 state 10 name /run/.heim_org.h5l.kcm-socket
+(00.000961) unix: 	Collected: ino 170797411 peer_ino 0 family    1 type    1 state 10 name /run/user/1000/cc-socks/468051.sock
+(00.000963) unix: 	Collected: ino 170804317 peer_ino 0 family    1 type    1 state 10 name /run/user/1000/cc-socks/468363.sock
+(00.000964) unix: 	Collected: ino 15901 peer_ino 0 family    1 type    2 state  1 name /run/chrony/chronyd.sock
+(00.000967) unix: 	Collected: ino 170799770 peer_ino 0 family    1 type    1 state 10 name /tmp/cc-daemon-1000/1eb11d31/rv/615d82c2.sock
+(00.000968) unix: 	Collected: ino 170804342 peer_ino 0 family    1 type    1 state 10 name /tmp/cc-daemon-1000/1eb11d31/rv/d00a17e1.sock
+(00.000969) unix: 	Collected: ino 25657 peer_ino 0 family    1 type    1 state 10 name /run/systemd/private
+(00.000972) unix: 	Collected: ino 24858 peer_ino 0 family    1 type    5 state 10 name /run/systemd/coredump
+(00.000975) unix: 	Collected: ino 24859 peer_ino 0 family    1 type    5 state 10 name /run/udev/control
+(00.000976) unix: 	Collected: ino 15670 peer_ino 0 family    1 type    1 state 10 name /run/systemd/journal/io.systemd.journal
+(00.000977) unix: 	Collected: ino 170799909 peer_ino 0 family    1 type    1 state 10 name /tmp/cc-daemon-1000/1eb11d31/control.sock
+(00.000979) unix: 	Collected: ino 25060 peer_ino 25059 family    1 type    1 state  1 name null
+(00.000980) unix: 	Collected: ino 170835601 peer_ino 170835602 family    1 type    1 state  1 name null
+(00.000983) unix: 	Collected: ino 170902285 peer_ino 170902284 family    1 type    1 state  1 name null
+(00.000984) unix: 	Collected: ino 25059 peer_ino 25060 family    1 type    1 state  1 name null
+(00.000985) unix: 	Collected: ino 170835604 peer_ino 170835603 family    1 type    1 state  1 name null
+(00.000986) unix: 	Collected: ino 42071 peer_ino 42072 family    1 type    2 state  1 name null
+(00.000989) unix: 	Collected: ino 28956 peer_ino 26447 family    1 type    1 state  1 name null
+(00.000990) unix: 	Collected: ino 170902326 peer_ino 170902325 family    1 type    1 state  1 name null
+(00.000991) unix: 	Collected: ino 25061 peer_ino 15884 family    1 type    1 state  1 name null
+(00.000994) unix: 	Collected: ino 26447 peer_ino 28956 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.000999) unix: 	Collected: ino 170902325 peer_ino 170902326 family    1 type    1 state  1 name null
+(00.001000) unix: 	Collected: ino 170835605 peer_ino 170835606 family    1 type    1 state  1 name null
+(00.001002) unix: 	Collected: ino 170835603 peer_ino 170835604 family    1 type    1 state  1 name null
+(00.001003) unix: 	Collected: ino 15884 peer_ino 25061 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001004) unix: 	Collected: ino 170901204 peer_ino 170901203 family    1 type    1 state  1 name null
+(00.001005) unix: 	Collected: ino 42072 peer_ino 42071 family    1 type    2 state  1 name null
+(00.001006) unix: 	Collected: ino 170803431 peer_ino 170799914 family    1 type    1 state  1 name /tmp/cc-daemon-1000/1eb11d31/spare/8d0c54fa.pty.sock
+(00.001010) unix: 	Collected: ino 25265 peer_ino 1346 family    1 type    1 state  1 name null
+(00.001011) unix: 	Collected: ino 380 peer_ino 25166 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001012) unix: 	Collected: ino 170797493 peer_ino 170799915 family    1 type    1 state  1 name /tmp/cc-daemon-1000/1eb11d31/rv/615d82c2.sock
+(00.001013) unix: 	Collected: ino 170903181 peer_ino 170903180 family    1 type    1 state  1 name null
+(00.001014) unix: 	Collected: ino 25156 peer_ino 15910 family    1 type    1 state  1 name null
+(00.001015) unix: 	Collected: ino 15938 peer_ino 2084 family    1 type    2 state  1 name null
+(00.001017) unix: 	Collected: ino 170904758 peer_ino 170904759 family    1 type    1 state  1 name null
+(00.001018) unix: 	Collected: ino 25268 peer_ino 1356 family    1 type    1 state  1 name null
+(00.001019) unix: 	Collected: ino 25785 peer_ino 15883 family    1 type    1 state  1 name null
+(00.001020) unix: 	Collected: ino 170835602 peer_ino 170835601 family    1 type    1 state  1 name null
+(00.001021) unix: 	Collected: ino 1356 peer_ino 25268 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001022) unix: 	Collected: ino 170902284 peer_ino 170902285 family    1 type    1 state  1 name null
+(00.001023) unix: 	Collected: ino 170904759 peer_ino 170904758 family    1 type    1 state  1 name null
+(00.001024) unix: 	Collected: ino 15910 peer_ino 25156 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001026) unix: 	Collected: ino 15671 peer_ino 2069 family    1 type    2 state  1 name null
+(00.001027) unix: 	Collected: ino 170799914 peer_ino 170803431 family    1 type    1 state  1 name null
+(00.001029) unix: 	Collected: ino 170835606 peer_ino 170835605 family    1 type    1 state  1 name null
+(00.001030) unix: 	Collected: ino 170901203 peer_ino 170901204 family    1 type    1 state  1 name null
+(00.001032) unix: 	Collected: ino 42064 peer_ino 2086 family    1 type    2 state  1 name null
+(00.001033) unix: 	Collected: ino 15883 peer_ino 25785 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001034) unix: 	Collected: ino 170903180 peer_ino 170903181 family    1 type    1 state  1 name null
+(00.001036) unix: 	Collected: ino 170799915 peer_ino 170797493 family    1 type    1 state  1 name null
+(00.001037) unix: 	Collected: ino 1346 peer_ino 25265 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001037) unix: 	Collected: ino 25166 peer_ino 380 family    1 type    1 state  1 name null
+(00.001038) unix: 	Collected: ino 42056 peer_ino 2084 family    1 type    2 state  1 name null
+(00.001039) unix: 	Collected: ino 18021 peer_ino 18020 family    1 type    2 state  1 name null
+(00.001041) unix: 	Collected: ino 170904152 peer_ino 170904151 family    1 type    1 state  1 name null
+(00.001041) unix: 	Collected: ino 18877 peer_ino 1354 family    1 type    1 state  1 name null
+(00.001042) unix: 	Collected: ino 19819 peer_ino 18155 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001043) unix: 	Collected: ino 2071 peer_ino 2070 family    1 type    2 state  1 name null
+(00.001044) unix: 	Collected: ino 18279 peer_ino 18856 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001044) unix: 	Collected: ino 170803473 peer_ino 170796535 family    1 type    1 state  1 name null
+(00.001046) unix: 	Collected: ino 39360 peer_ino 39359 family    1 type    1 state  1 name null
+(00.001047) unix: 	Collected: ino 414 peer_ino 19987 family    1 type    1 state  1 name null
+(00.001048) unix: 	Collected: ino 25165 peer_ino 0 family    1 type    2 state  7 name null
+(00.001048) unix: 	Collected: ino 170904093 peer_ino 170904094 family    1 type    1 state  1 name null
+(00.001049) unix: 	Collected: ino 34697 peer_ino 42021 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001050) unix: 	Collected: ino 19987 peer_ino 414 family    1 type    1 state  1 name /run/google-guest-agent/plugin-connections/GuestAgentCorePlugin_20260511.00.sock
+(00.001053) unix: 	Collected: ino 170900366 peer_ino 170900365 family    1 type    1 state  1 name null
+(00.001056) unix: 	Collected: ino 170864213 peer_ino 170864214 family    1 type    1 state  1 name null
+(00.001058) unix: 	Collected: ino 18155 peer_ino 19819 family    1 type    1 state  1 name null
+(00.001060) unix: 	Collected: ino 170857779 peer_ino 0 family    1 type    1 state  1 name null
+(00.001061) unix: 	Collected: ino 1355 peer_ino 18291 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001063) unix: 	Collected: ino 170800578 peer_ino 170801877 family    1 type    1 state  1 name /tmp/cc-daemon-1000/1eb11d31/rv/d00a17e1.sock
+(00.001064) unix: 	Collected: ino 18020 peer_ino 18021 family    1 type    2 state  1 name null
+(00.001065) unix: 	Collected: ino 24886 peer_ino 2086 family    1 type    2 state  1 name null
+(00.001065) unix: 	Collected: ino 18004 peer_ino 15723 family    1 type    1 state  1 name null
+(00.001067) unix: 	Collected: ino 20057 peer_ino 25420 family    1 type    1 state  1 name null
+(00.001068) unix: 	Collected: ino 170801877 peer_ino 170800578 family    1 type    1 state  1 name null
+(00.001069) unix: 	Collected: ino 2070 peer_ino 2071 family    1 type    2 state  1 name null
+(00.001069) unix: 	Collected: ino 18291 peer_ino 1355 family    1 type    1 state  1 name null
+(00.001070) unix: 	Collected: ino 18856 peer_ino 18279 family    1 type    1 state  1 name null
+(00.001071) unix: 	Collected: ino 18195 peer_ino 25086 family    1 type    1 state  1 name null
+(00.001072) unix: 	Collected: ino 15936 peer_ino 18281 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001072) unix: 	Collected: ino 378 peer_ino 19886 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001073) unix: 	Collected: ino 170900365 peer_ino 170900366 family    1 type    1 state  1 name null
+(00.001074) unix: 	Collected: ino 19776 peer_ino 15861 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001077) unix: 	Collected: ino 344 peer_ino 19798 family    1 type    1 state  1 name null
+(00.001078) unix: 	Collected: ino 18281 peer_ino 15936 family    1 type    1 state  1 name null
+(00.001079) unix: 	Collected: ino 19886 peer_ino 378 family    1 type    1 state  1 name null
+(00.001080) unix: 	Collected: ino 25057 peer_ino 2086 family    1 type    2 state  1 name null
+(00.001081) unix: 	Collected: ino 39359 peer_ino 39360 family    1 type    1 state  1 name null
+(00.001082) unix: 	Collected: ino 170906983 peer_ino 0 family    1 type    5 state  7 name null
+(00.001084) unix: 	Collected: ino 18016 peer_ino 2086 family    1 type    2 state  1 name null
+(00.001085) unix: 	Collected: ino 170864214 peer_ino 170864213 family    1 type    1 state  1 name null
+(00.001085) unix: 	Collected: ino 25888 peer_ino 2084 family    1 type    2 state  1 name null
+(00.001086) unix: 	Collected: ino 170796535 peer_ino 170803473 family    1 type    1 state  1 name /tmp/cc-daemon-1000/1eb11d31/spare/e0dcfa64.pty.sock
+(00.001087) unix: 	Collected: ino 19919 peer_ino 19918 family    1 type    1 state  1 name null
+(00.001088) unix: 	Collected: ino 18121 peer_ino 2084 family    1 type    2 state  1 name null
+(00.001088) unix: 	Collected: ino 170903765 peer_ino 0 family    1 type    1 state  1 name null
+(00.001089) unix: 	Collected: ino 15861 peer_ino 19776 family    1 type    1 state  1 name null
+(00.001090) unix: 	Collected: ino 15723 peer_ino 18004 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001091) unix: 	Collected: ino 39275 peer_ino 42075 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001091) unix: 	Collected: ino 42075 peer_ino 39275 family    1 type    1 state  1 name null
+(00.001092) unix: 	Collected: ino 170904094 peer_ino 170904093 family    1 type    1 state  1 name null
+(00.001093) unix: 	Collected: ino 18123 peer_ino 18122 family    1 type    1 state  1 name null
+(00.001093) unix: 	Collected: ino 19981 peer_ino 2084 family    1 type    2 state  1 name null
+(00.001094) unix: 	Collected: ino 1354 peer_ino 18877 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001095) unix: 	Collected: ino 19798 peer_ino 344 family    1 type    1 state  1 name /run/systemd/journal/stdout
+(00.001096) unix: 	Collected: ino 18180 peer_ino 2086 family    1 type    2 state  1 name null
+(00.001097) unix: 	Collected: ino 19918 peer_ino 19919 family    1 type    1 state  1 name null
+(00.001098) unix: 	Collected: ino 42021 peer_ino 34697 family    1 type    1 state  1 name null
+(00.001100) unix: 	Collected: ino 18122 peer_ino 18123 family    1 type    1 state  1 name null
+(00.001101) unix: 	Collected: ino 170904151 peer_ino 170904152 family    1 type    1 state  1 name null
+(00.001102) unix: 	Collected: ino 25420 peer_ino 20057 family    1 type    1 state  1 name /run/google-guest-agent/plugin-connections/GuestTelemetryExtension_1.0.sock
+(00.001103) unix: 	Collected: ino 26940 peer_ino 2084 family    1 type    2 state  1 name null
+(00.001105) unix: 	Collected: ino 25086 peer_ino 18195 family    1 type    1 state  1 name /run/dbus/system_bus_socket
+(00.001106) unix: 	Collected: ino 356 peer_ino 2084 family    1 type    2 state  1 name null
+(00.001548) inet: 	Collected: ino   0xa06e family AF_INET    type SOCK_STREAM    port    37773 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001553) inet: 	Collected: ino 0xa2fc3a6 family AF_INET    type SOCK_STREAM    port    39759 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001554) inet: 	Collected: ino  0x38835 family AF_INET    type SOCK_STREAM    port     6379 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001557) inet: 	Collected: ino 0xa2fd811 family AF_INET    type SOCK_STREAM    port    40887 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001558) inet: 	Collected: ino 0xa2fd80e family AF_INET    type SOCK_STREAM    port    33699 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001559) inet: 	Collected: ino 0xa2fbbd9 family AF_INET    type SOCK_STREAM    port    32967 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001561) inet: 	Collected: ino 0xa2fd80a family AF_INET    type SOCK_STREAM    port    33097 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001562) inet: 	Collected: ino   0x7126 family AF_INET    type SOCK_STREAM    port       22 state TCP_LISTEN       src_addr 0.0.0.0
+(00.001564) inet: 	Collected: ino 0xa2fd14b family AF_INET    type SOCK_STREAM    port    35139 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001565) inet: 	Collected: ino 0xa2fd4e7 family AF_INET    type SOCK_STREAM    port    46591 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001565) inet: 	Collected: ino 0xa2fc6b4 family AF_INET    type SOCK_STREAM    port    41921 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001566) inet: 	Collected: ino 0xa2fd12f family AF_INET    type SOCK_STREAM    port    45039 state TCP_LISTEN       src_addr 127.0.0.1
+(00.001567) inet: 	Collected: ino 0xa2fd4eb family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001568) inet: 	Collected: ino 0xa2fd14c family AF_INET    type SOCK_STREAM    port    35896 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001569) inet: 	Collected: ino 0xa2fd50e family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001569) inet: 	Collected: ino   0x47a2 family AF_INET    type SOCK_STREAM    port    43054 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001570) inet: 	Collected: ino 0xa2fc6ba family AF_INET    type SOCK_STREAM    port    45039 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001571) inet: 	Collected: ino 0xa2fc38d family AF_INET    type SOCK_STREAM    port    33097 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001572) inet: 	Collected: ino 0xa2fca52 family AF_INET    type SOCK_STREAM    port    53266 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001573) inet: 	Collected: ino 0xa2fbbdb family AF_INET    type SOCK_STREAM    port    35808 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001573) inet: 	Collected: ino 0xa2fc384 family AF_INET    type SOCK_STREAM    port    33097 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001574) inet: 	Collected: ino 0xa2fc6c7 family AF_INET    type SOCK_STREAM    port    35139 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001575) inet: 	Collected: ino 0xa2fd4e9 family AF_INET    type SOCK_STREAM    port    35766 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001576) inet: 	Collected: ino 0xa2fd508 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001577) inet: 	Collected: ino 0xa2fc6c5 family AF_INET    type SOCK_STREAM    port    33699 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001577) inet: 	Collected: ino 0xa2fbbdc family AF_INET    type SOCK_STREAM    port    35818 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001579) inet: 	Collected: ino 0xa2fd133 family AF_INET    type SOCK_STREAM    port    34534 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001581) inet: 	Collected: ino 0xa2e3711 family AF_INET    type SOCK_STREAM    port    36368 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001583) inet: 	Collected: ino 0xa2fcde4 family AF_INET    type SOCK_STREAM    port       22 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001584) inet: 	Collected: ino 0xa2fca3d family AF_INET    type SOCK_STREAM    port    34542 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001584) inet: 	Collected: ino 0xa2fd50c family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001585) inet: 	Collected: ino 0xa2fd837 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001586) inet: 	Collected: ino   0x62ff family AF_INET    type SOCK_STREAM    port    43064 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001587) inet: 	Collected: ino 0xa2fd80d family AF_INET    type SOCK_STREAM    port    35744 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001588) inet: 	Collected: ino 0xa2fd817 family AF_INET    type SOCK_STREAM    port    43122 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001588) inet: 	Collected: ino 0xa2fd81b family AF_INET    type SOCK_STREAM    port    41921 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001590) inet: 	Collected: ino 0xa2fd813 family AF_INET    type SOCK_STREAM    port    35824 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001591) inet: 	Collected: ino 0xa2fd4ed family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001592) inet: 	Collected: ino 0xa2fd815 family AF_INET    type SOCK_STREAM    port    52012 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001593) inet: 	Collected: ino 0xa2fd80c family AF_INET    type SOCK_STREAM    port    35740 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001593) inet: 	Collected: ino 0xa2fbbbe family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001594) inet: 	Collected: ino   0x3e8d family AF_INET    type SOCK_STREAM    port    42982 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001595) inet: 	Collected: ino 0xa2fc6b6 family AF_INET    type SOCK_STREAM    port    35782 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001596) inet: 	Collected: ino 0xa2fbbe3 family AF_INET    type SOCK_STREAM    port    50264 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001597) inet: 	Collected: ino 0xa2e97f6 family AF_INET    type SOCK_STREAM    port    57176 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001597) inet: 	Collected: ino 0xa2fdc70 family AF_INET    type SOCK_STREAM    port    49564 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001598) inet: 	Collected: ino 0xa2fd88f family AF_INET    type SOCK_STREAM    port    41921 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001599) inet: 	Collected: ino 0xa2fd81d family AF_INET    type SOCK_STREAM    port    34566 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001600) inet: 	Collected: ino 0xa2fbbc4 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001601) inet: 	Collected: ino 0xa2fc6c9 family AF_INET    type SOCK_STREAM    port    35139 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001601) inet: 	Collected: ino 0xa2fbbe4 family AF_INET    type SOCK_STREAM    port    45039 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001602) inet: 	Collected: ino 0xa2fc3a8 family AF_INET    type SOCK_STREAM    port    35856 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001603) inet: 	Collected: ino 0xa2fbbc8 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001604) inet: 	Collected: ino 0xa2e3363 family AF_INET    type SOCK_STREAM    port    45804 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001605) inet: 	Collected: ino 0xa2fce0e family AF_INET    type SOCK_STREAM    port       22 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001606) inet: 	Collected: ino 0xa2fc38f family AF_INET    type SOCK_STREAM    port    33097 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001607) inet: 	Collected: ino 0xa2fd501 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001608) inet: 	Collected: ino 0xa2fd132 family AF_INET    type SOCK_STREAM    port    35760 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001609) inet: 	Collected: ino 0xa2fca3f family AF_INET    type SOCK_STREAM    port    34560 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001610) inet: 	Collected: ino 0xa2fd131 family AF_INET    type SOCK_STREAM    port    35748 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001610) inet: 	Collected: ino 0xa2fce43 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001611) inet: 	Collected: ino 0xa2fce4d family AF_INET    type SOCK_STREAM    port       22 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001612) inet: 	Collected: ino 0xa2fc3a9 family AF_INET    type SOCK_STREAM    port    35874 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001613) inet: 	Collected: ino 0xa2fd503 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001614) inet: 	Collected: ino 0xa2fce26 family AF_INET    type SOCK_STREAM    port    34554 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001615) inet: 	Collected: ino 0xa2fbbde family AF_INET    type SOCK_STREAM    port    50254 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001616) inet: 	Collected: ino 0xa2fbbc2 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001617) inet: 	Collected: ino 0xa2fbbdf family AF_INET    type SOCK_STREAM    port    46591 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001618) inet: 	Collected: ino 0xa2fc38c family AF_INET    type SOCK_STREAM    port    43138 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001618) inet: 	Collected: ino 0xa2e7459 family AF_INET    type SOCK_STREAM    port    51048 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001619) inet: 	Collected: ino 0xa2fd818 family AF_INET    type SOCK_STREAM    port    41921 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001620) inet: 	Collected: ino 0xa2fd81e family AF_INET    type SOCK_STREAM    port    38506 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001621) inet: 	Collected: ino 0xa2fd50a family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001622) inet: 	Collected: ino 0xa2e335e family AF_INET    type SOCK_STREAM    port    45784 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001622) inet: 	Collected: ino 0xa2fc6b7 family AF_INET    type SOCK_STREAM    port    35786 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001623) inet: 	Collected: ino 0xa2fc388 family AF_INET    type SOCK_STREAM    port    33699 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001624) inet: 	Collected: ino 0xa2fd0de family AF_INET    type SOCK_STREAM    port       22 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001625) inet: 	Collected: ino 0xa2fd814 family AF_INET    type SOCK_STREAM    port    35838 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001626) inet: 	Collected: ino 0xa2fc6b8 family AF_INET    type SOCK_STREAM    port    50246 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001626) inet: 	Collected: ino 0xa2fce23 family AF_INET    type SOCK_STREAM    port    35796 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001627) inet: 	Collected: ino 0xa2e4f95 family AF_INET    type SOCK_STREAM    port    53266 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001628) inet: 	Collected: ino 0xa2fc38a family AF_INET    type SOCK_STREAM    port    33097 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001629) inet: 	Collected: ino   0x49cd family AF_INET    type SOCK_STREAM    port    42924 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001630) inet: 	Collected: ino 0xa2fc6be family AF_INET    type SOCK_STREAM    port    45039 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001631) inet: 	Collected: ino 0xa2fbbc6 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001632) inet: 	Collected: ino 0xa2fce41 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001633) inet: 	Collected: ino 0xa2fbbc0 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001634) inet: 	Collected: ino 0xa2fdc72 family AF_INET    type SOCK_STREAM    port    43150 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001634) inet: 	Collected: ino 0xa2fce0a family AF_INET    type SOCK_STREAM    port       22 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001635) inet: 	Collected: ino 0xa2fd810 family AF_INET    type SOCK_STREAM    port    35790 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001636) inet: 	Collected: ino 0xa2fd147 family AF_INET    type SOCK_STREAM    port    32967 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001637) inet: 	Collected: ino 0xa2fbbe6 family AF_INET    type SOCK_STREAM    port    45039 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001638) inet: 	Collected: ino 0xa2fd14d family AF_INET    type SOCK_STREAM    port    35902 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001638) inet: 	Collected: ino 0xa2fd528 family AF_INET    type SOCK_STREAM    port    53252 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001639) inet: 	Collected: ino 0xa2ea46d family AF_INET    type SOCK_STREAM    port    59010 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001641) inet: 	Collected: ino 0xa2fd4ef family AF_INET    type SOCK_STREAM    port    46591 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001642) inet: 	Collected: ino 0xa2fd4ea family AF_INET    type SOCK_STREAM    port    35770 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001643) inet: 	Collected: ino 0xa2fd0d5 family AF_INET    type SOCK_STREAM    port       22 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001643) inet: 	Collected: ino 0xa2fca3e family AF_INET    type SOCK_STREAM    port    38492 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001644) inet: 	Collected: ino 0xa2fc6b9 family AF_INET    type SOCK_STREAM    port    38474 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001645) inet: 	Collected: ino 0xa2fdc71 family AF_INET    type SOCK_STREAM    port    38508 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001646) inet: 	Collected: ino 0xa2fd510 family AF_INET    type SOCK_STREAM    port    46591 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001647) inet: 	Collected: ino 0xa2e74b2 family AF_INET    type SOCK_STREAM    port    46520 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001647) inet: 	Collected: ino 0xa2fca3b family AF_INET    type SOCK_STREAM    port    33097 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001648) inet: 	Collected: ino 0xa2fd834 family AF_INET    type SOCK_STREAM    port     6379 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001649) inet: 	Collected: ino 0xa2fbbdd family AF_INET    type SOCK_STREAM    port    49556 state TCP_ESTABLISHED  src_addr 127.0.0.1
+(00.001663) inet: 	Collected: ino   0x62fb family AF_INET    type SOCK_DGRAM     port       68 state TCP_ESTABLISHED  src_addr 10.164.0.3
+(00.001664) inet: 	Collected: ino   0x46e2 family AF_INET    type SOCK_DGRAM     port      323 state TCP_CLOSE        src_addr 127.0.0.1
+(00.002032) inet: 	Collected: ino   0x7128 family AF_INET6   type SOCK_STREAM    port       22 state TCP_LISTEN       src_addr ::
+(00.002044) inet: 	Collected: ino   0x46e3 family AF_INET6   type SOCK_DGRAM     port      323 state TCP_CLOSE        src_addr ::1
+(00.002057) inet: 	Collected: ino   0x7092 family AF_INET6   type SOCK_RAW       port       58 state TCP_CLOSE        src_addr ::
+(00.002061) packet: Collect packet sock 25338 2054
+(00.002062) packet: 	Got 0 mreqs
+(00.002079) netlink: Collect netlink sock 0x6255
+(00.002080) netlink: Collect netlink sock 0x408
+(00.002081) netlink: Collect netlink sock 0x6255
+(00.002082) netlink: Collect netlink sock 0xa2fd560
+(00.002082) netlink: Collect netlink sock 0xed3
+(00.002083) netlink: Collect netlink sock 0xed4
+(00.002083) netlink: Collect netlink sock 0x3c33
+(00.002084) netlink: Collect netlink sock 0x6441
+(00.002084) netlink: Collect netlink sock 0x411
+(00.002085) netlink: Collect netlink sock 0x46c8
+(00.002085) netlink: Collect netlink sock 0x3c01
+(00.002086) netlink: Collect netlink sock 0x802
+(00.002086) netlink: Collect netlink sock 0x6207
+(00.002087) netlink: Collect netlink sock 0x4d85
+(00.002087) netlink: Collect netlink sock 0x611d
+(00.002088) netlink: Collect netlink sock 0x4710
+(00.002089) netlink: Collect netlink sock 0xa454
+(00.002089) netlink: Collect netlink sock 0x6252
+(00.002090) netlink: Collect netlink sock 0x470f
+(00.002090) netlink: Collect netlink sock 0x6267
+(00.002091) netlink: Collect netlink sock 0x413
+(00.002091) netlink: Collect netlink sock 0x4711
+(00.002092) netlink: Collect netlink sock 0x6438
+(00.002092) netlink: Collect netlink sock 0x4712
+(00.002094) netlink: Collect netlink sock 0xa454
+(00.002094) netlink: Collect netlink sock 0x6267
+(00.002095) netlink: Collect netlink sock 0x6252
+(00.002095) netlink: Collect netlink sock 0x4712
+(00.002096) netlink: Collect netlink sock 0x4711
+(00.002096) netlink: Collect netlink sock 0x4710
+(00.002097) netlink: Collect netlink sock 0x470f
+(00.002097) netlink: Collect netlink sock 0x611d
+(00.002098) netlink: Collect netlink sock 0x6438
+(00.002098) netlink: Collect netlink sock 0x6253
+(00.002099) netlink: Collect netlink sock 0x6254
+(00.002099) netlink: Collect netlink sock 0x409
+(00.002100) netlink: Collect netlink sock 0x6254
+(00.002102) netlink: Collect netlink sock 0x805
+(00.002102) netlink: Collect netlink sock 0x3c34
+(00.002106) Collecting pidns 1/525528
+(00.002138) No parent images directory provided
+(00.002151) 525507 has lsm profile unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
+(00.002160) 525509 has lsm profile unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
+(00.002166) 525511 has lsm profile unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
+(00.002167) ========================================
+(00.002170) Dumping task (pid: 525507 comm: fmi_checkpoint_)
+(00.002171) ========================================
+(00.002172) Obtaining task stat ... 
+(00.002183) 
+(00.002183) Collecting mappings (pid: 525507)
+(00.002184) ----------------------------------------
+(00.002222) Handling VMA with the following smaps entry: 00400000-0040d000 r--p 00000000 103:02 67458935                          /home/luca/fmi/build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject
+(00.002232) Found regular file mapping, OK
+(00.002260) Dumping path for -3 fd via self 12 [/home/luca/fmi/build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject]
+(00.002307) Handling VMA with the following smaps entry: 0040d000-0053d000 r-xp 0000d000 103:02 67458935                          /home/luca/fmi/build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject
+(00.002311) vma 40d000 borrows vfi from previous 400000
+(00.002314) Handling VMA with the following smaps entry: 0053d000-005b5000 r--p 0013d000 103:02 67458935                          /home/luca/fmi/build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject
+(00.002316) vma 53d000 borrows vfi from previous 40d000
+(00.002319) Handling VMA with the following smaps entry: 005b5000-005bc000 r--p 001b5000 103:02 67458935                          /home/luca/fmi/build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject
+(00.002321) vma 5b5000 borrows vfi from previous 53d000
+(00.002323) Handling VMA with the following smaps entry: 005bc000-005bd000 rw-p 001bc000 103:02 67458935                          /home/luca/fmi/build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject
+(00.002325) vma 5bc000 borrows vfi from previous 5b5000
+(00.002327) Handling VMA with the following smaps entry: 005bd000-005be000 rw-p 00000000 00:00 0 
+(00.002343) Handling VMA with the following smaps entry: 013f1000-01416000 rw-p 00000000 00:00 0                                  [heap]
+(00.002346) Handling VMA with the following smaps entry: 7f6420000000-7f6420021000 rw-p 00000000 00:00 0 
+(00.002348) Handling VMA with the following smaps entry: 7f6420021000-7f6424000000 ---p 00000000 00:00 0 
+(00.002350) Handling VMA with the following smaps entry: 7f64269fe000-7f64269ff000 ---p 00000000 00:00 0 
+(00.002354) Handling VMA with the following smaps entry: 7f64269ff000-7f64271ff000 rw-p 00000000 00:00 0 
+(00.002358) Handling VMA with the following smaps entry: 7f64271ff000-7f6427200000 ---p 00000000 00:00 0 
+(00.002378) Handling VMA with the following smaps entry: 7f6427200000-7f6427a00000 rw-p 00000000 00:00 0 
+(00.002380) Handling VMA with the following smaps entry: 7f6427a00000-7f6427a29000 r--p 00000000 103:02 33688447                  /usr/lib64/libc.so.6
+(00.002384) Found regular file mapping, OK
+(00.002393) Dumping path for -3 fd via self 12 [/usr/lib64/libc.so.6]
+(00.002406) Handling VMA with the following smaps entry: 7f6427a29000-7f6427b9e000 r-xp 00029000 103:02 33688447                  /usr/lib64/libc.so.6
+(00.002409) vma 7f6427a29000 borrows vfi from previous 7f6427a00000
+(00.002411) Handling VMA with the following smaps entry: 7f6427b9e000-7f6427bf7000 r--p 0019e000 103:02 33688447                  /usr/lib64/libc.so.6
+(00.002413) vma 7f6427b9e000 borrows vfi from previous 7f6427a29000
+(00.002415) Handling VMA with the following smaps entry: 7f6427bf7000-7f6427bfb000 r--p 001f6000 103:02 33688447                  /usr/lib64/libc.so.6
+(00.002417) vma 7f6427bf7000 borrows vfi from previous 7f6427b9e000
+(00.002449) Handling VMA with the following smaps entry: 7f6427bfb000-7f6427bfd000 rw-p 001fa000 103:02 33688447                  /usr/lib64/libc.so.6
+(00.002453) vma 7f6427bfb000 borrows vfi from previous 7f6427bf7000
+(00.002455) Handling VMA with the following smaps entry: 7f6427bfd000-7f6427c0a000 rw-p 00000000 00:00 0 
+(00.002459) Handling VMA with the following smaps entry: 7f6427e00000-7f6427e99000 r--p 00000000 103:02 33688578                  /usr/lib64/libstdc++.so.6.0.29
+(00.002462) Found regular file mapping, OK
+(00.002468) Dumping path for -3 fd via self 12 [/usr/lib64/libstdc++.so.6.0.29]
+(00.002477) Handling VMA with the following smaps entry: 7f6427e99000-7f6427fa5000 r-xp 00099000 103:02 33688578                  /usr/lib64/libstdc++.so.6.0.29
+(00.002479) vma 7f6427e99000 borrows vfi from previous 7f6427e00000
+(00.002480) Handling VMA with the following smaps entry: 7f6427fa5000-7f6428018000 r--p 001a5000 103:02 33688578                  /usr/lib64/libstdc++.so.6.0.29
+(00.002482) vma 7f6427fa5000 borrows vfi from previous 7f6427e99000
+(00.002484) Handling VMA with the following smaps entry: 7f6428018000-7f6428025000 r--p 00217000 103:02 33688578                  /usr/lib64/libstdc++.so.6.0.29
+(00.002485) vma 7f6428018000 borrows vfi from previous 7f6427fa5000
+(00.002493) Handling VMA with the following smaps entry: 7f6428025000-7f6428026000 rw-p 00224000 103:02 33688578                  /usr/lib64/libstdc++.so.6.0.29
+(00.002494) vma 7f6428025000 borrows vfi from previous 7f6428018000
+(00.002496) Handling VMA with the following smaps entry: 7f6428026000-7f6428029000 rw-p 00000000 00:00 0 
+(00.002499) Handling VMA with the following smaps entry: 7f64281fa000-7f64281fd000 r--p 00000000 103:02 33688178                  /usr/lib64/libgcc_s-11-20240719.so.1
+(00.002502) Found regular file mapping, OK
+(00.002506) Dumping path for -3 fd via self 12 [/usr/lib64/libgcc_s-11-20240719.so.1]
+(00.002513) Handling VMA with the following smaps entry: 7f64281fd000-7f6428211000 r-xp 00003000 103:02 33688178                  /usr/lib64/libgcc_s-11-20240719.so.1
+(00.002515) vma 7f64281fd000 borrows vfi from previous 7f64281fa000
+(00.002517) Handling VMA with the following smaps entry: 7f6428211000-7f6428215000 r--p 00017000 103:02 33688178                  /usr/lib64/libgcc_s-11-20240719.so.1
+(00.002518) vma 7f6428211000 borrows vfi from previous 7f64281fd000
+(00.002531) Handling VMA with the following smaps entry: 7f6428215000-7f6428216000 r--p 0001a000 103:02 33688178                  /usr/lib64/libgcc_s-11-20240719.so.1
+(00.002533) vma 7f6428215000 borrows vfi from previous 7f6428211000
+(00.002534) Handling VMA with the following smaps entry: 7f6428216000-7f6428217000 rw-p 00000000 00:00 0 
+(00.002537) Handling VMA with the following smaps entry: 7f6428217000-7f6428279000 r--p 00000000 103:02 34612870                  /usr/lib64/libicuuc.so.67.1
+(00.002541) Found regular file mapping, OK
+(00.002545) Dumping path for -3 fd via self 12 [/usr/lib64/libicuuc.so.67.1]
+(00.002553) Handling VMA with the following smaps entry: 7f6428279000-7f6428363000 r-xp 00062000 103:02 34612870                  /usr/lib64/libicuuc.so.67.1
+(00.002555) vma 7f6428279000 borrows vfi from previous 7f6428217000
+(00.002557) Handling VMA with the following smaps entry: 7f6428363000-7f64283eb000 r--p 0014c000 103:02 34612870                  /usr/lib64/libicuuc.so.67.1
+(00.002559) vma 7f6428363000 borrows vfi from previous 7f6428279000
+(00.002561) Handling VMA with the following smaps entry: 7f64283eb000-7f64283fd000 r--p 001d4000 103:02 34612870                  /usr/lib64/libicuuc.so.67.1
+(00.002563) vma 7f64283eb000 borrows vfi from previous 7f6428363000
+(00.002576) Handling VMA with the following smaps entry: 7f64283fd000-7f64283fe000 rw-p 001e6000 103:02 34612870                  /usr/lib64/libicuuc.so.67.1
+(00.002578) vma 7f64283fd000 borrows vfi from previous 7f64283eb000
+(00.002579) Handling VMA with the following smaps entry: 7f64283fe000-7f6428400000 rw-p 00000000 00:00 0 
+(00.002582) Handling VMA with the following smaps entry: 7f6428400000-7f64284de000 r--p 00000000 103:02 34611390                  /usr/lib64/libicui18n.so.67.1
+(00.002586) Found regular file mapping, OK
+(00.002590) Dumping path for -3 fd via self 12 [/usr/lib64/libicui18n.so.67.1]
+(00.002599) Handling VMA with the following smaps entry: 7f64284de000-7f6428667000 r-xp 000de000 103:02 34611390                  /usr/lib64/libicui18n.so.67.1
+(00.002600) vma 7f64284de000 borrows vfi from previous 7f6428400000
+(00.002602) Handling VMA with the following smaps entry: 7f6428667000-7f64286f4000 r--p 00267000 103:02 34611390                  /usr/lib64/libicui18n.so.67.1
+(00.002604) vma 7f6428667000 borrows vfi from previous 7f64284de000
+(00.002611) Handling VMA with the following smaps entry: 7f64286f4000-7f6428704000 r--p 002f4000 103:02 34611390                  /usr/lib64/libicui18n.so.67.1
+(00.002613) vma 7f64286f4000 borrows vfi from previous 7f6428667000
+(00.002614) Handling VMA with the following smaps entry: 7f6428704000-7f6428705000 rw-p 00304000 103:02 34611390                  /usr/lib64/libicui18n.so.67.1
+(00.002616) vma 7f6428704000 borrows vfi from previous 7f64286f4000
+(00.002618) Handling VMA with the following smaps entry: 7f6428705000-7f6428706000 rw-p 00000000 00:00 0 
+(00.002621) Handling VMA with the following smaps entry: 7f642870b000-7f642870e000 rw-p 00000000 00:00 0 
+(00.002624) Handling VMA with the following smaps entry: 7f642870e000-7f642871b000 r--p 00000000 103:02 33688514                  /usr/lib64/libm.so.6
+(00.002626) Found regular file mapping, OK
+(00.002630) Dumping path for -3 fd via self 12 [/usr/lib64/libm.so.6]
+(00.002637) Handling VMA with the following smaps entry: 7f642871b000-7f642878d000 r-xp 0000d000 103:02 33688514                  /usr/lib64/libm.so.6
+(00.002639) vma 7f642871b000 borrows vfi from previous 7f642870e000
+(00.002648) Handling VMA with the following smaps entry: 7f642878d000-7f64287e9000 r--p 0007f000 103:02 33688514                  /usr/lib64/libm.so.6
+(00.002650) vma 7f642878d000 borrows vfi from previous 7f642871b000
+(00.002652) Handling VMA with the following smaps entry: 7f64287e9000-7f64287ea000 r--p 000da000 103:02 33688514                  /usr/lib64/libm.so.6
+(00.002654) vma 7f64287e9000 borrows vfi from previous 7f642878d000
+(00.002655) Handling VMA with the following smaps entry: 7f64287ea000-7f64287eb000 rw-p 000db000 103:02 33688514                  /usr/lib64/libm.so.6
+(00.002657) vma 7f64287ea000 borrows vfi from previous 7f64287e9000
+(00.002659) Handling VMA with the following smaps entry: 7f64287eb000-7f64287ee000 r--p 00000000 103:02 35232743                  /usr/lib64/libhiredis.so.1.0.0
+(00.002662) Found regular file mapping, OK
+(00.002666) Dumping path for -3 fd via self 12 [/usr/lib64/libhiredis.so.1.0.0]
+(00.002674) Handling VMA with the following smaps entry: 7f64287ee000-7f64287fa000 r-xp 00003000 103:02 35232743                  /usr/lib64/libhiredis.so.1.0.0
+(00.002676) vma 7f64287ee000 borrows vfi from previous 7f64287eb000
+(00.002678) Handling VMA with the following smaps entry: 7f64287fa000-7f64287fe000 r--p 0000f000 103:02 35232743                  /usr/lib64/libhiredis.so.1.0.0
+(00.002679) vma 7f64287fa000 borrows vfi from previous 7f64287ee000
+(00.002688) Handling VMA with the following smaps entry: 7f64287fe000-7f64287ff000 r--p 00012000 103:02 35232743                  /usr/lib64/libhiredis.so.1.0.0
+(00.002690) vma 7f64287fe000 borrows vfi from previous 7f64287fa000
+(00.002691) Handling VMA with the following smaps entry: 7f64287ff000-7f6428800000 rw-p 00013000 103:02 35232743                  /usr/lib64/libhiredis.so.1.0.0
+(00.002693) vma 7f64287ff000 borrows vfi from previous 7f64287fe000
+(00.002695) Handling VMA with the following smaps entry: 7f6428800000-7f6428801000 r--p 00000000 103:02 34611388                  /usr/lib64/libicudata.so.67.1
+(00.002698) Found regular file mapping, OK
+(00.002702) Dumping path for -3 fd via self 12 [/usr/lib64/libicudata.so.67.1]
+(00.002711) Handling VMA with the following smaps entry: 7f6428801000-7f6428802000 r-xp 00001000 103:02 34611388                  /usr/lib64/libicudata.so.67.1
+(00.002712) vma 7f6428801000 borrows vfi from previous 7f6428800000
+(00.002715) Handling VMA with the following smaps entry: 7f6428802000-7f642a317000 r--p 00002000 103:02 34611388                  /usr/lib64/libicudata.so.67.1
+(00.002717) vma 7f6428802000 borrows vfi from previous 7f6428801000
+(00.002726) Handling VMA with the following smaps entry: 7f642a317000-7f642a318000 r--p 01b16000 103:02 34611388                  /usr/lib64/libicudata.so.67.1
+(00.002728) vma 7f642a317000 borrows vfi from previous 7f6428802000
+(00.002729) Handling VMA with the following smaps entry: 7f642a318000-7f642a319000 rw-p 00000000 00:00 0 
+(00.002733) Handling VMA with the following smaps entry: 7f642a31a000-7f642a31e000 rw-p 00000000 00:00 0 
+(00.002736) Handling VMA with the following smaps entry: 7f642a324000-7f642a326000 rw-p 00000000 00:00 0 
+(00.002738) Handling VMA with the following smaps entry: 7f642a326000-7f642a328000 r--p 00000000 103:02 33688443                  /usr/lib64/ld-linux-x86-64.so.2
+(00.002741) Found regular file mapping, OK
+(00.002745) Dumping path for -3 fd via self 12 [/usr/lib64/ld-linux-x86-64.so.2]
+(00.002751) Handling VMA with the following smaps entry: 7f642a328000-7f642a351000 r-xp 00002000 103:02 33688443                  /usr/lib64/ld-linux-x86-64.so.2
+(00.002753) vma 7f642a328000 borrows vfi from previous 7f642a326000
+(00.002762) Handling VMA with the following smaps entry: 7f642a351000-7f642a35d000 r--p 0002b000 103:02 33688443                  /usr/lib64/ld-linux-x86-64.so.2
+(00.002764) vma 7f642a351000 borrows vfi from previous 7f642a328000
+(00.002765) Handling VMA with the following smaps entry: 7f642a35d000-7f642a35f000 r--p 00037000 103:02 33688443                  /usr/lib64/ld-linux-x86-64.so.2
+(00.002767) vma 7f642a35d000 borrows vfi from previous 7f642a351000
+(00.002769) Handling VMA with the following smaps entry: 7f642a35f000-7f642a361000 rw-p 00039000 103:02 33688443                  /usr/lib64/ld-linux-x86-64.so.2
+(00.002770) vma 7f642a35f000 borrows vfi from previous 7f642a35d000
+(00.002772) Handling VMA with the following smaps entry: 7ffe7e1f7000-7ffe7e218000 rw-p 00000000 00:00 0                          [stack]
+(00.002775) Handling VMA with the following smaps entry: 7ffe7e2b3000-7ffe7e2b7000 r--p 00000000 00:00 0                          [vvar]
+(00.002779) Handling VMA with the following smaps entry: 7ffe7e2b7000-7ffe7e2b9000 r-xp 00000000 00:00 0                          [vdso]
+(00.002782) Handling VMA with the following smaps entry: ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsyscall]
+(00.002785) Collected, longest area occupies 16351 pages
+(00.002786) 0x400000-0x40d000 (52K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x1
+(00.002788) 0x40d000-0x53d000 (1216K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0xd000 reg fp  shmid: 0x1
+(00.002789) 0x53d000-0x5b5000 (480K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x13d000 reg fp  shmid: 0x1
+(00.002789) 0x5b5000-0x5bc000 (28K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1b5000 reg fp  shmid: 0x1
+(00.002790) 0x5bc000-0x5bd000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x1bc000 reg fp  shmid: 0x1
+(00.002791) 0x5bd000-0x5be000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002792) 0x13f1000-0x1416000 (148K) prot 0x3 flags 0x22 fdflags 0 st 0x221 off 0 reg heap ap  shmid: 0
+(00.002792) 0x7f6420000000-0x7f6420021000 (132K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002793) 0x7f6420021000-0x7f6424000000 (65404K) prot 0 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002794) 0x7f64269fe000-0x7f64269ff000 (4K) prot 0 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002795) 0x7f64269ff000-0x7f64271ff000 (8192K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002795) 0x7f64271ff000-0x7f6427200000 (4K) prot 0 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002796) 0x7f6427200000-0x7f6427a00000 (8192K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002797) 0x7f6427a00000-0x7f6427a29000 (164K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x2
+(00.002798) 0x7f6427a29000-0x7f6427b9e000 (1492K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x29000 reg fp  shmid: 0x2
+(00.002799) 0x7f6427b9e000-0x7f6427bf7000 (356K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x19e000 reg fp  shmid: 0x2
+(00.002800) 0x7f6427bf7000-0x7f6427bfb000 (16K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1f6000 reg fp  shmid: 0x2
+(00.002801) 0x7f6427bfb000-0x7f6427bfd000 (8K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x1fa000 reg fp  shmid: 0x2
+(00.002801) 0x7f6427bfd000-0x7f6427c0a000 (52K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002802) 0x7f6427e00000-0x7f6427e99000 (612K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x3
+(00.002803) 0x7f6427e99000-0x7f6427fa5000 (1072K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x99000 reg fp  shmid: 0x3
+(00.002803) 0x7f6427fa5000-0x7f6428018000 (460K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1a5000 reg fp  shmid: 0x3
+(00.002804) 0x7f6428018000-0x7f6428025000 (52K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x217000 reg fp  shmid: 0x3
+(00.002805) 0x7f6428025000-0x7f6428026000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x224000 reg fp  shmid: 0x3
+(00.002805) 0x7f6428026000-0x7f6428029000 (12K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002806) 0x7f64281fa000-0x7f64281fd000 (12K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x4
+(00.002807) 0x7f64281fd000-0x7f6428211000 (80K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x3000 reg fp  shmid: 0x4
+(00.002807) 0x7f6428211000-0x7f6428215000 (16K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x17000 reg fp  shmid: 0x4
+(00.002808) 0x7f6428215000-0x7f6428216000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1a000 reg fp  shmid: 0x4
+(00.002809) 0x7f6428216000-0x7f6428217000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002809) 0x7f6428217000-0x7f6428279000 (392K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x5
+(00.002810) 0x7f6428279000-0x7f6428363000 (936K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x62000 reg fp  shmid: 0x5
+(00.002810) 0x7f6428363000-0x7f64283eb000 (544K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x14c000 reg fp  shmid: 0x5
+(00.002811) 0x7f64283eb000-0x7f64283fd000 (72K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1d4000 reg fp  shmid: 0x5
+(00.002812) 0x7f64283fd000-0x7f64283fe000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x1e6000 reg fp  shmid: 0x5
+(00.002812) 0x7f64283fe000-0x7f6428400000 (8K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002813) 0x7f6428400000-0x7f64284de000 (888K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x6
+(00.002814) 0x7f64284de000-0x7f6428667000 (1572K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0xde000 reg fp  shmid: 0x6
+(00.002814) 0x7f6428667000-0x7f64286f4000 (564K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x267000 reg fp  shmid: 0x6
+(00.002815) 0x7f64286f4000-0x7f6428704000 (64K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x2f4000 reg fp  shmid: 0x6
+(00.002816) 0x7f6428704000-0x7f6428705000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x304000 reg fp  shmid: 0x6
+(00.002816) 0x7f6428705000-0x7f6428706000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002817) 0x7f642870b000-0x7f642870e000 (12K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002818) 0x7f642870e000-0x7f642871b000 (52K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x7
+(00.002818) 0x7f642871b000-0x7f642878d000 (456K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0xd000 reg fp  shmid: 0x7
+(00.002819) 0x7f642878d000-0x7f64287e9000 (368K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x7f000 reg fp  shmid: 0x7
+(00.002820) 0x7f64287e9000-0x7f64287ea000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0xda000 reg fp  shmid: 0x7
+(00.002820) 0x7f64287ea000-0x7f64287eb000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0xdb000 reg fp  shmid: 0x7
+(00.002821) 0x7f64287eb000-0x7f64287ee000 (12K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x8
+(00.002822) 0x7f64287ee000-0x7f64287fa000 (48K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x3000 reg fp  shmid: 0x8
+(00.002825) 0x7f64287fa000-0x7f64287fe000 (16K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0xf000 reg fp  shmid: 0x8
+(00.002825) 0x7f64287fe000-0x7f64287ff000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x12000 reg fp  shmid: 0x8
+(00.002826) 0x7f64287ff000-0x7f6428800000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x13000 reg fp  shmid: 0x8
+(00.002827) 0x7f6428800000-0x7f6428801000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x9
+(00.002827) 0x7f6428801000-0x7f6428802000 (4K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x1000 reg fp  shmid: 0x9
+(00.002828) 0x7f6428802000-0x7f642a317000 (27732K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x2000 reg fp  shmid: 0x9
+(00.002829) 0x7f642a317000-0x7f642a318000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1b16000 reg fp  shmid: 0x9
+(00.002829) 0x7f642a318000-0x7f642a319000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002830) 0x7f642a31a000-0x7f642a31e000 (16K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002831) 0x7f642a324000-0x7f642a326000 (8K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002831) 0x7f642a326000-0x7f642a328000 (8K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0xa
+(00.002832) 0x7f642a328000-0x7f642a351000 (164K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x2000 reg fp  shmid: 0xa
+(00.002833) 0x7f642a351000-0x7f642a35d000 (48K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x2b000 reg fp  shmid: 0xa
+(00.002833) 0x7f642a35d000-0x7f642a35f000 (8K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x37000 reg fp  shmid: 0xa
+(00.002834) 0x7f642a35f000-0x7f642a361000 (8K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x39000 reg fp  shmid: 0xa
+(00.002835) 0x7ffe7e1f7000-0x7ffe7e218000 (132K) prot 0x3 flags 0x122 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.002835) 0x7ffe7e2b3000-0x7ffe7e2b7000 (16K) prot 0x1 flags 0x22 fdflags 0 st 0x1201 off 0 reg vvar ap  shmid: 0
+(00.002836) 0x7ffe7e2b7000-0x7ffe7e2b9000 (8K) prot 0x5 flags 0x22 fdflags 0 st 0x209 off 0 reg vdso ap  shmid: 0
+(00.002837) 0xffffffffff600000-0xffffffffff601000 (4K) prot 0x4 flags 0x22 fdflags 0 st 0x204 off 0 vsys ap  shmid: 0
+(00.002838) ----------------------------------------
+(00.002838) 
+(00.002839) Collecting fds (pid: 525507)
+(00.002839) ----------------------------------------
+(00.002850) Found 5 file descriptors
+(00.002851) ----------------------------------------
+(00.002855) Dump private signals of 525507
+(00.002857) Dump private signals of 525509
+(00.002858) Dump private signals of 525511
+(00.002859) Dump shared signals of 525507
+(00.002860) Dump rseq of 525507: ptr = 0x7f642870c120 sign = 0x53053053
+(00.002864) Dump rseq of 525509: ptr = 0x7f64279fffe0 sign = 0x53053053
+(00.002866) Dump rseq of 525511: ptr = 0x7f64271fefe0 sign = 0x53053053
+(00.002876) Parasite syscall_ip at 0x40d000
+(00.002922) Set up parasite blob using memfd
+(00.002934) Putting parasite blob into 0x7f0dc1eee000->0x7f642816f000
+(00.002955) Dumping general registers for 525507 in native mode
+(00.002957) Warn  (compel/arch/x86/src/lib/infect.c:367): Will restore 525507 with interrupted system call
+(00.002957) Dumping GP/FPU registers for 525507
+(00.002965) x86: xsave runtime structure
+(00.002966) x86: -----------------------
+(00.002966) x86: cwd:0x37f swd:0 twd:0 fop:0 mxcsr:0x1fa0 mxcsr_mask:0x2ffff
+(00.002967) x86: magic1:0x46505853 extended_size:2444 xstate_bv:0x2a3 xstate_size:2440
+(00.002968) x86: xstate_bv: 0x2a3
+(00.002969) x86: -----------------------
+(00.002970) Putting tsock into pid 525507
+(00.002998) Wait for parasite being daemonized...
+(00.002999) Wait for ack 2 on daemon socket
+pie: 525507: Running daemon thread leader
+pie: 525507: __sent ack msg: 2 2 0
+pie: 525507: Daemon waits for command
+(00.003007) Fetched ack: 2 2 0
+(00.003008) Parasite 525507 has been switched to daemon mode
+(00.003009) vdso: vDSO hint is reliable - omit checking
+(00.003012) Sent msg to daemon 74 0 0
+(00.003012) Wait for ack 74 on daemon socket
+pie: 525507: __fetched msg: 74 0 0
+pie: 525507: __sent ack msg: 74 74 0
+(00.003016) Fetched ack: 74 74 0
+pie: 525507: Daemon waits for command
+(00.003023) Sent msg to daemon 70 0 0
+(00.003023) Wait for ack 70 on daemon socket
+pie: 525507: __fetched msg: 70 0 0
+pie: 525507: membarrier(1 << 3) returned -1
+pie: 525507: membarrier(1 << 5) returned -1
+pie: 525507: membarrier(1 << 7) returned -1
+pie: 525507: __sent ack msg: 70 70 0
+pie: 525507: Daemon waits for command
+(00.003034) Fetched ack: 70 70 0
+(00.003035) sid=525507 pgid=525507 pid=525507
+(00.003050) 
+(00.003051) Dumping opened files (pid: 525507)
+(00.003052) ----------------------------------------
+(00.003053) Sent msg to daemon 71 0 0
+pie: 525507: __fetched msg: 71 0 0
+pie: 525507: __sent ack msg: 71 71 0
+pie: 525507: Daemon waits for command
+(00.003061) Wait for ack 71 on daemon socket
+(00.003062) Fetched ack: 71 71 0
+(00.003072) 525507 fdinfo 0: pos:                0 flags:           100002/0
+(00.003078) Dumping path for 0 fd via self 12 [/dev/null]
+(00.003092) 525507 fdinfo 1: pos:            0x122 flags:           100001/0
+(00.003096) Dumping path for 1 fd via self 15 [/home/luca/fmi/runbooks/drain-migration/runs/run524194/fmidr524194-t0p2/r1.log]
+(00.003107) Only file size could be stored for validation for file /home/luca/fmi/runbooks/drain-migration/runs/run524194/fmidr524194-t0p2/r1.log
+(00.003112) 525507 fdinfo 2: pos:            0x122 flags:           100001/0
+(00.003119) 525507 fdinfo 4: pos:                0 flags:             4000/0
+(00.003120) Dumping pipe 17 with id 0xd pipe_id 0xa2fd832
+(00.003122) Dumping data from pipe 0xa2fd832 fd 17
+(00.003145) 525507 fdinfo 5: pos:                0 flags:             4001/0
+(00.003147) Dumping pipe 18 with id 0xe pipe_id 0xa2fd832
+(00.003148) ----------------------------------------
+(00.003157) Sent msg to daemon 65 0 0
+(00.003157) Wait for ack 65 on daemon socket
+pie: 525507: __fetched msg: 65 0 0
+pie: 525507: __sent ack msg: 65 65 0
+pie: 525507: Daemon waits for command
+(00.003163) Fetched ack: 65 65 0
+(00.003164) 
+(00.003164) Dumping pages (type: 59 pid: 525507)
+(00.003165) ----------------------------------------
+(00.003166)    Private vmas 16351/30618 pages
+(00.003173) pagemap-cache: created for pid 525507 (takes 130808 bytes)
+(00.003174) page-pipe: Create page pipe for 30618 segs
+(00.003175) page-pipe: Will grow page pipe (iov off is 0)
+(00.003189) No parent images directory provided
+(00.003190) pagemap-cache: 525507: filling VMA 400000-40d000 (52K) [l:400000 h:600000]
+(00.003191) pagemap-cache: 	525507:           400000-40d000           nr:1     cov:53248
+(00.003192) pagemap-cache: 	525507:           40d000-53d000           nr:2     cov:1298432
+(00.003193) pagemap-cache: 	525507:           53d000-5b5000           nr:3     cov:1789952
+(00.003194) pagemap-cache: 	525507:           5b5000-5bc000           nr:4     cov:1818624
+(00.003194) pagemap-cache: 	525507:           5bc000-5bd000           nr:5     cov:1822720
+(00.003195) pagemap-cache: 	525507:           5bd000-5be000           nr:6     cov:1826816
+(00.003196) pagemap-cache: 	525507: cache  mode [l:400000 h:600000]
+(00.003202) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003203) page-pipe: Add iov to page pipe (0 iovs, 0/30618 total)
+(00.003205) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003205) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003206) page-pipe: Add iov to page pipe (1 iovs, 1/30618 total)
+(00.003207) Pagemap generated: 5 pages (0 lazy) 0 holes
+(00.003207) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003208) page-pipe: Will grow page pipe (iov off is 2)
+(00.003209) page-pipe: Add iov to page pipe (0 iovs, 2/30618 total)
+(00.003210) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003211) pagemap-cache: 525507: filling VMA 13f1000-1416000 (148K) [l:1200000 h:1400000]
+(00.003213) page-pipe: Add iov to page pipe (1 iovs, 3/30618 total)
+(00.003213) page-pipe: Add iov to page pipe (2 iovs, 4/30618 total)
+(00.003214) page-pipe: Add iov to page pipe (3 iovs, 5/30618 total)
+(00.003215) page-pipe: Grow pipe 10 -> 20
+(00.003216) Pagemap generated: 18 pages (0 lazy) 0 holes
+(00.003217) pagemap-cache: 525507: filling VMA 7f6420000000-7f6420021000 (132K) [l:7f6420000000 h:7f6420200000]
+(00.003218) pagemap-cache: 	525507:     7f6420000000-7f6420021000     nr:1     cov:135168
+(00.003219) pagemap-cache: 	525507: simple mode [l:7f6420000000 h:7f6420021000]
+(00.003222) page-pipe: Add iov to page pipe (4 iovs, 6/30618 total)
+(00.003224) page-pipe: Grow pipe 20 -> 40
+(00.003224) Pagemap generated: 20 pages (0 lazy) 0 holes
+(00.003225) pagemap-cache: 525507: filling VMA 7f6420021000-7f6424000000 (65404K) [l:7f6420000000 h:7f6420200000]
+(00.003304) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003305) pagemap-cache: 525507: filling VMA 7f64269fe000-7f64269ff000 (4K) [l:7f6426800000 h:7f6426a00000]
+(00.003307) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003307) pagemap-cache: 525507: filling VMA 7f64269ff000-7f64271ff000 (8192K) [l:7f6426800000 h:7f6426a00000]
+(00.003314) page-pipe: Add iov to page pipe (5 iovs, 7/30618 total)
+(00.003314) page-pipe: Add iov to page pipe (6 iovs, 8/30618 total)
+(00.003315) Pagemap generated: 5 pages (0 lazy) 0 holes
+(00.003315) pagemap-cache: 525507: filling VMA 7f64271ff000-7f6427200000 (4K) [l:7f6427000000 h:7f6427200000]
+(00.003316) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003317) pagemap-cache: 525507: filling VMA 7f6427200000-7f6427a00000 (8192K) [l:7f6427200000 h:7f6427400000]
+(00.003323) page-pipe: Add iov to page pipe (7 iovs, 9/30618 total)
+(00.003324) Pagemap generated: 3 pages (0 lazy) 0 holes
+(00.003324) pagemap-cache: 525507: filling VMA 7f6427a00000-7f6427a29000 (164K) [l:7f6427a00000 h:7f6427c00000]
+(00.003325) pagemap-cache: 	525507:     7f6427a00000-7f6427a29000     nr:1     cov:167936
+(00.003325) pagemap-cache: 	525507:     7f6427a29000-7f6427b9e000     nr:2     cov:1695744
+(00.003326) pagemap-cache: 	525507:     7f6427b9e000-7f6427bf7000     nr:3     cov:2060288
+(00.003327) pagemap-cache: 	525507:     7f6427bf7000-7f6427bfb000     nr:4     cov:2076672
+(00.003327) pagemap-cache: 	525507:     7f6427bfb000-7f6427bfd000     nr:5     cov:2084864
+(00.003328) pagemap-cache: 	525507: cache  mode [l:7f6427a00000 h:7f6427c00000]
+(00.003332) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003333) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003334) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003335) page-pipe: Will grow page pipe (iov off is 10)
+(00.003336) page-pipe: Add iov to page pipe (0 iovs, 10/30618 total)
+(00.003337) Pagemap generated: 4 pages (0 lazy) 0 holes
+(00.003338) Pagemap generated: 2 pages (0 lazy) 0 holes
+(00.003338) pagemap-cache: 525507: filling VMA 7f6427bfd000-7f6427c0a000 (52K) [l:7f6427a00000 h:7f6427c00000]
+(00.003340) page-pipe: Will grow page pipe (iov off is 11)
+(00.003341) page-pipe: Add iov to page pipe (0 iovs, 11/30618 total)
+(00.003342) page-pipe: Add iov to page pipe (1 iovs, 12/30618 total)
+(00.003343) page-pipe: Add iov to page pipe (2 iovs, 13/30618 total)
+(00.003343) Pagemap generated: 5 pages (0 lazy) 0 holes
+(00.003344) pagemap-cache: 525507: filling VMA 7f6427e00000-7f6427e99000 (612K) [l:7f6427e00000 h:7f6428000000]
+(00.003344) pagemap-cache: 	525507:     7f6427e00000-7f6427e99000     nr:1     cov:626688
+(00.003345) pagemap-cache: 	525507:     7f6427e99000-7f6427fa5000     nr:2     cov:1724416
+(00.003346) pagemap-cache: 	525507: cache  mode [l:7f6427e00000 h:7f6428000000]
+(00.003349) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003350) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003351) pagemap-cache: 525507: filling VMA 7f6427fa5000-7f6428018000 (460K) [l:7f6427e00000 h:7f6428000000]
+(00.003354) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003354) pagemap-cache: 525507: filling VMA 7f6428018000-7f6428025000 (52K) [l:7f6428000000 h:7f6428200000]
+(00.003355) pagemap-cache: 	525507:     7f6428018000-7f6428025000     nr:1     cov:53248
+(00.003356) pagemap-cache: 	525507:     7f6428025000-7f6428026000     nr:2     cov:57344
+(00.003356) pagemap-cache: 	525507:     7f6428026000-7f6428029000     nr:3     cov:69632
+(00.003357) pagemap-cache: 	525507:     7f64281fa000-7f64281fd000     nr:4     cov:81920
+(00.003357) pagemap-cache: 	525507: cache  mode [l:7f6428018000 h:7f6428200000]
+(00.003360) page-pipe: Will grow page pipe (iov off is 14)
+(00.003362) page-pipe: Add iov to page pipe (0 iovs, 14/30618 total)
+(00.003362) Pagemap generated: 13 pages (0 lazy) 0 holes
+(00.003363) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003363) page-pipe: Will grow page pipe (iov off is 15)
+(00.003365) page-pipe: Add iov to page pipe (0 iovs, 15/30618 total)
+(00.003366) Pagemap generated: 3 pages (0 lazy) 0 holes
+(00.003366) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003367) pagemap-cache: 525507: filling VMA 7f64281fd000-7f6428211000 (80K) [l:7f6428000000 h:7f6428200000]
+(00.003370) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003371) pagemap-cache: 525507: filling VMA 7f6428211000-7f6428215000 (16K) [l:7f6428200000 h:7f6428400000]
+(00.003371) pagemap-cache: 	525507:     7f6428211000-7f6428215000     nr:1     cov:16384
+(00.003372) pagemap-cache: 	525507:     7f6428215000-7f6428216000     nr:2     cov:20480
+(00.003372) pagemap-cache: 	525507:     7f6428216000-7f6428217000     nr:3     cov:24576
+(00.003373) pagemap-cache: 	525507:     7f6428217000-7f6428279000     nr:4     cov:425984
+(00.003374) pagemap-cache: 	525507:     7f6428279000-7f6428363000     nr:5     cov:1384448
+(00.003374) pagemap-cache: 	525507:     7f6428363000-7f64283eb000     nr:6     cov:1941504
+(00.003375) pagemap-cache: 	525507:     7f64283eb000-7f64283fd000     nr:7     cov:2015232
+(00.003376) pagemap-cache: 	525507:     7f64283fd000-7f64283fe000     nr:8     cov:2019328
+(00.003376) pagemap-cache: 	525507:     7f64283fe000-7f6428400000     nr:9     cov:2027520
+(00.003377) pagemap-cache: 	525507: cache  mode [l:7f6428211000 h:7f6428400000]
+(00.003379) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003380) page-pipe: Will grow page pipe (iov off is 16)
+(00.003381) page-pipe: Add iov to page pipe (0 iovs, 16/30618 total)
+(00.003382) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003383) page-pipe: Will grow page pipe (iov off is 17)
+(00.003384) page-pipe: Add iov to page pipe (0 iovs, 17/30618 total)
+(00.003385) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003386) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003387) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003387) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003388) page-pipe: Will grow page pipe (iov off is 18)
+(00.003388) Pagemap full
+(00.003389) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003390) page-pipe: Page pipe:
+(00.003390) page-pipe: * 8 pipes 18/30618 iovs:
+(00.003391) page-pipe: 	buf 7 pages, 2 iovs, flags: 0 pipe_off: 0 :
+(00.003392) page-pipe: 		0x40d000 1
+(00.003392) page-pipe: 		0x5b7000 6
+(00.003393) page-pipe: 	buf 47 pages, 8 iovs, flags: 1 pipe_off: 0 :
+(00.003393) page-pipe: 		0x5bd000 1
+(00.003394) page-pipe: 		0x13f1000 1
+(00.003394) page-pipe: 		0x1402000 5
+(00.003395) page-pipe: 		0x140a000 12
+(00.003395) page-pipe: 		0x7f6420000000 20
+(00.003396) page-pipe: 		0x7f64271f8000 2
+(00.003396) page-pipe: 		0x7f64271fc000 3
+(00.003397) page-pipe: 		0x7f64279fd000 3
+(00.003397) page-pipe: 	buf 6 pages, 1 iovs, flags: 0 pipe_off: 0 :
+(00.003398) page-pipe: 		0x7f6427bf7000 6
+(00.003398) page-pipe: 	buf 5 pages, 3 iovs, flags: 1 pipe_off: 0 :
+(00.003399) page-pipe: 		0x7f6427bfd000 1
+(00.003399) page-pipe: 		0x7f6427c01000 3
+(00.003400) page-pipe: 		0x7f6427c09000 1
+(00.003400) page-pipe: 	buf 14 pages, 1 iovs, flags: 0 pipe_off: 0 :
+(00.003401) page-pipe: 		0x7f6428018000 14
+(00.003401) page-pipe: 	buf 3 pages, 1 iovs, flags: 1 pipe_off: 0 :
+(00.003402) page-pipe: 		0x7f6428026000 3
+(00.003402) page-pipe: 	buf 1 pages, 1 iovs, flags: 0 pipe_off: 0 :
+(00.003403) page-pipe: 		0x7f6428215000 1
+(00.003403) page-pipe: 	buf 1 pages, 1 iovs, flags: 1 pipe_off: 0 :
+(00.003404) page-pipe: 		0x7f6428216000 1
+(00.003404) page-pipe: * 0 holes:
+(00.003405) PPB: 7 pages 2 segs 16 pipe 0 off
+(00.003407) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003409) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003414) Fetched ack: 66 66 0
+(00.003416) PPB: 47 pages 8 segs 64 pipe 2 off
+(00.003417) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003418) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003423) Fetched ack: 66 66 0
+(00.003424) PPB: 6 pages 1 segs 16 pipe 10 off
+(00.003426) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003427) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003430) Fetched ack: 66 66 0
+(00.003431) PPB: 5 pages 3 segs 16 pipe 11 off
+(00.003432) Sent msg to daemon 66 0 0
+(00.003433) Wait for ack 66 on daemon socket
+pie: 525507: __fetched msg: 66 0 0
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003438) Fetched ack: 66 66 0
+(00.003438) PPB: 14 pages 1 segs 16 pipe 14 off
+(00.003440) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003441) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003445) Fetched ack: 66 66 0
+(00.003445) PPB: 3 pages 1 segs 16 pipe 15 off
+(00.003447) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003448) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003451) Fetched ack: 66 66 0
+(00.003451) PPB: 1 pages 1 segs 16 pipe 16 off
+(00.003453) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003454) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003457) Fetched ack: 66 66 0
+(00.003458) PPB: 1 pages 1 segs 16 pipe 17 off
+(00.003459) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003460) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003462) Fetched ack: 66 66 0
+(00.003463) page-xfer: Transferring pages:
+(00.003464) page-xfer: 	buf 7/2
+(00.003465) page-xfer: 	p 0x40d000 [1]
+(00.003471) page-xfer: 	p 0x5b7000 [6]
+(00.003477) page-xfer: 	buf 47/8
+(00.003478) page-xfer: 	p 0x5bd000 [1]
+(00.003480) page-xfer: 	p 0x13f1000 [1]
+(00.003482) page-xfer: 	p 0x1402000 [5]
+(00.003537) page-xfer: 	p 0x140a000 [12]
+(00.003552) page-xfer: 	p 0x7f6420000000 [20]
+(00.003571) page-xfer: 	p 0x7f64271f8000 [2]
+(00.003575) page-xfer: 	p 0x7f64271fc000 [3]
+(00.003579) page-xfer: 	p 0x7f64279fd000 [3]
+(00.003584) page-xfer: 	buf 6/1
+(00.003585) page-xfer: 	p 0x7f6427bf7000 [6]
+(00.003592) page-xfer: 	buf 5/3
+(00.003593) page-xfer: 	p 0x7f6427bfd000 [1]
+(00.003595) page-xfer: 	p 0x7f6427c01000 [3]
+(00.003598) page-xfer: 	p 0x7f6427c09000 [1]
+(00.003601) page-xfer: 	buf 14/1
+(00.003602) page-xfer: 	p 0x7f6428018000 [14]
+(00.003617) page-xfer: 	buf 3/1
+(00.003618) page-xfer: 	p 0x7f6428026000 [3]
+(00.003622) page-xfer: 	buf 1/1
+(00.003623) page-xfer: 	p 0x7f6428215000 [1]
+(00.003626) page-xfer: 	buf 1/1
+(00.003627) page-xfer: 	p 0x7f6428216000 [1]
+(00.003630) page-pipe: Clean up page pipe
+(00.003631) page-pipe: Will grow page pipe (iov off is 18)
+(00.003631) page-pipe: Add iov to page pipe (0 iovs, 18/30618 total)
+(00.003633) page-pipe: Grow pipe 10 -> 20
+(00.003634) Pagemap generated: 18 pages (0 lazy) 0 holes
+(00.003635) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003636) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003637) pagemap-cache: 525507: filling VMA 7f6428400000-7f64284de000 (888K) [l:7f6428400000 h:7f6428600000]
+(00.003638) pagemap-cache: 	525507:     7f6428400000-7f64284de000     nr:1     cov:909312
+(00.003639) pagemap-cache: 	525507: simple mode [l:7f6428400000 h:7f64284de000]
+(00.003644) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003645) pagemap-cache: 525507: filling VMA 7f64284de000-7f6428667000 (1572K) [l:7f6428400000 h:7f6428600000]
+(00.003653) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003654) pagemap-cache: 525507: filling VMA 7f6428667000-7f64286f4000 (564K) [l:7f6428600000 h:7f6428800000]
+(00.003655) pagemap-cache: 	525507:     7f6428667000-7f64286f4000     nr:1     cov:577536
+(00.003656) pagemap-cache: 	525507:     7f64286f4000-7f6428704000     nr:2     cov:643072
+(00.003658) pagemap-cache: 	525507:     7f6428704000-7f6428705000     nr:3     cov:647168
+(00.003659) pagemap-cache: 	525507:     7f6428705000-7f6428706000     nr:4     cov:651264
+(00.003660) pagemap-cache: 	525507:     7f642870b000-7f642870e000     nr:5     cov:663552
+(00.003661) pagemap-cache: 	525507:     7f642870e000-7f642871b000     nr:6     cov:716800
+(00.003662) pagemap-cache: 	525507:     7f642871b000-7f642878d000     nr:7     cov:1183744
+(00.003664) pagemap-cache: 	525507:     7f642878d000-7f64287e9000     nr:8     cov:1560576
+(00.003665) pagemap-cache: 	525507:     7f64287e9000-7f64287ea000     nr:9     cov:1564672
+(00.003666) pagemap-cache: 	525507:     7f64287ea000-7f64287eb000     nr:10    cov:1568768
+(00.003667) pagemap-cache: 	525507:     7f64287eb000-7f64287ee000     nr:11    cov:1581056
+(00.003668) pagemap-cache: 	525507:     7f64287ee000-7f64287fa000     nr:12    cov:1630208
+(00.003669) pagemap-cache: 	525507:     7f64287fa000-7f64287fe000     nr:13    cov:1646592
+(00.003670) pagemap-cache: 	525507:     7f64287fe000-7f64287ff000     nr:14    cov:1650688
+(00.003671) pagemap-cache: 	525507:     7f64287ff000-7f6428800000     nr:15    cov:1654784
+(00.003672) pagemap-cache: 	525507: cache  mode [l:7f6428667000 h:7f6428800000]
+(00.003675) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003676) page-pipe: Add iov to page pipe (1 iovs, 19/30618 total)
+(00.003677) page-pipe: Grow pipe 20 -> 40
+(00.003678) Pagemap generated: 16 pages (0 lazy) 0 holes
+(00.003679) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003679) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003680) page-pipe: Will grow page pipe (iov off is 20)
+(00.003680) page-pipe: Add iov to page pipe (0 iovs, 20/30618 total)
+(00.003681) Pagemap generated: 3 pages (0 lazy) 0 holes
+(00.003681) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003682) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003683) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003683) page-pipe: Will grow page pipe (iov off is 21)
+(00.003684) page-pipe: Add iov to page pipe (0 iovs, 21/30618 total)
+(00.003684) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003685) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003685) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003686) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003686) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003687) page-pipe: Add iov to page pipe (1 iovs, 22/30618 total)
+(00.003688) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003688) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003689) pagemap-cache: 525507: filling VMA 7f6428800000-7f6428801000 (4K) [l:7f6428800000 h:7f6428a00000]
+(00.003689) pagemap-cache: 	525507:     7f6428800000-7f6428801000     nr:1     cov:4096
+(00.003690) pagemap-cache: 	525507:     7f6428801000-7f6428802000     nr:2     cov:8192
+(00.003690) pagemap-cache: 	525507: cache  mode [l:7f6428800000 h:7f6428a00000]
+(00.003693) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003693) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003694) pagemap-cache: 525507: filling VMA 7f6428802000-7f642a317000 (27732K) [l:7f6428800000 h:7f6428a00000]
+(00.003724) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003725) pagemap-cache: 525507: filling VMA 7f642a317000-7f642a318000 (4K) [l:7f642a200000 h:7f642a400000]
+(00.003728) page-pipe: Add iov to page pipe (2 iovs, 23/30618 total)
+(00.003729) Pagemap generated: 1 pages (0 lazy) 0 holes
+(00.003730) pagemap-cache: 525507: filling VMA 7f642a318000-7f642a319000 (4K) [l:7f642a200000 h:7f642a400000]
+(00.003733) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003733) pagemap-cache: 525507: filling VMA 7f642a31a000-7f642a31e000 (16K) [l:7f642a200000 h:7f642a400000]
+(00.003736) page-pipe: Will grow page pipe (iov off is 24)
+(00.003737) page-pipe: Add iov to page pipe (0 iovs, 24/30618 total)
+(00.003738) page-pipe: Add iov to page pipe (1 iovs, 25/30618 total)
+(00.003738) Pagemap generated: 3 pages (0 lazy) 0 holes
+(00.003739) pagemap-cache: 525507: filling VMA 7f642a324000-7f642a326000 (8K) [l:7f642a200000 h:7f642a400000]
+(00.003741) page-pipe: Add iov to page pipe (2 iovs, 26/30618 total)
+(00.003742) Pagemap generated: 2 pages (0 lazy) 0 holes
+(00.003742) pagemap-cache: 525507: filling VMA 7f642a326000-7f642a328000 (8K) [l:7f642a200000 h:7f642a400000]
+(00.003744) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003744) pagemap-cache: 525507: filling VMA 7f642a328000-7f642a351000 (164K) [l:7f642a200000 h:7f642a400000]
+(00.003746) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003746) pagemap-cache: 525507: filling VMA 7f642a351000-7f642a35d000 (48K) [l:7f642a200000 h:7f642a400000]
+(00.003748) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003748) pagemap-cache: 525507: filling VMA 7f642a35d000-7f642a35f000 (8K) [l:7f642a200000 h:7f642a400000]
+(00.003749) page-pipe: Will grow page pipe (iov off is 27)
+(00.003750) page-pipe: Add iov to page pipe (0 iovs, 27/30618 total)
+(00.003750) Pagemap generated: 2 pages (0 lazy) 0 holes
+(00.003751) pagemap-cache: 525507: filling VMA 7f642a35f000-7f642a361000 (8K) [l:7f642a200000 h:7f642a400000]
+(00.003752) Pagemap generated: 2 pages (0 lazy) 0 holes
+(00.003752) pagemap-cache: 525507: filling VMA 7ffe7e1f7000-7ffe7e218000 (132K) [l:7ffe7e000000 h:7ffe7e200000]
+(00.003754) page-pipe: Will grow page pipe (iov off is 28)
+(00.003755) page-pipe: Add iov to page pipe (0 iovs, 28/30618 total)
+(00.003756) Pagemap generated: 8 pages (0 lazy) 0 holes
+(00.003756) pagemap-cache: 525507: filling VMA 7ffe7e2b3000-7ffe7e2b7000 (16K) [l:7ffe7e200000 h:7ffe7e400000]
+(00.003757) Pagemap generated: 0 pages (0 lazy) 0 holes
+(00.003758) pagemap-cache: 525507: filling VMA 7ffe7e2b7000-7ffe7e2b9000 (8K) [l:7ffe7e200000 h:7ffe7e400000]
+(00.003759) page-pipe: Will grow page pipe (iov off is 29)
+(00.003760) page-pipe: Add iov to page pipe (0 iovs, 29/30618 total)
+(00.003760) Pagemap generated: 2 pages (0 lazy) 0 holes
+(00.003761) page-pipe: Page pipe:
+(00.003761) page-pipe: * 8 pipes 30/30618 iovs:
+(00.003762) page-pipe: 	buf 36 pages, 2 iovs, flags: 0 pipe_off: 0 :
+(00.003762) page-pipe: 		0x7f64283eb000 19
+(00.003763) page-pipe: 		0x7f64286f4000 17
+(00.003763) page-pipe: 	buf 3 pages, 1 iovs, flags: 1 pipe_off: 0 :
+(00.003764) page-pipe: 		0x7f642870b000 3
+(00.003765) page-pipe: 	buf 5 pages, 3 iovs, flags: 0 pipe_off: 0 :
+(00.003765) page-pipe: 		0x7f64287e9000 2
+(00.003766) page-pipe: 		0x7f64287fe000 2
+(00.003766) page-pipe: 		0x7f642a317000 1
+(00.003767) page-pipe: 	buf 5 pages, 3 iovs, flags: 1 pipe_off: 0 :
+(00.003767) page-pipe: 		0x7f642a31a000 1
+(00.003768) page-pipe: 		0x7f642a31c000 2
+(00.003768) page-pipe: 		0x7f642a324000 2
+(00.003769) page-pipe: 	buf 4 pages, 1 iovs, flags: 0 pipe_off: 0 :
+(00.003769) page-pipe: 		0x7f642a35d000 4
+(00.003770) page-pipe: 	buf 8 pages, 1 iovs, flags: 1 pipe_off: 0 :
+(00.003770) page-pipe: 		0x7ffe7e210000 8
+(00.003770) page-pipe: 	buf 2 pages, 1 iovs, flags: 0 pipe_off: 0 :
+(00.003771) page-pipe: 		0x7ffe7e2b7000 2
+(00.003771) page-pipe: * 0 holes:
+(00.003772) PPB: 36 pages 2 segs 64 pipe 18 off
+(00.003773) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003775) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003780) Fetched ack: 66 66 0
+(00.003780) PPB: 3 pages 1 segs 16 pipe 20 off
+(00.003782) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003783) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003786) Fetched ack: 66 66 0
+(00.003787) PPB: 5 pages 3 segs 16 pipe 21 off
+(00.003788) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003789) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003792) Fetched ack: 66 66 0
+(00.003793) PPB: 5 pages 3 segs 16 pipe 24 off
+(00.003794) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003795) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003798) Fetched ack: 66 66 0
+(00.003799) PPB: 4 pages 1 segs 16 pipe 27 off
+(00.003801) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003802) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003805) Fetched ack: 66 66 0
+(00.003806) PPB: 8 pages 1 segs 16 pipe 28 off
+(00.003807) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003808) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003811) Fetched ack: 66 66 0
+(00.003812) PPB: 2 pages 1 segs 64 pipe 29 off
+(00.003814) Sent msg to daemon 66 0 0
+pie: 525507: __fetched msg: 66 0 0
+(00.003815) Wait for ack 66 on daemon socket
+pie: 525507: __sent ack msg: 66 66 0
+pie: 525507: Daemon waits for command
+(00.003819) Fetched ack: 66 66 0
+(00.003820) page-xfer: Transferring pages:
+(00.003821) page-xfer: 	buf 36/2
+(00.003822) page-xfer: 	p 0x7f64283eb000 [19]
+(00.003838) page-xfer: 	p 0x7f64286f4000 [17]
+(00.003853) page-xfer: 	buf 3/1
+(00.003853) page-xfer: 	p 0x7f642870b000 [3]
+(00.003857) page-xfer: 	buf 5/3
+(00.003857) page-xfer: 	p 0x7f64287e9000 [2]
+(00.003860) page-xfer: 	p 0x7f64287fe000 [2]
+(00.003863) page-xfer: 	p 0x7f642a317000 [1]
+(00.003864) page-xfer: 	buf 5/3
+(00.003865) page-xfer: 	p 0x7f642a31a000 [1]
+(00.003867) page-xfer: 	p 0x7f642a31c000 [2]
+(00.003869) page-xfer: 	p 0x7f642a324000 [2]
+(00.003872) page-xfer: 	buf 4/1
+(00.003872) page-xfer: 	p 0x7f642a35d000 [4]
+(00.003877) page-xfer: 	buf 8/1
+(00.003877) page-xfer: 	p 0x7ffe7e210000 [8]
+(00.003885) page-xfer: 	buf 2/1
+(00.003885) page-xfer: 	p 0x7ffe7e2b7000 [2]
+(00.003894) page-pipe: Killing page pipe
+(00.003907) ----------------------------------------
+(00.003908) Sent msg to daemon 65 0 0
+(00.003909) Wait for ack 65 on daemon socket
+pie: 525507: __fetched msg: 65 0 0
+pie: 525507: __sent ack msg: 65 65 0
+pie: 525507: Daemon waits for command
+(00.003913) Fetched ack: 65 65 0
+(00.003914) Sent msg to daemon 67 0 0
+(00.003914) Wait for ack 67 on daemon socket
+pie: 525507: __fetched msg: 67 0 0
+pie: 525507: __sent ack msg: 67 67 0
+pie: 525507: Daemon waits for command
+(00.003921) Fetched ack: 67 67 0
+(00.003925) Sent msg to daemon 68 0 0
+(00.003926) Wait for ack 68 on daemon socket
+pie: 525507: __fetched msg: 68 0 0
+pie: 525507: __sent ack msg: 68 68 0
+pie: 525507: Daemon waits for command
+(00.003929) Fetched ack: 68 68 0
+(00.003931) Sent msg to daemon 69 0 0
+(00.003931) Wait for ack 69 on daemon socket
+pie: 525507: __fetched msg: 69 0 0
+pie: 525507: __sent ack msg: 69 69 0
+pie: 525507: Daemon waits for command
+(00.003934) Fetched ack: 69 69 0
+(00.003935) 
+(00.003935) Dumping core (pid: 525507)
+(00.003936) ----------------------------------------
+(00.003936) Obtaining personality ... 
+(00.003944) Sent msg to daemon 64 0 0
+(00.003945) Wait for ack 64 on daemon socket
+pie: 525507: __fetched msg: 64 0 0
+pie: 525507: __sent ack msg: 64 64 0
+pie: 525507: Daemon waits for command
+(00.003954) Fetched ack: 64 64 0
+(00.003956) 525507 has 0 sched policy
+(00.003958) 	dumping 5 nice for 525507
+(00.003959) dumping /proc/525507/oom_score_adj
+(00.003967) Sent msg to daemon 76 0 0
+(00.003968) Wait for ack 76 on daemon socket
+pie: 525507: __fetched msg: 76 0 0
+pie: 525507: __sent ack msg: 76 76 0
+pie: 525507: Daemon waits for command
+(00.003986) Fetched ack: 76 76 0
+(00.004037) ----------------------------------------
+(00.004039) Sent msg to daemon 76 0 0
+(00.004040) Wait for ack 76 on daemon socket
+pie: 525507: __fetched msg: 76 0 0
+pie: 525507: __sent ack msg: 76 76 0
+pie: 525507: Daemon waits for command
+(00.004048) Fetched ack: 76 76 0
+(00.004049) Sent msg to daemon 76 0 0
+(00.004050) Wait for ack 76 on daemon socket
+pie: 525507: __fetched msg: 76 0 0
+pie: 525507: __sent ack msg: 76 76 0
+pie: 525507: Daemon waits for command
+(00.004057) Fetched ack: 76 76 0
+(00.004059) Waiting for 525507 to trap
+(00.004061) Daemon 525507 exited trapping
+(00.004063) Sent msg to daemon 3 0 0
+pie: 525507: __fetched msg: 3 0 0
+pie: 525507: 525507: new_sp=0x7f64281ed148 ip 0x7f6427ad5c65
+(00.004099) 525507 was trapped
+(00.004104) 525507 was trapped
+(00.004106) 525507 (native) is going to execute the syscall 15, required is 15
+(00.004111) 525507 was stopped
+(00.004112) 
+(00.004113) Dumping core for thread (pid: 525509)
+(00.004113) ----------------------------------------
+(00.004114) Dumping general registers for 525509 in native mode
+(00.004115) Warn  (compel/arch/x86/src/lib/infect.c:367): Will restore 525509 with interrupted system call
+(00.004115) Dumping GP/FPU registers for 525509
+(00.004132) Restoring GP/FPU registers for 525509
+(00.004139) 525509 has 0 sched policy
+(00.004140) 	dumping 5 nice for 525509
+(00.004173) ----------------------------------------
+(00.004173) 
+(00.004174) Dumping core for thread (pid: 525511)
+(00.004174) ----------------------------------------
+(00.004175) Dumping general registers for 525511 in native mode
+(00.004176) Dumping GP/FPU registers for 525511
+(00.004192) Restoring GP/FPU registers for 525511
+(00.004195) 525511 has 0 sched policy
+(00.004196) 	dumping 5 nice for 525511
+(00.004215) ----------------------------------------
+(00.004243) 
+(00.004244) Dumping mm (pid: 525507)
+(00.004245) ----------------------------------------
+(00.004245) 0x400000-0x40d000 (52K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x1
+(00.004247) 0x40d000-0x53d000 (1216K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0xd000 reg fp  shmid: 0x1
+(00.004248) 0x53d000-0x5b5000 (480K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x13d000 reg fp  shmid: 0x1
+(00.004248) 0x5b5000-0x5bc000 (28K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1b5000 reg fp  shmid: 0x1
+(00.004292) 0x5bc000-0x5bd000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x1bc000 reg fp  shmid: 0x1
+(00.004292) 0x5bd000-0x5be000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004293) 0x13f1000-0x1416000 (148K) prot 0x3 flags 0x22 fdflags 0 st 0x221 off 0 reg heap ap  shmid: 0
+(00.004294) 0x7f6420000000-0x7f6420021000 (132K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004295) 0x7f6420021000-0x7f6424000000 (65404K) prot 0 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004296) 0x7f64269fe000-0x7f64269ff000 (4K) prot 0 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004296) 0x7f64269ff000-0x7f64271ff000 (8192K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004297) 0x7f64271ff000-0x7f6427200000 (4K) prot 0 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004298) 0x7f6427200000-0x7f6427a00000 (8192K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004298) 0x7f6427a00000-0x7f6427a29000 (164K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x2
+(00.004299) 0x7f6427a29000-0x7f6427b9e000 (1492K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x29000 reg fp  shmid: 0x2
+(00.004300) 0x7f6427b9e000-0x7f6427bf7000 (356K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x19e000 reg fp  shmid: 0x2
+(00.004300) 0x7f6427bf7000-0x7f6427bfb000 (16K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1f6000 reg fp  shmid: 0x2
+(00.004301) 0x7f6427bfb000-0x7f6427bfd000 (8K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x1fa000 reg fp  shmid: 0x2
+(00.004302) 0x7f6427bfd000-0x7f6427c0a000 (52K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004303) 0x7f6427e00000-0x7f6427e99000 (612K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x3
+(00.004303) 0x7f6427e99000-0x7f6427fa5000 (1072K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x99000 reg fp  shmid: 0x3
+(00.004304) 0x7f6427fa5000-0x7f6428018000 (460K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1a5000 reg fp  shmid: 0x3
+(00.004305) 0x7f6428018000-0x7f6428025000 (52K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x217000 reg fp  shmid: 0x3
+(00.004305) 0x7f6428025000-0x7f6428026000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x224000 reg fp  shmid: 0x3
+(00.004306) 0x7f6428026000-0x7f6428029000 (12K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004307) 0x7f64281fa000-0x7f64281fd000 (12K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x4
+(00.004307) 0x7f64281fd000-0x7f6428211000 (80K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x3000 reg fp  shmid: 0x4
+(00.004309) 0x7f6428211000-0x7f6428215000 (16K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x17000 reg fp  shmid: 0x4
+(00.004310) 0x7f6428215000-0x7f6428216000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1a000 reg fp  shmid: 0x4
+(00.004310) 0x7f6428216000-0x7f6428217000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004311) 0x7f6428217000-0x7f6428279000 (392K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x5
+(00.004312) 0x7f6428279000-0x7f6428363000 (936K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x62000 reg fp  shmid: 0x5
+(00.004312) 0x7f6428363000-0x7f64283eb000 (544K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x14c000 reg fp  shmid: 0x5
+(00.004313) 0x7f64283eb000-0x7f64283fd000 (72K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1d4000 reg fp  shmid: 0x5
+(00.004314) 0x7f64283fd000-0x7f64283fe000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x1e6000 reg fp  shmid: 0x5
+(00.004314) 0x7f64283fe000-0x7f6428400000 (8K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004315) 0x7f6428400000-0x7f64284de000 (888K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x6
+(00.004316) 0x7f64284de000-0x7f6428667000 (1572K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0xde000 reg fp  shmid: 0x6
+(00.004316) 0x7f6428667000-0x7f64286f4000 (564K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x267000 reg fp  shmid: 0x6
+(00.004317) 0x7f64286f4000-0x7f6428704000 (64K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x2f4000 reg fp  shmid: 0x6
+(00.004318) 0x7f6428704000-0x7f6428705000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x304000 reg fp  shmid: 0x6
+(00.004318) 0x7f6428705000-0x7f6428706000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004319) 0x7f642870b000-0x7f642870e000 (12K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004320) 0x7f642870e000-0x7f642871b000 (52K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x7
+(00.004320) 0x7f642871b000-0x7f642878d000 (456K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0xd000 reg fp  shmid: 0x7
+(00.004321) 0x7f642878d000-0x7f64287e9000 (368K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x7f000 reg fp  shmid: 0x7
+(00.004322) 0x7f64287e9000-0x7f64287ea000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0xda000 reg fp  shmid: 0x7
+(00.004322) 0x7f64287ea000-0x7f64287eb000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0xdb000 reg fp  shmid: 0x7
+(00.004323) 0x7f64287eb000-0x7f64287ee000 (12K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x8
+(00.004324) 0x7f64287ee000-0x7f64287fa000 (48K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x3000 reg fp  shmid: 0x8
+(00.004325) 0x7f64287fa000-0x7f64287fe000 (16K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0xf000 reg fp  shmid: 0x8
+(00.004325) 0x7f64287fe000-0x7f64287ff000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x12000 reg fp  shmid: 0x8
+(00.004326) 0x7f64287ff000-0x7f6428800000 (4K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x13000 reg fp  shmid: 0x8
+(00.004327) 0x7f6428800000-0x7f6428801000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0x9
+(00.004327) 0x7f6428801000-0x7f6428802000 (4K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x1000 reg fp  shmid: 0x9
+(00.004328) 0x7f6428802000-0x7f642a317000 (27732K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x2000 reg fp  shmid: 0x9
+(00.004329) 0x7f642a317000-0x7f642a318000 (4K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x1b16000 reg fp  shmid: 0x9
+(00.004329) 0x7f642a318000-0x7f642a319000 (4K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004330) 0x7f642a31a000-0x7f642a31e000 (16K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004331) 0x7f642a324000-0x7f642a326000 (8K) prot 0x3 flags 0x22 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004331) 0x7f642a326000-0x7f642a328000 (8K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0 reg fp  shmid: 0xa
+(00.004332) 0x7f642a328000-0x7f642a351000 (164K) prot 0x5 flags 0x2 fdflags 0 st 0x41 off 0x2000 reg fp  shmid: 0xa
+(00.004333) 0x7f642a351000-0x7f642a35d000 (48K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x2b000 reg fp  shmid: 0xa
+(00.004334) 0x7f642a35d000-0x7f642a35f000 (8K) prot 0x1 flags 0x2 fdflags 0 st 0x41 off 0x37000 reg fp  shmid: 0xa
+(00.004335) 0x7f642a35f000-0x7f642a361000 (8K) prot 0x3 flags 0x2 fdflags 0 st 0x41 off 0x39000 reg fp  shmid: 0xa
+(00.004335) 0x7ffe7e1f7000-0x7ffe7e218000 (132K) prot 0x3 flags 0x122 fdflags 0 st 0x201 off 0 reg ap  shmid: 0
+(00.004336) 0x7ffe7e2b3000-0x7ffe7e2b7000 (16K) prot 0x1 flags 0x22 fdflags 0 st 0x1201 off 0 reg vvar ap  shmid: 0
+(00.004337) 0x7ffe7e2b7000-0x7ffe7e2b9000 (8K) prot 0x5 flags 0x22 fdflags 0 st 0x209 off 0 reg vdso ap  shmid: 0
+(00.004337) 0xffffffffff600000-0xffffffffff601000 (4K) prot 0x4 flags 0x22 fdflags 0 st 0x204 off 0 vsys ap  shmid: 0
+(00.004338) Obtaining task auvx ...
+(00.004382) Dumping path for -3 fd via self 15 [/home/luca/fmi/runbooks/drain-migration]
+(00.004391) Dumping path for -3 fd via self 15 [/]
+(00.004393) Dumping task cwd id 0xf root id 0x10
+(00.004419) Dumping file-locks
+(00.004420) 
+(00.004420) Dumping pstree (pid: 525507)
+(00.004421) ----------------------------------------
+(00.004422) Process: 525507(525507)
+(00.004428) ----------------------------------------
+(00.004441) unix: Dumping external sockets
+(00.004446) Writing image inventory (version 1)
+(00.004471) Running post-dump scripts
+(00.004471) Unfreezing tasks into 2
+(00.004472) 	Unseizing 525507 into 2
+(00.004621) Writing stats
+(00.004631) Dumping finished successfully

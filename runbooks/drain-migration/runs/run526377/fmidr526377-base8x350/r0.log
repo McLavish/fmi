@@ -1,0 +1,16 @@
+rank 0: start pid=526380 shape=variable_payloads
+rank 0: round 0 ok checksum=16520974615245828266 widest=524288
+rank 0: round 25 ok checksum=7978275819923131167 widest=524288
+rank 0: round 50 ok checksum=4716312478264659159 widest=524288
+rank 0: round 75 ok checksum=9091712790672151524 widest=524288
+rank 0: round 100 ok checksum=12296167006976012774 widest=524288
+rank 0: round 125 ok checksum=10167399270625845859 widest=524288
+rank 0: round 150 ok checksum=6233763058437900323 widest=524288
+rank 0: round 175 ok checksum=7535478360176753932 widest=524288
+rank 0: round 200 ok checksum=2174353619309870285 widest=524288
+rank 0: round 225 ok checksum=837753405259600899 widest=524288
+rank 0: round 250 ok checksum=11433314742915148293 widest=524288
+rank 0: round 275 ok checksum=3245525497411883922 widest=524288
+rank 0: round 300 ok checksum=12108890986780892902 widest=524288
+rank 0: round 325 ok checksum=11963775581532081729 widest=524288
+rank 0: DONE rounds=350 checksum=353166304283249038

@@ -1,0 +1,31 @@
+rank 0: start pid=218544 shape=baseline
+rank 0: round 0 ok checksum=3094
+rank 0: round 25 ok checksum=85969
+rank 0: round 50 ok checksum=179469
+rank 0: round 75 ok checksum=283594
+rank 0: round 100 ok checksum=398344
+rank 0: round 125 ok checksum=523719
+rank 0: round 150 ok checksum=659719
+rank 0: round 175 ok checksum=806344
+rank 0: round 200 ok checksum=963594
+rank 0: round 225 ok checksum=1131469
+rank 0: round 250 ok checksum=1309969
+rank 0: round 275 ok checksum=1499094
+rank 0: round 300 ok checksum=1698844
+rank 0: round 325 ok checksum=1909219
+rank 0: round 350 ok checksum=2130219
+rank 0: round 375 ok checksum=2361844
+rank 0: round 400 ok checksum=2604094
+rank 0: round 425 ok checksum=2856969
+rank 0: round 450 ok checksum=3120469
+rank 0: round 475 ok checksum=3394594
+rank 0: round 500 ok checksum=3679344
+rank 0: round 525 ok checksum=3974719
+rank 0: round 550 ok checksum=4280719
+rank 0: round 575 ok checksum=4597344
+rank 0: round 600 ok checksum=4924594
+rank 0: round 625 ok checksum=5262469
+rank 0: round 650 ok checksum=5610969
+[2026-08-11 15:26:39.613711] [0x00007f67755fe640] [info]    DrainTCP: rank 0 dropped a leave notice from peer 1 written by incarnation 0; it is already connected to incarnation 1
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  DrainTCP: rank 0 <-> peer 1: the connection died 5015 ms ago and no migration notice followed within drain_grace_ms=5000 (an unplanned death is not recoverable in the drain protocol)

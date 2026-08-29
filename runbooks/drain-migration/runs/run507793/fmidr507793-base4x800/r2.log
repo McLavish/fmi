@@ -1,0 +1,34 @@
+rank 2: start pid=507798 shape=variable_payloads
+rank 2: round 0 ok checksum=12915701235050394431 widest=524288
+rank 2: round 25 ok checksum=15302524844148985182 widest=524288
+rank 2: round 50 ok checksum=16053110550566825661 widest=524288
+rank 2: round 75 ok checksum=7638786367013725070 widest=524288
+rank 2: round 100 ok checksum=837258511018476707 widest=524288
+rank 2: round 125 ok checksum=6768219359881101275 widest=524288
+rank 2: round 150 ok checksum=531167035408272339 widest=524288
+rank 2: round 175 ok checksum=8957239984537747098 widest=524288
+rank 2: round 200 ok checksum=8555796372477312768 widest=524288
+rank 2: round 225 ok checksum=9713557751098192930 widest=524288
+rank 2: round 250 ok checksum=7456486770018383517 widest=524288
+rank 2: round 275 ok checksum=6443557541283474099 widest=524288
+rank 2: round 300 ok checksum=14234068134972525457 widest=524288
+rank 2: round 325 ok checksum=8319527192059784066 widest=524288
+rank 2: round 350 ok checksum=14685595491471722610 widest=524288
+rank 2: round 375 ok checksum=3944577226261245790 widest=524288
+rank 2: round 400 ok checksum=6690179362232741794 widest=524288
+rank 2: round 425 ok checksum=10183973539547404613 widest=524288
+rank 2: round 450 ok checksum=8663995160502284779 widest=524288
+rank 2: round 475 ok checksum=9529647480080744565 widest=524288
+rank 2: round 500 ok checksum=16348516550922652554 widest=524288
+rank 2: round 525 ok checksum=4946462972854606525 widest=524288
+rank 2: round 550 ok checksum=11900052658011923287 widest=524288
+rank 2: round 575 ok checksum=11692506022543669035 widest=524288
+rank 2: round 600 ok checksum=1998926370814476259 widest=524288
+rank 2: round 625 ok checksum=10567205778127495522 widest=524288
+rank 2: round 650 ok checksum=9723843153650087744 widest=524288
+rank 2: round 675 ok checksum=6253924599459606101 widest=524288
+rank 2: round 700 ok checksum=3764036560313230634 widest=524288
+rank 2: round 725 ok checksum=8925439974720896176 widest=524288
+rank 2: round 750 ok checksum=13007667243384737147 widest=524288
+rank 2: round 775 ok checksum=9151900706484187258 widest=524288
+rank 2: DONE rounds=800 checksum=14764025834542088580

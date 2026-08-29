@@ -105,7 +105,7 @@ MUTS = [
  # Four of the five are killed by the CRIU sweep rather than by this suite, and that is the
  # honest place for them: the property is about what a rank owes its OTHER peers while it is
  # blocked, which only bites once a restore forces several links to be rebuilt at once. Measured
- # at 4 peers x 8 trials, seed 7 (runbooks/criu-transparent-checkpoint/sweep.py) - each of
+ # at 4 peers x 8 trials, seed 7 (fmi-spot-migration benchmarks/migration/criu-transparent/sweep.py) - each of
  # waiting_rank_serves_nobody, waiting_rank_never_accepts, waiting_rank_never_reconciles and
  # adoption_skips_the_handshake_debt takes the job from 8/8 to 0/8. Not a marginal shift: with
  # any one of them applied, no run survives a checkpoint.
@@ -284,7 +284,7 @@ survived, killed, broken = [], [], []
 # different vehicle, because the obligation it removes only bites once a restore forces several
 # links to be rebuilt at once. Anything that appears as a survivor and is NOT listed here is a
 # genuine hole. Before adding a name, run it through
-# runbooks/criu-transparent-checkpoint/sweep.py and record the rate you measured.
+# fmi-spot-migration's benchmarks/migration/criu-transparent/sweep.py and record the rate you measured.
 # Survivable BY DESIGN, not holes: each is one member of a redundant pair whose other member
 # holds the line alone. The pair's combined removal is the mutation that must die, and does:
 # delivery_order_guards_both_removed below.

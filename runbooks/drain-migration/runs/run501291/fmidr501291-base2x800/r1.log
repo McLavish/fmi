@@ -1,0 +1,34 @@
+rank 1: start pid=501296 shape=variable_payloads
+rank 1: round 0 ok checksum=16432556181863248254 widest=524288
+rank 1: round 25 ok checksum=12139697383853238510 widest=524288
+rank 1: round 50 ok checksum=6274584084905968287 widest=524288
+rank 1: round 75 ok checksum=7324779378029020145 widest=524288
+rank 1: round 100 ok checksum=159346203573720221 widest=524288
+rank 1: round 125 ok checksum=14301205961899786003 widest=524288
+rank 1: round 150 ok checksum=1265125759640191860 widest=524288
+rank 1: round 175 ok checksum=12595297064613880818 widest=524288
+rank 1: round 200 ok checksum=6199472394747502875 widest=524288
+rank 1: round 225 ok checksum=17779401539720315965 widest=524288
+rank 1: round 250 ok checksum=6389092950104860320 widest=524288
+rank 1: round 275 ok checksum=9897997473706811075 widest=524288
+rank 1: round 300 ok checksum=8917819640714289300 widest=524288
+rank 1: round 325 ok checksum=16923761021386112065 widest=524288
+rank 1: round 350 ok checksum=12300077127158710924 widest=524288
+rank 1: round 375 ok checksum=811185825942320543 widest=524288
+rank 1: round 400 ok checksum=17991159332500302084 widest=524288
+rank 1: round 425 ok checksum=6596334622723243146 widest=524288
+rank 1: round 450 ok checksum=13779469971660064013 widest=524288
+rank 1: round 475 ok checksum=12254033184915650954 widest=524288
+rank 1: round 500 ok checksum=2541762846073780038 widest=524288
+rank 1: round 525 ok checksum=2029929660106969673 widest=524288
+rank 1: round 550 ok checksum=13054859428950316621 widest=524288
+rank 1: round 575 ok checksum=3364100883672679400 widest=524288
+rank 1: round 600 ok checksum=16316300600411514086 widest=524288
+rank 1: round 625 ok checksum=15649121818617870008 widest=524288
+rank 1: round 650 ok checksum=2315145482745237236 widest=524288
+rank 1: round 675 ok checksum=2347221331481260011 widest=524288
+rank 1: round 700 ok checksum=12962991399734880030 widest=524288
+rank 1: round 725 ok checksum=12359356801308568227 widest=524288
+rank 1: round 750 ok checksum=11820419278198282582 widest=524288
+rank 1: round 775 ok checksum=12037741339688265608 widest=524288
+rank 1: DONE rounds=800 checksum=17192918873918679965

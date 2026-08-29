@@ -1,0 +1,33 @@
+rank 1: start pid=218545 shape=baseline
+rank 1: round 0 ok checksum=110
+rank 1: round 25 ok checksum=7085
+rank 1: round 50 ok checksum=22185
+rank 1: round 75 ok checksum=45410
+rank 1: round 100 ok checksum=76760
+rank 1: round 125 ok checksum=116235
+rank 1: round 150 ok checksum=163835
+rank 1: round 175 ok checksum=219560
+rank 1: round 200 ok checksum=283410
+rank 1: round 225 ok checksum=355385
+rank 1: round 250 ok checksum=435485
+rank 1: round 275 ok checksum=523710
+rank 1: round 300 ok checksum=620060
+rank 1: round 325 ok checksum=724535
+rank 1: round 350 ok checksum=837135
+rank 1: round 375 ok checksum=957860
+rank 1: round 400 ok checksum=1086710
+rank 1: round 425 ok checksum=1223685
+rank 1: round 450 ok checksum=1368785
+rank 1: round 475 ok checksum=1522010
+rank 1: round 500 ok checksum=1683360
+rank 1: round 525 ok checksum=1852835
+rank 1: round 550 ok checksum=2030435
+rank 1: round 575 ok checksum=2216160
+rank 1: round 600 ok checksum=2410010
+rank 1: round 625 ok checksum=2611985
+rank 1: round 650 ok checksum=2822085
+[2026-08-11 15:26:39.593543] [0x00007f7648dfe640] [info]    MigrationTrigger: rank 1 of fmidr213767-t2p4 begins a real migration at epoch 0
+[2026-08-11 15:26:39.608724] [0x00007f7648dfe640] [info]    DrainTCP: rank 1 of fmidr213767-t2p4 resumed at epoch 1, incarnation 1, listening on 127.0.0.1:42377
+[2026-08-11 15:26:39.608739] [0x00007f7648dfe640] [info]    MigrationTrigger: rank 1 of fmidr213767-t2p4 is back at epoch 1 after 16 ms
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  DrainTCP: rank 1 <-> peer 0: stream counters disagree at reconnect (peer sent 13692, we received 13692; peer received 8476, we sent 8476)

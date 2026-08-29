@@ -1,0 +1,14 @@
+rank 3: start pid=520259 shape=uneven_participation
+rank 3: round 0 ok checksum=9440809466240458609
+rank 3: round 25 ok checksum=5624534423950021353
+rank 3: round 50 ok checksum=13127263949596043480
+rank 3: round 75 ok checksum=13795570338936321974
+rank 3: round 100 ok checksum=10771500749140420527
+rank 3: round 125 ok checksum=9780822472257092691
+rank 3: round 150 ok checksum=4501020565904819758
+rank 3: round 175 ok checksum=4899697784403033016
+rank 3: round 200 ok checksum=6549866999674450461
+rank 3: round 225 ok checksum=7611438175511525613
+rank 3: round 250 ok checksum=1854125509065594548
+rank 3: round 275 ok checksum=10244085829225411562
+rank 3: DONE rounds=300 checksum=10088822199843266662

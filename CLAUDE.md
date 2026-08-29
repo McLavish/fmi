@@ -158,20 +158,21 @@ per run), and a `#if FMI_ENABLE_TCPUNCH` at the top of `tests/communicator.cpp` 
 suite from `config/fmi_test.json` — which enables `Direct` and nothing else, so it needs
 `tcpunchd` — to `config/fmi_directtcp_test.json`. Both then need only a running Redis.
 
-The one standalone program outside `tests/` is the transparent-checkpoint subject
-(`runbooks/criu-transparent-checkpoint/`), built to
-`build/runbooks/criu-transparent-checkpoint/fmi_checkpoint_subject` by any top-level
-Redis-enabled build. It is an ordinary FMI application with no checkpoint API in it; that
-directory's `sweep.py` (single host) and `multihost_sweep.py` (over ssh across nodes) freeze it
-with criu at random instants and compare every rank's final checksums against a clean run.
+The library builds nothing but `FMI`, `tests/` and the Python binding. The applications —
+including the 8-shape checkpoint subject, an ordinary FMI program with no checkpoint API in it
+that the criu sweeps freeze at random instants and compare against a clean run — and the
+checkpoint/migration runbooks that drive them live in the `fmi-spot-migration` repository
+(`apps/`, `benchmarks/migration/`, `runtime/protocol/`), which takes this library as a
+submodule and pins the commit.
 
 ## Running things
 
 Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id` is in
-`[0, num_peers)`. Two verified step-by-step runbooks ship with the repo: the AWS Lambda + S3
-flow in `runbooks/aws-python311-s3/`, and `runbooks/criu-transparent-checkpoint/`, which
-checkpoints and restores one rank of an unmodified `DirectTCP` job with `criu` driven entirely
-from outside the process. JSON config templates live in `config/`.
+`[0, num_peers)`. One verified step-by-step runbook ships with the library: the AWS Lambda +
+S3 flow in `runbooks/aws-python311-s3/`. The criu-transparent checkpoint and the drain
+migration runbooks — which checkpoint, move and restore one rank of an unmodified job with
+`criu` driven entirely from outside the process — are `benchmarks/migration/criu-transparent/`
+and `benchmarks/migration/drain/` in fmi-spot-migration. JSON config templates live in `config/`.
 
 ## Architecture
 
@@ -223,7 +224,8 @@ The dependency direction is: user API → channel policy → channel → transpo
   - On multi-homed hosts and in containers, set `advertise_host` explicitly (in K8s, the pod IP
     via the downward API — never a Service VIP, which load-balances to an arbitrary pod).
     Otherwise the rank advertises whichever local address routes to the registry.
-  - `runbooks/criu-transparent-checkpoint/` freezes an unmodified DirectTCP job raw — no hooks
+  - The criu-transparent runbook (fmi-spot-migration `benchmarks/migration/criu-transparent/`)
+    freezes an unmodified DirectTCP job raw — no hooks
     — and survives on the sequenced-link recovery alone. **Cross-host restore is backed** (commit
     `dc43beb`), by three mechanisms that replaced the deleted `Channel::prepare_for_checkpoint`
     hook. `reset_transport_if_relocated()` (`src/comm/DirectTCP.cpp:75`) remembers the kernel boot
@@ -307,7 +309,8 @@ The dependency direction is: user API → channel policy → channel → transpo
     learn to from the coordinator, not from the application.
   - **Cross-host restore is verified**, sequential and batch (whole-machine and two-machine
     single cuts), by the 4-machine campaign driven from
-    `runbooks/drain-migration/multihost_drain.py` — evidence in that runbook's README. One
+    `benchmarks/migration/drain/multihost_drain.py` in fmi-spot-migration — evidence in that
+    runbook's README. One
     environmental requirement: cross-host criu must run privileged (sudo or
     `CAP_SYS_ADMIN`) so the restore lands in a time namespace preserving
     `CLOCK_MONOTONIC`; `--unprivileged` silently skips the namespace, the restored rank
@@ -471,8 +474,9 @@ The dependency direction is: user API → channel policy → channel → transpo
     exact-length check now reports rather than truncating past. `Utils::Timeout` remains
     **terminal for the communicator** (the counters are not retry-safe): `recover` makes timeouts
     rarer, not recoverable.
-  - `runbooks/criu-transparent-checkpoint/fmi_redis.json` and `fmi_s3.json` are the checkpointing
-    configs for this data plane, and each enables its one backend and nothing else on purpose —
+  - `fmi_redis.json` and `fmi_s3.json` of the criu-transparent runbook (fmi-spot-migration
+    `benchmarks/migration/criu-transparent/`) are the checkpointing configs for this data
+    plane, and each enables its one backend and nothing else on purpose —
     with DirectTCP also enabled the cost model routes every operation of that subject to
     DirectTCP, so a sweep would exercise no store code at all and report green. `sweep.py
     --config` picks the plane and cleans up after it; on S3 it also prints the requests and

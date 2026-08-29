@@ -1,0 +1,30 @@
+rank 2: start pid=218546 shape=baseline
+rank 2: round 0 ok checksum=1213
+rank 2: round 25 ok checksum=35763
+rank 2: round 50 ok checksum=78438
+rank 2: round 75 ok checksum=129238
+rank 2: round 100 ok checksum=188163
+rank 2: round 125 ok checksum=255213
+rank 2: round 150 ok checksum=330388
+rank 2: round 175 ok checksum=413688
+rank 2: round 200 ok checksum=505113
+rank 2: round 225 ok checksum=604663
+rank 2: round 250 ok checksum=712338
+rank 2: round 275 ok checksum=828138
+rank 2: round 300 ok checksum=952063
+rank 2: round 325 ok checksum=1084113
+rank 2: round 350 ok checksum=1224288
+rank 2: round 375 ok checksum=1372588
+rank 2: round 400 ok checksum=1529013
+rank 2: round 425 ok checksum=1693563
+rank 2: round 450 ok checksum=1866238
+rank 2: round 475 ok checksum=2047038
+rank 2: round 500 ok checksum=2235963
+rank 2: round 525 ok checksum=2433013
+rank 2: round 550 ok checksum=2638188
+rank 2: round 575 ok checksum=2851488
+rank 2: round 600 ok checksum=3072913
+rank 2: round 625 ok checksum=3302463
+rank 2: round 650 ok checksum=3540138
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  DrainTCP: rank 2 <-> peer 0: the connection died 5014 ms ago and no migration notice followed within drain_grace_ms=5000 (an unplanned death is not recoverable in the drain protocol)

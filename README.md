@@ -74,7 +74,7 @@ For even easier deployment, we provide AWS CloudFormation templates to create La
 ## Examples
 C++ sample code for the library is available at [tests/communicator.cpp](tests/communicator.cpp), the usage from Python is demonstrated in [python/tests/client.py](python/tests/client.py). 
 
-The TCP backends can additionally carry every message inside a sequenced link (`"framed": true, "recover_links": true` on the backend): frames are numbered and stamped with the operation they belong to, retained until the peer acknowledges them, and replayed after a connection is lost and rebuilt. A rank can then be checkpointed and restored mid-job by an external tool — the application has no checkpoint API, hook or annotation in it, and never learns that it was frozen. [runbooks/criu-transparent-checkpoint](runbooks/criu-transparent-checkpoint) is a runnable demonstration with a randomized sweep.
+The TCP backends can additionally carry every message inside a sequenced link (`"framed": true, "recover_links": true` on the backend): frames are numbered and stamped with the operation they belong to, retained until the peer acknowledges them, and replayed after a connection is lost and rebuilt. A rank can then be checkpointed and restored mid-job by an external tool — the application has no checkpoint API, hook or annotation in it, and never learns that it was frozen. A runnable demonstration with a randomized sweep is `benchmarks/migration/criu-transparent/` in [fmi-spot-migration](https://github.com/McLavish/fmi-spot-migration), which builds this library as a submodule.
 
 ## Documentation
 
