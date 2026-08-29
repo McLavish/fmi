@@ -1,3 +1,0 @@
-1786461999593-0 {'type': 'leaving', 'rank': '1', 'epoch': '0', 'batch': 'fmidr213767-t2p4|1@0', 'incarnation': '0'}
-1786461999594-0 {'type': 'sealed', 'rank': '1', 'epoch': '0', 'batch': 'fmidr213767-t2p4|1@0', 'last_stream_id': '0-0', 'received.0': '13692', 'received.2': '0', 'received.3': '3261', 'sent.0': '8476', 'sent.2': '5216', 'sent.3': '5868'}
-1786461999608-0 {'type': 'restored', 'rank': '1', 'epoch': '1', 'batch': 'fmidr213767-t2p4|1@0', 'incarnation': '1'}
