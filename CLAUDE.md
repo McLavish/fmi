@@ -15,10 +15,9 @@ acknowledges them, and replayed after a connection is lost and rebuilt — so a 
 `criu` checkpointed and restored mid-job by an external tool without the application taking
 part.
 
-The canonical working tree on this machine is `/home/luca/fmi`. Note that some checked-in
-runbooks (e.g. `runbooks/aws-python311-s3/README.md`) reference paths like
-`/home/luca/fmi-original/fmi/...` or instruct `cd fmi` — those reflect other deployment
-layouts; here the repo root *is* `/home/luca/fmi`.
+The canonical working tree on this machine is `/home/luca/fmi`. This repository is the library
+alone; the applications, runbooks, benchmarks and the migration runtime built on it live in
+`fmi-spot-migration`, which pins this repository as a submodule.
 
 ## Building
 
@@ -106,7 +105,8 @@ component must match the target Python version.** On Ubuntu 24.04 use the system
 (3.12) with the distro `libboost-python-dev`; do **not** pair a `uv` Python 3.11 with the
 distro Boost.Python (it targets 3.12). Override the library explicitly with
 `-DFMI_BOOST_PYTHON_LIBRARY=...` if auto-detection picks the wrong one. For Python 3.11
-parity, build inside the Docker image (`runbooks/aws-python311-s3/Dockerfile.python3.11`).
+parity, build inside the Docker image (`deploy/aws-lambda-python311-s3/Dockerfile.python3.11`
+in fmi-spot-migration).
 
 ## Testing
 
@@ -168,11 +168,12 @@ submodule and pins the commit.
 ## Running things
 
 Every peer in a communicator must agree on `comm_name` and `num_peers`; `peer_id` is in
-`[0, num_peers)`. One verified step-by-step runbook ships with the library: the AWS Lambda +
-S3 flow in `runbooks/aws-python311-s3/`. The criu-transparent checkpoint and the drain
-migration runbooks — which checkpoint, move and restore one rank of an unmodified job with
-`criu` driven entirely from outside the process — are `benchmarks/migration/criu-transparent/`
-and `benchmarks/migration/drain/` in fmi-spot-migration. JSON config templates live in `config/`.
+`[0, num_peers)`. No runbooks ship with the library. In fmi-spot-migration: the AWS Lambda + S3
+flow is `deploy/aws-lambda-python311-s3/` (historical), and the criu-transparent checkpoint and
+drain migration runbooks — which checkpoint, move and restore one rank of an unmodified job
+with `criu` driven entirely from outside the process — are
+`benchmarks/migration/criu-transparent/` and `benchmarks/migration/drain/`. JSON config
+templates live in `config/`.
 
 ## Architecture
 
