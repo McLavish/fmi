@@ -100,7 +100,6 @@ endif()
 #target_link_libraries(client FMI OpenMP::OpenMP_CXX)
 
 option(FMI_BUILD_TESTS "Build FMI tests" OFF)
-option(FMI_BUILD_EXAMPLES "Build example programs" OFF)
 
 if (FMI_BUILD_TESTS)
     add_subdirectory(tests)
@@ -110,8 +109,4 @@ endif()
 # it needs no CRIU support compiled in — only a DirectTCP-capable build (hence Redis).
 if (FMI_ENABLE_REDIS AND NOT hasParent)
     add_subdirectory(runbooks/criu-transparent-checkpoint)
-endif()
-
-if (FMI_BUILD_EXAMPLES)
-    add_subdirectory(example_programs)
 endif()
