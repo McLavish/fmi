@@ -1,7 +1,7 @@
 # TLA+ specifications — the sequenced link layer
 
 Machine-checked models of the normative link-layer contracts in
-[`docs/superpowers/specs/2026-07-27-sequenced-incarnation-links-design.md`](../superpowers/specs/2026-07-27-sequenced-incarnation-links-design.md).
+[`docs/design/2026-07-27-sequenced-incarnation-links-design.md`](../design/2026-07-27-sequenced-incarnation-links-design.md).
 
 Two modules, 26 configurations, all exhaustively checked. Every number in this file was
 observed by running TLC; nothing here is extrapolated. **Read [What is NOT proven](#what-is-not-proven)
@@ -264,7 +264,7 @@ The freeze positions this file lists as abstracted away (partial egress, partial
 likewise covered only by implementation tests — and that abstraction hid a real defect: the
 transport advanced its receive watermark at header-parse time, so a freeze between a header and
 its payload let the peer prune a message it had never delivered. See
-`docs/superpowers/specs/2026-07-30-sequenced-links-implementation.md`, rule R1.
+`docs/design/2026-07-30-sequenced-links-implementation.md`, rule R1.
 
 ### `MessageIdentity`
 

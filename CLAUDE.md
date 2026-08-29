@@ -335,7 +335,7 @@ The dependency direction is: user API → channel policy → channel → transpo
 
 - **Sequenced link layer** (`include/comm/LinkFrame.h`, `include/comm/SequencedLink.h`,
   `src/comm/TcpChannelBase.cpp`; design in
-  `docs/superpowers/specs/2026-07-27-sequenced-incarnation-links-design.md`, machine-checked
+  `docs/design/2026-07-27-sequenced-incarnation-links-design.md`, machine-checked
   models in `docs/tla/`): two independent opt-in flags on a TCP backend, both **off by
   default**, so an unconfigured `Direct`/`DirectTCP` byte stream is exactly what it was before
   this existed. `"framed": true` prefixes every message with a fixed-size `LinkFrame` header

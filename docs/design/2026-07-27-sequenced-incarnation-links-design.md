@@ -2,8 +2,7 @@
 
 **Status:** design contract. Normative for all downstream implementation plans.
 **Supersedes:** `docs/consensus-cut.md` (global epoch cut) once Stage C lands.
-**Downstream plans:** `docs/superpowers/plans/2026-07-27-{a-message-identity,b-checkpoint-mechanics,c-sequenced-link-layer}.md`
-**Index and running order:** `docs/superpowers/plans/2026-07-27-migration-v2-README.md`
+**Downstream plans:** the per-stage implementation plans were working documents and are retired; `2026-07-30-sequenced-links-implementation.md` records what was built.
 **Machine-checked companion:** `docs/tla/README.md` — three TLA+ modules, 36 TLC 2.19 configurations,
 all exhausted. Contracts 1, 2 and 3 each have a module; see [Verification status](#verification-status)
 for what is proven, what is only assumed, and the composition gap that none of them closes.

@@ -453,7 +453,7 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
   ratio of ~10% (headers: 0.41 comment lines per code line on `main`, 1.42 in the added code).
   Keep interface contracts and the notes that record measured failures (the 403-vs-404
   `ListBucket` trap, `requestTimeoutMs` being curl low-speed time, the R9 stall analysis); move
-  incident narrative and rejected alternatives into `docs/superpowers/specs/`. Measured worst
+  incident narrative and rejected alternatives into `docs/design/`. Measured worst
   offenders: `DrainTCP.h` 424 of 693 lines (61% — and 79% of that prose documents *private*
   members, e.g. a 19-line essay on one bool parameter at `:338`); `TcpChannelBase.h` 295 comment
   vs 108 code (seven runs ≥ 12 lines, the longest 33 at `:128`); `TcpChannelBase.cpp` 351;
