@@ -1,7 +1,7 @@
 ------------------------------ MODULE SequencedLink ------------------------------
 (***************************************************************************)
 (* Formalisation of NORMATIVE CONTRACT 2 -- transport durability -- of      *)
-(* docs/superpowers/specs/2026-07-27-sequenced-incarnation-links-design.md. *)
+(* docs/design/2026-07-27-sequenced-incarnation-links-design.md.           *)
 (*                                                                          *)
 (* THE CLAIM BEING CHECKED (the "headline theorem"):                        *)
 (*                                                                          *)

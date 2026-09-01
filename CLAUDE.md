@@ -373,16 +373,16 @@ The dependency direction is: user API → channel policy → channel → transpo
     `next_expected_seq` alone, and the transmitted `next_send_seq`/`lowest_retained` pair is read
     only by a decode-time sanity check of each other (`LinkFrame.h`) — the *local* methods of
     those names are load-bearing for replay; only the wire copies decide nothing.
-  - **`Channel::set_incarnation` survived the cut and must keep surviving**, even though the
-    sequenced path no longer has an incarnation and `TcpChannelBase` no longer overrides it.
-    **`DrainTCP` overrides it and uses it as its arming hook**: the override calls
-    `ensure_started()`, which binds the listener, publishes to the registry, starts the control
-    thread and attaches the `MigrationTrigger` (`src/comm/DrainTCP.cpp:353`). Its incarnation is
-    separately live — bumped on every restore, carried in DrainTCP's *own* once-per-connection
-    hello (`DrainProtocol.h` `ResumeRecord`), and used to fence late leave notices. DrainTCP
-    includes neither `LinkFrame.h` nor `SequencedLink.h`, so the two incarnations only ever
-    shared a name. Deleting this virtual, or its call in `Communicator::register_channel`, as
-    "dead lineage plumbing" silently disarms drain migration.
+  - **The arming hook is `Channel::on_registered()`**, called last by
+    `Communicator::register_channel` once `peer_id`, `num_peers` and `comm_name` are set; the
+    default does nothing. It replaced `set_incarnation`, whose argument was always zero once the
+    sequenced path lost its lineage fence in wire version 4 and whose name hid the one thing it
+    still did. **`DrainTCP` overrides it to arm**: the override calls `ensure_started()`, which
+    binds the listener, publishes to the registry, starts the control thread and attaches the
+    `MigrationTrigger` (`src/comm/DrainTCP.cpp:353`). DrainTCP's incarnation is its own — starts
+    at zero, bumped on every restore, carried in its once-per-connection hello
+    (`DrainProtocol.h` `ResumeRecord`), and used to fence late leave notices — and nothing
+    outside the channel assigns it. `Communicator` no longer carries an incarnation member.
   - `magic` and `wire_version` are deliberately **kept** although neither carries information
     between conforming peers: `magic` is the only detector of a raw/unframed peer and of a
     desynchronised stream, and `wire_version` is the fence that makes format changes safe. Both
@@ -492,8 +492,10 @@ The dependency direction is: user API → channel policy → channel → transpo
   descriptor and return results directly rather than filling a receive buffer.
 
 `include/fmi.h` is the umbrella header and includes `Communicator.h` and nothing else — it is
-byte-identical to the pre-checkpointing version, and none of the transport/framing/migration
-headers are reachable through it. The ICS'23 paper and the thesis linked from `README.md` are the
+byte-identical to the pre-checkpointing version. The one checkpoint-era header reachable through
+it is `comm/OperationScope.h`, which defines the `Lane`/`OpKind` identity enums and the
+thread-local scope; `LinkFrame.h` includes that header, not the other way round, so the wire codec
+is not pulled into an application's translation units. The ICS'23 paper and the thesis linked from `README.md` are the
 authoritative design references; technical docs are generated with Doxygen (`docs/Doxyfile`,
 output gitignored).
 
@@ -606,7 +608,7 @@ benchmarked against each other**, so nothing in `TODO.md` proposes dropping eith
   avoid it is `FMI_ENABLE_REDIS=OFF`, which also removes the `Redis` channel; note that option
   gates hiredis and *everything* depending on it, not just the Redis backend.
 - Constructing a `DrainTCP` channel starts its control thread even when `drain` is `false`,
-  because `register_channel` calls `set_incarnation`, which calls `ensure_started`.
+  because `register_channel` calls `on_registered`, which calls `ensure_started`.
 
 ## Git Commits
 

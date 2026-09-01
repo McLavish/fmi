@@ -158,7 +158,8 @@ only) one trigger thread. This is the arm of the T1 benchmark that must measure 
 ### 4.1 Trigger
 
 `MigrationTrigger` is a process singleton. One armed drain channel per process; a second is
-`std::logic_error`. Arming happens at `set_incarnation`, the first point where the channel
+`std::logic_error`. Arming happens at `on_registered` (called `set_incarnation` when this was
+written), the first point where the channel
 knows its rank, peer count, and comm name — so the migratable window opens when the
 communicator is constructed and closes at finalize.
 

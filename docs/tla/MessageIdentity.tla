@@ -3,7 +3,7 @@
 (* FMI migration protocol v2 -- NORMATIVE CONTRACT 1 (message identity).   *)
 (*                                                                         *)
 (* Source of truth:                                                        *)
-(*   docs/superpowers/specs/2026-07-27-sequenced-incarnation-links-design.md*)
+(*   docs/design/2026-07-27-sequenced-incarnation-links-design.md         *)
 (*   section "Normative contract 1 -- message identity".                   *)
 (*                                                                         *)
 (* WHAT THIS MODULE IS FOR                                                 *)

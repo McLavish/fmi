@@ -269,6 +269,10 @@ Under 1% of the added code *(measured)*, but concentrated and load-bearing on th
   of that to the first data-path call, so a compute-bound rank stops answering dials before its
   first collective and is missing from the registry when peers look for it. Both sites now carry
   comments saying so.
+  **Since renamed.** The hook is `Channel::on_registered()`: no argument, no lineage meaning, the
+  default a no-op, and `DrainTCP` overrides it to arm. `Communicator::incarnation` is gone.
+  `Lane` and `OpKind` moved from `LinkFrame.h` into `OperationScope.h` at the same time, so
+  `Channel.h` no longer pulls the wire codec into every user translation unit.
 
 - [x] **`message_id` and `fragment_index`.** **DONE** in `frame_wire_version` 4, and the cut went
   further than this entry proposed: `total_length` (redundant with `payload_length` on every frame

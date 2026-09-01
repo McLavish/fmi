@@ -187,19 +187,6 @@ namespace FMI {
         //! order (the usual MPI rule), so the same collective bears the same index everywhere,
         //! which is exactly what lets a receiver detect a peer executing a different one.
         std::uint64_t collective_counter = 0;
-        //! Which lineage of this rank this process is; see Channel::set_incarnation.
-        /*!
-         * Zero for every process, always: the epoch protocol that used to claim a lineage per
-         * process is gone and nothing replaced it. The sequenced link layer's fence, which was
-         * the only consumer, was removed with it in wire version 4.
-         *
-         * The member survives because register_channel's set_incarnation call must survive —
-         * it is DrainTCP's arming hook. DrainTCP keeps its own restore counter and overwrites
-         * this value immediately, so what is passed here does not matter to it; that the call
-         * happens does.
-         */
-        std::uint64_t incarnation = 0;
-
         std::uint64_t next_collective_index() { return collective_counter++; }
 
         //! Helper utility to convert a typed function to a raw function without type information.

@@ -1,11 +1,34 @@
 #ifndef FMI_OPERATIONSCOPE_H
 #define FMI_OPERATIONSCOPE_H
 
-#include "LinkFrame.h"
-
 #include <cstdint>
 
 namespace FMI::Comm {
+
+    //! Which logical stream an operation belongs to. Each lane has its own FIFO and, on the
+    //! sequenced link layer, its own drain queue.
+    enum class Lane : std::uint8_t {
+        P2P = 0,
+        Collective = 1
+    };
+
+    //! The FMI operation being executed. Part of message identity, not a hint.
+    /*!
+     * Defined here rather than in LinkFrame.h because the identity is the Communicator's
+     * vocabulary: every backend sees it through OperationScope, and only the sequenced link
+     * layer puts it on a wire. Keeping the two enums here is what keeps the wire codec out of
+     * every translation unit that includes Communicator.h.
+     */
+    enum class OpKind : std::uint8_t {
+        Send = 0,
+        Bcast = 1,
+        Barrier = 2,
+        Gather = 3,
+        Scatter = 4,
+        Reduce = 5,
+        Allreduce = 6,
+        Scan = 7
+    };
 
     //! Identity of the FMI operation a rank is currently executing.
     /*!

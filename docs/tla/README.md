@@ -25,6 +25,30 @@ deleted from the library and the module went with it; see
 Neither module models more than its own contract. **Nothing checks the two together** — see
 [the composition gap](#the-composition-gap-the-biggest-hole).
 
+### Status against the code (wire version 4)
+
+The models were written against the July design and have not been re-run since the wire cut
+of 2026-08-27. What that cut changed does not reach the properties they check, but a reader
+comparing model to code should know where the vocabulary has drifted:
+
+* `MessageIdentity` names its envelope fields `mid` (`message_id`) and `len` (`total_length`).
+  Both wire fields are gone: `message_id` was equal to `transport_seq` by construction and
+  `total_length` to `payload_length`, and version 4 dropped them. The model's `mid` is a per-lane
+  FIFO position that both ends derive identically, which is why it "discriminates nothing" below
+  — the code's per-lane, sequence-ordered drain queues give the same position implicitly, so the
+  necessity results stand with `len` read as `payload_length`.
+* `SequencedLink` carries a CREDIT dimension (`Reserve`, `sndCreditLimit`) and a separate
+  `ackSafe` watermark. The implementation has no credit at all (see the implementation note,
+  "What the blocking shape cannot do") and maintains `ack_safe_seq` as a copy of
+  `next_received`. Both are abstractions the model is a superset of; the durability invariants
+  are checked on the part the code implements.
+* The model's handshake exchanges `(next_send, next_expected, ack_safe, lowest_retained)`; the
+  30-byte wire handshake carries the first, second and fourth. Nothing in the code carries an
+  incarnation on the sequenced path any more, so every mention of contract 3 or of incarnations
+  in either module refers to a protocol that no longer exists.
+* The spec document both modules cite lives at `docs/design/`; the modules' header comments
+  used to point at a directory that has since been renamed.
+
 ---
 
 ## Reproducing
@@ -33,7 +57,7 @@ Toolchain: TLC2 version 2.19 (`tla2tools.jar`), Java 21. No Toolbox; command lin
 Run from **inside this directory**.
 
 ```bash
-cd /home/luca/fmi/docs/tla
+cd docs/tla        # from the repository root
 
 # every configuration, sequentially
 for cfg in *.cfg; do

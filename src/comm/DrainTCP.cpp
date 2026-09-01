@@ -350,8 +350,9 @@ void FMI::Comm::DrainTCP::set_coordinator_for_testing(std::unique_ptr<DrainCoord
     coordinator = std::move(replacement);
 }
 
-void FMI::Comm::DrainTCP::set_incarnation(std::uint64_t value) {
-    local_incarnation.store(value, std::memory_order_release);
+void FMI::Comm::DrainTCP::on_registered() {
+    // local_incarnation starts at 0 and is bumped only by the restore leg; nothing outside this
+    // channel assigns it.
     if (num_peers == 0 || peer_id >= num_peers) {
         return;
     }

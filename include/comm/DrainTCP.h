@@ -80,7 +80,8 @@ namespace FMI::Comm {
         double get_price(Utils::peer_num producer, Utils::peer_num consumer,
                          std::size_t size_in_bytes) override;
 
-        //! Adopt this rank's lineage and, if the ids are already valid, arm the channel.
+        //! Arm the channel: bind the listener, publish, start the control thread, attach the
+        //! migration trigger.
         /*!
          * Communicator::register_channel calls this last, after peer_id, num_peers and
          * comm_name — it is therefore the first instant at which this channel can legally bind
@@ -89,7 +90,7 @@ namespace FMI::Comm {
          * seconds still answers a peer's dial. A failure to arm is not fatal here: the data
          * path arms again and reports the failure to the caller that actually needs the link.
          */
-        void set_incarnation(std::uint64_t value) override;
+        void on_registered() override;
 
         //! The whole teardown: control thread, listener, links, registry. Idempotent.
         /*!

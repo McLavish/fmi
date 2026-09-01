@@ -526,7 +526,7 @@ namespace {
     //! Arm a channel and hand back the address it published, so the test can dial it.
     MemberRecord arm_and_locate(const std::shared_ptr<DrainTCP>& ch, FakeDrainCoordinator& fake,
                                 FMI::Utils::peer_num rank) {
-        ch->set_incarnation(0);   // the documented arming point
+        ch->on_registered();   // the documented arming point
         auto members = fake.members();
         auto it = members.find(rank);
         if (it == members.end()) {
@@ -718,7 +718,7 @@ BOOST_AUTO_TEST_CASE(a_leave_notice_during_a_dial_is_not_overwritten_by_it) {
     auto ch = make_drain_channel(1, 2, name, drain_params("none", 20000, 5000, 800));
     auto* fake = new FakeDrainCoordinator();
     ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
-    ch->set_incarnation(0);   // the arming point; rank 1 dials rank 0, so rank 0 must be findable
+    ch->on_registered();   // the arming point; rank 1 dials rank 0, so rank 0 must be findable
 
     PeerRegistry registry("127.0.0.1", 6379);
     WiredListener leaver;
@@ -1524,7 +1524,7 @@ BOOST_AUTO_TEST_CASE(a_queued_signal_migrates_once_and_a_stale_one_not_at_all) {
             // request into an unrequested migration. It arms exactly as the first one did.
             auto again = make_drain_channel(peer_id, num_peers, unique_comm("signal-again"),
                                             params);
-            again->set_incarnation(0);
+            again->on_registered();
             std::this_thread::sleep_for(std::chrono::milliseconds(400));   // many trigger ticks
             state[5] = static_cast<int>(MigrationTrigger::instance().epoch());
             again->finalize();
@@ -1571,7 +1571,7 @@ BOOST_AUTO_TEST_CASE(a_migrate_event_runs_a_rehearsal_that_holds_its_seal) {
     ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
     // Arms the channel and starts the trigger thread; nothing in this case calls the migrator
     // sequence itself.
-    ch->set_incarnation(0);
+    ch->on_registered();
 
     fake->inject(DrainEvent::Type::Migrate, 0, 0, {}, "batch-of-the-driver");
 
@@ -1841,7 +1841,7 @@ BOOST_AUTO_TEST_CASE(a_drain_that_could_not_start_gives_the_batch_back) {
     auto ch = make_drain_channel(0, 2, name, drain_params("none", 2000, 2000, 20000));
     auto* fake = new FakeDrainCoordinator();
     ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
-    ch->set_incarnation(0);
+    ch->on_registered();
 
     // 1. Its own batch, refused at the leave notice — after the lease has been taken.
     fake->fail_emit_of(DrainEvent::Type::Leaving);

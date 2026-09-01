@@ -1,6 +1,8 @@
 #ifndef FMI_LINKFRAME_H
 #define FMI_LINKFRAME_H
 
+#include "OperationScope.h"
+
 #include <cstddef>
 #include <cassert>
 #include <cstdint>
@@ -27,23 +29,8 @@
  */
 namespace FMI::Comm {
 
-    //! Which logical stream a frame belongs to. Each lane has its own FIFO and drain queue.
-    enum class Lane : std::uint8_t {
-        P2P = 0,
-        Collective = 1
-    };
-
-    //! The FMI operation that produced a frame. Part of message identity, not a hint.
-    enum class OpKind : std::uint8_t {
-        Send = 0,
-        Bcast = 1,
-        Barrier = 2,
-        Gather = 3,
-        Scatter = 4,
-        Reduce = 5,
-        Allreduce = 6,
-        Scan = 7
-    };
+    // Lane and OpKind, the identity vocabulary these frames carry, are defined in
+    // OperationScope.h.
 
     //! What a frame is for. Acks carry no payload and take no transport sequence.
     /*!
