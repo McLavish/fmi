@@ -1,39 +1,35 @@
-# CRIU checkpoint mechanics — measured findings
+# Initial CRIU experiments
 
-**Status:** experimental results, not design. Every line below was observed on this host.
-**Relates to:** normative contract 4 in `2026-07-27-sequenced-incarnation-links-design.md`.
+These are July 2026 observations from a small process experiment. They establish
+behavior in the tested environment, not a general guarantee for every kernel,
+privilege setup, or FMI application. Current integration evidence is in
+[fmi-spot-migration](https://github.com/McLavish/fmi-spot-migration/tree/main/benchmarks/migration).
 
 ## Environment
 
-criu **4.2**, `/usr/local/sbin/criu`, carrying
-`cap_net_admin,cap_sys_ptrace,cap_sys_admin,cap_sys_resource,cap_checkpoint_restore=eip`.
-Run as uid 1000 — rootless, and therefore requiring `--unprivileged` on every invocation
-(`criu check` refuses without it). Kernel 7.0.0-28-generic, Ubuntu 24.04.
+The host ran Ubuntu 24.04, kernel `7.0.0-28-generic`, and CRIU 4.2 at
+`/usr/local/sbin/criu`. CRIU ran as uid 1000 with `--unprivileged`, but its binary
+had these file capabilities:
 
-Subject: a ~60-line non-FMI program that increments a counter to a file, optionally holding a
-mutex on a second thread and an established loopback TCP connection with both ends inside the
-process. Deliberately not linked against FMI, so nothing here depends on the library.
+```
+cap_net_admin,cap_sys_ptrace,cap_sys_admin,cap_sys_resource,cap_checkpoint_restore=eip
+```
 
-**Superseded in part.** These are mechanism results on a toy. A real FMI rank has since been
-checkpointed and restored mid-collective — see `runbooks/criu-transparent-checkpoint`, which
-verifies an unmodified FMI program end to end and is the stronger evidence. The findings below
-still stand as the mechanism they rest on, and #2 in particular is still what rules out
-same-host frozen-original abort recovery. What the toy could NOT show, and the FMI runbook did:
-a restored rank dies of `SIGPIPE` inside hiredis on its first post-restore registry command,
-because the toy owned no library-managed sockets.
+The subject was a roughly 60-line program, independent of FMI, that wrote an
+increasing counter to a file. Optional features were a second thread holding a
+mutex and a loopback TCP connection with both endpoints in the process.
 
 ## Results
 
-| # | Question | Result |
-|---|---|---|
-| 1 | Does rootless dump/restore work at all? | **Yes**, dump rc=0, restore rc=0, with `--unprivileged` |
-| 2 | Does `--leave-stopped` permit same-host restore? | **No** — see below |
-| 3 | Two threads with a mutex held across the freeze? | **Works** — both threads restored, execution continues |
-| 4 | Is `--tcp-close` required at dump? | **Yes** for an established connection |
-| 5 | Is it required again at restore? | **Yes** — criu 4.2 records it in the image |
-| 6 | Can the same process be migrated twice? | **Yes** — two full cycles, state continuous |
+| Experiment | Observation |
+|---|---|
+| Dump and restore as the configured non-root user | Both returned zero with `--unprivileged` |
+| Same-host restore while the original remained stopped | Failed because the original still held the PID |
+| Restore two threads with a mutex held | Both threads restored and the counter continued |
+| Discard an established TCP connection | Required `--tcp-close` on both dump and restore in this mode |
+| Repeat dump and restore twice | Counter state continued through both cycles |
 
-### 2. `--leave-stopped` is incompatible with same-host restore
+### Same-host restore and `--leave-stopped`
 
 ```
 criu dump --unprivileged -t <pid> --leave-stopped     rc=0
@@ -44,20 +40,19 @@ criu restore --unprivileged                            rc=1
 kill -9 <pid>; criu restore --unprivileged            rc=0        (same pid reclaimed)
 ```
 
-This confirms the discipline `src/ft/experimental/LocalRankAgent.cpp:417` documents, and it
-settles the design's open question: **frozen-original abort recovery is cross-host only.**
-On the same host the original must be killed before its replacement can be restored, so the
-"resume the original in place" path cannot exist for `migrate`/`migrate-local` without a pid
-namespace or pid remapping.
+For this same-host, same-PID setup, the original must be removed before its
+replacement can restore. The experiment therefore cannot provide an abort path
+that restores the replacement while retaining the original as a fallback. PID
+namespaces or remapping were not tested.
 
-### 3. Two-thread dump with a lock held
+### Threads and locks
 
-Dump and restore both rc=0 with a second thread blocked forever holding a `std::mutex` taken
-before the freeze. The restored process has both threads and the counter keeps advancing
-(79 → 99 across a one-second observation). This is the mechanism residual limitation 1 depends
-on: the progress engine adds a background thread per rank, and CRIU must carry both.
+Dump and restore both succeeded with a second thread holding a `std::mutex`.
+The restored process still had two threads and its counter advanced from 79 to
+99 during a one-second observation. This verifies preservation of that toy
+process's state; it does not verify a library progress or control thread.
 
-### 4–5. `--tcp-close` on both legs
+### Discarding TCP connections
 
 ```
 dump, no TCP flag        rc=1  inet: Connected TCP socket, consider using --tcp-established
@@ -67,25 +62,22 @@ restore --tcp-close      rc=0
 established connections after restore: 0
 ```
 
-The flag is recorded in the image and demanded again at restore, exactly as the contract
-states. The restored process resumes (counter 320 → 340) with its connections **gone**, which
-is precisely the semantics the link layer is built to absorb: everything unacknowledged is
-replayed from peer retention.
+CRIU recorded the selected `--tcp-close` mode in the image and required it again
+at restore. Execution resumed and the counter advanced from 320 to 340, with no
+established connections remaining. FMI's replay mechanism must reconstruct data
+lost with its connections; this experiment did not test that reconstruction.
 
-### 6. Repeated migration
+### Repeated restore
 
-Two complete dump/restore cycles of a process holding both a second thread and an established
-TCP connection. The counter runs 39 → 79 → 119 → 139 without a gap and the thread count stays
-at 2. Migration is therefore repeatable, not a one-shot.
+With both the extra thread and TCP connection enabled, the counter observations
+were 39 → 79 → 119 → 139 across two complete dump/restore cycles. The thread count
+remained two.
 
-## What these results do NOT establish
+## Limits
 
-- **`PR_SET_PTRACER` survival is untested here, and is masked on this host.** criu carries
-  `cap_sys_ptrace`, so a second dump succeeds whether or not the prctl survived restore. On a
-  host relying on the prctl instead of the capability, "migrated once and never again" remains
-  an open risk.
-- **No FMI process was checkpointed.** The subject is deliberately a toy; nothing here says the
-  progress engine, a hiredis connection, or a mid-`pair()` rank survives a freeze.
-- **Freeze duration versus RSS was not measured**, so the design's W-sizing feedback loop
-  (bigger window → bigger image → longer dump) is still unquantified.
-- Single host. Nothing about cross-host staging, image transfer, or the restore lease.
+- `PR_SET_PTRACER` persistence was not tested: `cap_sys_ptrace` allowed the second
+  dump regardless of whether that process setting survived.
+- No FMI process or hiredis connection was involved. Later FMI experiments
+  exposed a post-restore SIGPIPE failure that this toy could not reveal.
+- Dump duration as a function of resident memory was not measured.
+- Cross-host transfer, clock preservation, and restore leases were not tested.
