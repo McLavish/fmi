@@ -8,6 +8,10 @@ accountants, three cross-cutting analysts, six adversarial verifiers, plus anoth
 attributions in place: the §2 intro (reparenting `DrainTCP` was not the cause of the duplication)
 and §5's `.text` figure (129 KB is the drain stack's share, not 448 KB).
 
+The migration correctness review of 2026-09-07 added two reproduced DrainTCP findings to §1,
+marked with that date. The existing 189-test suite passed with Redis enabled and S3/TCPunch
+disabled; separate rehearsal reproductions exposed these gaps. Actual CRIU runs were not tested.
+
 **Standing decision: both checkpoint-survival mechanisms stay.** The sequenced-link layer
 (retention/replay) and the neighborhood-drain protocol are being kept and benchmarked against each
 other under different scenarios. Every "drop one of them" recommendation from the review is
@@ -36,6 +40,37 @@ Nothing here is a regression introduced by the review; these are pre-existing fi
 ## 1. Correctness bugs
 
 Fix regardless of any structural decision. Ordered by severity.
+
+- [ ] **[P1] An operation starting during a drain loses its migration-time credit.**
+  *(2026-09-07 review)* `src/comm/DrainTCP.cpp:1072` and `:1161` — `send_object` and
+  `recv_object` start their operation clock before taking `l.mu`, but snapshot
+  `migration_ms_total` only after acquiring it. If the drain already holds that mutex, the
+  operation blocks across the migration and then records the post-migration baseline; the time
+  it spent blocked is charged to `max_timeout` instead of suspended. Production trigger: an
+  application thread enters the operation after the drain takes the lock but before `SIGSTOP`;
+  a migration exceeding the transport budget can then cause an immediate reconnect timeout
+  after a successful restore. Reproduced for both send and receive with a ready loopback peer,
+  a 600 ms rehearsal hold and a 200 ms transport budget: each threw `Timeout` immediately on
+  restore, before dialling. Fix: make the initial clock timestamp and migration baseline
+  consistent, preserving migration credit without counting it twice. Add regression coverage
+  for operations starting before, during and after migration. Temporary mitigation: raise
+  `max_timeout` above the expected worst-case checkpoint/transfer/restore/reconnect time with
+  margin; this delays failure detection and does not fix the accounting.
+
+- [ ] **[P1] A stale control command can stop the rank again after restore.**
+  *(2026-09-07 review)* `src/comm/DrainTCP.cpp:2027` — local `Migrate` events are accepted
+  without checking `event.epoch`, unlike signal requests at `src/utils/MigrationTrigger.cpp:261`.
+  Reproduced against real Redis in rehearsal mode: start an epoch-0 migration by signal, append
+  an epoch-0 control command while sealed, and observe two restores ending at epoch 2. Retrying
+  a control command with a new stream entry during its migration produces the same result.
+  Production requires such an unread stale command; enabling `trigger=both` alone is not enough.
+  The second migration would issue another `SIGSTOP`, potentially after the driver has finished
+  its work. The saved cursor protects consumed entries, not commands appended after it, so the
+  rationale in `docs/design/2026-08-11-neighborhood-drain-protocol.md` §10 needs correction.
+  Fix: reject an event whose epoch is below the current process epoch before changing batch
+  state, while still advancing the cursor past it. Test stale retries, mixed signal/control
+  delivery, and a valid request at the new epoch. Increasing `max_timeout` does not mitigate
+  this bug. Reproductions exercised rehearsals, not an actual CRIU stop/restore.
 
 - [ ] **Servicing can throw out of `pump`, naming the wrong peer.**
   `src/comm/TcpChannelBase.cpp:1088` — `maybe_send_ack` sits outside the enclosing `try` and calls
