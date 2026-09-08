@@ -1,4 +1,5 @@
 #include "../../include/comm/DrainTCP.h"
+#include "../../include/utils/Clock.h"
 
 #include "../../include/comm/DrainCoordinator.h"
 #include "../../include/comm/PeerRegistry.h"
@@ -25,8 +26,7 @@
 
 namespace {
     long monotonic_ms() {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
+        return FMI::Utils::monotonic_ms();
     }
 
     //! How long the control thread sleeps in poll() when nothing is happening. Coarse on

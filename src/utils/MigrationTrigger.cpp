@@ -1,4 +1,5 @@
 #include "../../include/utils/MigrationTrigger.h"
+#include "../../include/utils/Clock.h"
 
 #include <boost/log/trivial.hpp>
 
@@ -39,9 +40,7 @@ namespace {
     }
 
     long monotonic_ms() {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now().time_since_epoch())
-                .count();
+        return FMI::Utils::monotonic_ms();
     }
 
     //! Forget every drain request this process is holding but nobody asked for.
@@ -392,7 +391,21 @@ void FMI::Utils::MigrationTrigger::run_migration(Comm::DrainParticipant& target,
     } else {
         // Step 8: still holding every link lock, so no application thread can observe the
         // half-restored state that follows.
+        //
+        // The two readings bracket the stop. A restore on another host lands with that host's
+        // CLOCK_MONOTONIC, which counts from its boot, unless the restorer built a time
+        // namespace; the wall clock, which both hosts discipline, says how long the migration
+        // really took, and the difference re-bases every deadline this library holds.
+        const long mono_before = Utils::monotonic_raw_ms();
+        const long real_before = Utils::realtime_ms();
         ::raise(SIGSTOP);
+        const long correction = Utils::rebase_monotonic_after_restore(mono_before, real_before);
+        if (correction != 0) {
+            BOOST_LOG_TRIVIAL(info) << "MigrationTrigger: rank " << target.local_rank()
+                                    << " re-based its monotonic clock by " << correction
+                                    << " ms after the restore (offset now "
+                                    << Utils::monotonic_offset_ms() << " ms)";
+        }
     }
 
     // Execution continues here after a CRIU restore, a SIGCONT, or the rehearsal's hold.

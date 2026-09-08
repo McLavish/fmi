@@ -39,6 +39,7 @@ set(FMI_SOURCES
     src/Communicator.cpp
     src/utils/Configuration.cpp
     src/utils/Signals.cpp
+    src/utils/Clock.cpp
     src/comm/Channel.cpp
     src/comm/ClientServer.cpp
     src/comm/RecoverableClientServer.cpp

@@ -1,4 +1,5 @@
 #include "../../include/comm/DirectTCP.h"
+#include "../../include/utils/Clock.h"
 
 #include "../../include/comm/PeerRegistry.h"
 #include "../../include/comm/TcpEndpoint.h"
@@ -26,8 +27,7 @@ namespace {
     std::atomic<unsigned int> total_connections{0};
 
     long monotonic_ms() {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
+        return FMI::Utils::monotonic_ms();
     }
 
     // Fixed 32-byte hello, written field by field in network byte order rather than memcpy'd
