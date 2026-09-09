@@ -99,7 +99,14 @@ namespace FMI::Utils {
          * @throws whatever the drain failed with. The channel is left broken on purpose; a
          *         migration that could not complete must not be papered over.
          */
-        void run_migration(Comm::DrainParticipant& participant, bool rehearsal_only, long hold_ms);
+        void run_migration(Comm::DrainParticipant& participant, bool rehearsal_only, long hold_ms,
+                           bool self_dump = false);
+
+        //! Set in a request's `sival_int` (above the epoch) to end the migrator sequence with a
+        //! self-written image instead of a SIGSTOP: for hosts where nothing may ptrace the
+        //! process. The image goes to `$FMI_SELFDUMP_DIR` (default /tmp/work/selfdump) and the
+        //! process exits once it is written; see utils/SelfDump.h.
+        static constexpr std::int64_t self_dump_flag = std::int64_t{1} << 30;
 
         //! The signal number an offset resolves to in this process.
         static int signal_for_offset(int offset);
@@ -113,8 +120,9 @@ namespace FMI::Utils {
 
         void trigger_loop();
 
-        //! Act on a migration request that arrived by signal, or say why it was dropped.
-        void handle_signal_request(std::int64_t requested_epoch);
+        //! Act on a migration request that arrived by signal, or say why it was dropped. The
+        //! value is the requested epoch, possibly with `self_dump_flag` set.
+        void handle_signal_request(std::int64_t request);
 
         //! Everything the child of a fork must forget: it owns no trigger thread (fork clones
         //! only the calling one) and no channel of its own until it builds one.

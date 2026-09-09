@@ -1,5 +1,6 @@
 #include "../../include/utils/MigrationTrigger.h"
 #include "../../include/utils/Clock.h"
+#include "../../include/utils/SelfDump.h"
 
 #include <boost/log/trivial.hpp>
 
@@ -14,6 +15,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <exception>
@@ -243,7 +245,9 @@ int FMI::Utils::MigrationTrigger::drain_signal() const {
     return signal_number;
 }
 
-void FMI::Utils::MigrationTrigger::handle_signal_request(std::int64_t requested_epoch) {
+void FMI::Utils::MigrationTrigger::handle_signal_request(std::int64_t request) {
+    const bool self_dump = (request & self_dump_flag) != 0;
+    const std::int64_t requested_epoch = request & ~self_dump_flag;
     Comm::DrainParticipant* target = nullptr;
     bool rehearsal = false;
     long hold = 0;
@@ -267,7 +271,7 @@ void FMI::Utils::MigrationTrigger::handle_signal_request(std::int64_t requested_
         return;
     }
     try {
-        run_migration(*target, rehearsal, hold);
+        run_migration(*target, rehearsal, hold, self_dump);
     } catch (const std::exception& e) {
         // The channel is broken and says so on every parked application thread; this is the
         // record on the thread that found out first.
@@ -360,7 +364,8 @@ void FMI::Utils::MigrationTrigger::trigger_loop() {
 }
 
 void FMI::Utils::MigrationTrigger::run_migration(Comm::DrainParticipant& target,
-                                                 bool rehearsal_only, long hold_ms) {
+                                                 bool rehearsal_only, long hold_ms,
+                                                 bool self_dump) {
     const long started = monotonic_ms();
     BOOST_LOG_TRIVIAL(info) << "MigrationTrigger: rank " << target.local_rank() << " of "
                             << target.channel_comm_name() << " begins a "
@@ -398,7 +403,26 @@ void FMI::Utils::MigrationTrigger::run_migration(Comm::DrainParticipant& target,
         // really took, and the difference re-bases every deadline this library holds.
         const long mono_before = Utils::monotonic_raw_ms();
         const long real_before = Utils::realtime_ms();
-        ::raise(SIGSTOP);
+        if (self_dump) {
+            // Step 8, unprivileged: nothing outside may stop and read this process, so it
+            // writes its own image and leaves; the restored copy continues below.
+            const char* dir = std::getenv("FMI_SELFDUMP_DIR");
+            if (dir == nullptr || *dir == '\0') {
+                dir = "/tmp/work/selfdump";
+            }
+            const int outcome = Utils::self_dump(dir);
+            if (outcome == 0) {
+                BOOST_LOG_TRIVIAL(info) << "MigrationTrigger: rank " << target.local_rank()
+                                        << " wrote its self-dump to " << dir << ", exiting";
+                std::fflush(nullptr);
+                std::_Exit(0);
+            }
+            if (outcome < 0) {
+                throw std::runtime_error("the self-dump could not be written; see stderr");
+            }
+        } else {
+            ::raise(SIGSTOP);
+        }
         const long correction = Utils::rebase_monotonic_after_restore(mono_before, real_before);
         if (correction != 0) {
             BOOST_LOG_TRIVIAL(info) << "MigrationTrigger: rank " << target.local_rank()
