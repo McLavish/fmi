@@ -45,6 +45,25 @@ namespace {
         return FMI::Utils::monotonic_ms();
     }
 
+    //! Make glibc's malloc see the program break this process really has.
+    /*!
+     * A restore in user space (usrestore) cannot move the kernel's program break to the
+     * image's: the process keeps the restorer's, while glibc still caches the break of the
+     * process that was dumped. malloc trusts that cache. The next trim of the main heap (a
+     * free of a large chunk next to the top, or malloc_trim) shrinks the break by the cached
+     * value, reads the real one back, takes the difference for "released" memory and writes
+     * that size into the top chunk, which aborts the next free with "double free or
+     * corruption (out)". One brk() with the cached value fails and refreshes the cache; from
+     * then on every sbrk fails at the restorer's guard page and malloc extends its arenas
+     * with mmap. Under CRIU the break is the image's already and the call changes nothing.
+     */
+    void resync_program_break() {
+        void* cached = ::sbrk(0);
+        if (cached != reinterpret_cast<void*>(-1)) {
+            (void)::brk(cached);
+        }
+    }
+
     //! Forget every drain request this process is holding but nobody asked for.
     /*!
      * Two places a request can be waiting when nothing is armed: the handler's flag, set by a
@@ -423,6 +442,8 @@ void FMI::Utils::MigrationTrigger::run_migration(Comm::DrainParticipant& target,
         } else {
             ::raise(SIGSTOP);
         }
+        // First thing on the far side, before anything here allocates.
+        resync_program_break();
         const long correction = Utils::rebase_monotonic_after_restore(mono_before, real_before);
         if (correction != 0) {
             BOOST_LOG_TRIVIAL(info) << "MigrationTrigger: rank " << target.local_rank()
