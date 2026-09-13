@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 #include <chrono>
 #include <string>
+#include <vector>
 #include <thread>
 #include <unistd.h>
 #include <cstdio>
@@ -83,6 +84,104 @@ BOOST_AUTO_TEST_CASE(a_framed_point_to_point_message_round_trips) {
             OperationScope scope(p2p_identity(1));   // rank 1 is the destination
             ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
             ok[1] = (got == 4242);
+        }
+        ch->finalize();
+    } catch (const std::exception& e) {
+        BOOST_TEST_MESSAGE("rank " << peer_id << ": " << e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_EQUAL(ok[0], 1);
+    BOOST_CHECK_EQUAL(ok[1], 1);
+}
+
+// A message is one frame, never fragmented, and link_max_frame_bytes (16 MiB unless the
+// config says otherwise) caps it on both ends of a link. The sender refuses a larger message
+// by name before stamping or retaining anything, so the link stays usable.
+BOOST_AUTO_TEST_CASE(a_message_above_link_max_frame_bytes_is_refused_by_name) {
+    constexpr int num_peers = 2;
+    const std::string name = unique_comm("cap");
+    int* ok = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    ok[peer_id] = 0;
+    try {
+        auto params = framed_params();
+        params["recover_links"] = "true";
+        auto ch = Channel::get_channel("DirectTCP", params, model_params());
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(name);
+
+        int val = 4242;
+        if (peer_id == 0) {
+            std::vector<char> big((16u << 20) + 1);
+            bool refused = false;
+            try {
+                OperationScope scope(p2p_identity(1));
+                ch->send({big.data(), big.size()}, 1);
+            } catch (const std::exception& e) {
+                refused = std::string(e.what()).find("link_max_frame_bytes") != std::string::npos;
+                BOOST_TEST_MESSAGE("rank 0 refusal: " << e.what());
+            }
+            // Nothing was stamped or retained, so the link carries the next message as if the
+            // refused one had never been offered.
+            OperationScope scope(p2p_identity(1));
+            ch->send({reinterpret_cast<char*>(&val), sizeof(val)}, 1);
+            ok[0] = refused ? 1 : 0;
+        } else {
+            int got = 0;
+            OperationScope scope(p2p_identity(1));
+            ch->recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+            ok[1] = (got == 4242);
+        }
+        ch->finalize();
+    } catch (const std::exception& e) {
+        BOOST_TEST_MESSAGE("rank " << peer_id << ": " << e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_EQUAL(ok[0], 1);
+    BOOST_CHECK_EQUAL(ok[1], 1);
+}
+
+BOOST_AUTO_TEST_CASE(link_max_frame_bytes_from_the_config_admits_a_larger_message) {
+    constexpr int num_peers = 2;
+    constexpr std::size_t message_bytes = 20u << 20;   // above the 16 MiB default
+    const std::string name = unique_comm("bigframe");
+    int* ok = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    ok[peer_id] = 0;
+    try {
+        auto params = framed_params();
+        params["recover_links"] = "true";
+        params["link_max_frame_bytes"] = std::to_string(64u << 20);
+        auto ch = Channel::get_channel("DirectTCP", params, model_params());
+        ch->set_peer_id(peer_id);
+        ch->set_num_peers(num_peers);
+        ch->set_comm_name(name);
+
+        std::vector<char> buf(message_bytes);
+        if (peer_id == 0) {
+            for (std::size_t i = 0; i < buf.size(); ++i) buf[i] = static_cast<char>(i * 7 + 3);
+            OperationScope scope(p2p_identity(1));
+            ch->send({buf.data(), buf.size()}, 1);
+            ok[0] = 1;
+        } else {
+            OperationScope scope(p2p_identity(1));
+            ch->recv({buf.data(), buf.size()}, 0);
+            bool same = true;
+            for (std::size_t i = 0; i < buf.size(); i += 4093) {
+                if (buf[i] != static_cast<char>(i * 7 + 3)) { same = false; break; }
+            }
+            ok[1] = same && buf.back() == static_cast<char>((buf.size() - 1) * 7 + 3);
         }
         ch->finalize();
     } catch (const std::exception& e) {

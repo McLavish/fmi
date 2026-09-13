@@ -23,7 +23,8 @@ Applications, benchmark results, and migration drivers live in
 
 `Direct` and `DirectTCP` support **Retain-and-Replay**: set `framed` and
 `recover_links` to `true` to retain messages until acknowledged and replay them
-when a connection is rebuilt. **Local Drain** uses `DrainTCP` with `drain: true`
+when a connection is rebuilt (a message is one frame of at most
+`link_max_frame_bytes`, 16 MiB unless the config raises it). **Local Drain** uses `DrainTCP` with `drain: true`
 to move socket data into process memory before a planned checkpoint. Store
 backends use `recover: true` to reconnect and retry store operations.
 

@@ -217,7 +217,9 @@ namespace FMI::Comm {
         //! Per-peer link state: sequences, retention ring and watermarks.
         std::vector<SequencedLink> links;
 
-        //! Link-layer bounds, from the backend config block.
+        //! Link-layer bounds, from the backend config block (link_window_frames,
+        //! link_max_frame_bytes, link_retention_limit_bytes). A message is one frame, so
+        //! link_max_frame_bytes caps the message a link sends or accepts.
         std::uint32_t link_window_frames = 256;
         std::uint32_t link_max_frame_bytes = 1u << 24;
         std::size_t link_retention_limit_bytes = 256u << 20;

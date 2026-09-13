@@ -32,6 +32,16 @@ void FMI::Comm::TcpChannelBase::parse_tcp_params(std::map<std::string, std::stri
         link_retention_limit_bytes = static_cast<std::size_t>(
                 std::stoull(params["link_retention_limit_bytes"]));
     }
+    if (params.count("link_max_frame_bytes") > 0) {
+        // A message is one frame (LinkFrame.h: never fragmented), so this caps the message.
+        // Both ends of a link read it: the sender refuses above it, the receiver treats a
+        // header declaring more as malformed. payload_length is a 32-bit field.
+        const unsigned long long v = std::stoull(params["link_max_frame_bytes"]);
+        if (v == 0 || v > 0xFFFFFFFFull) {
+            throw std::runtime_error("link_max_frame_bytes must be between 1 and 4294967295");
+        }
+        link_max_frame_bytes = static_cast<std::uint32_t>(v);
+    }
     if (params.count("link_ack_interval") > 0) {
         link_ack_interval = static_cast<std::uint32_t>(std::stoul(params["link_ack_interval"]));
     }
@@ -594,9 +604,15 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
     }
 
     ensure_link_state();
-    if (buf.len > 0xFFFFFFFFull) {
+    if (buf.len > link_max_frame_bytes) {
+        // Refused here, by name, before anything is stamped or retained: a message is one
+        // frame, and the peer's decode_header would reject a larger one as malformed.
         throw std::runtime_error(transport_tag + ": message of " + std::to_string(buf.len) +
-                                 " bytes exceeds the framed maximum");
+                                 " bytes to peer " + std::to_string(rcpt_id) +
+                                 " exceeds link_max_frame_bytes=" +
+                                 std::to_string(link_max_frame_bytes) +
+                                 "; a message is one frame, raise the parameter in the "
+                                 "backend config");
     }
 
     FrameHeader header = expected_identity(buf.len);

@@ -171,7 +171,11 @@ the advertised address. A same-host restore does not trigger the boot-ID reset.
 On Direct or DirectTCP, `framed: true` adds operation identity and sequence fields.
 `recover_links: true` also retains sent payloads until acknowledged and replays
 the unacknowledged suffix after reconnecting. Both flags default to false, and
-recovery requires framing.
+recovery requires framing. A message is always one frame, never fragmented;
+`link_max_frame_bytes` (default 16 MiB) caps its size on both ends of a link and
+is read from the backend config like `link_window_frames`, `link_ack_interval`
+and `link_retention_limit_bytes`. Raise it for applications whose messages are
+larger; the sender refuses a larger message by name.
 
 The current wire format is version 4: a **42-byte frame header** and **30-byte
 handshake payload**. Serialized link snapshots use version 3. Rebuild every rank
