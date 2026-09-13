@@ -1,60 +1,44 @@
-# TLA+ specifications — the sequenced link layer
+# TLA+ models for sequenced links
 
-Machine-checked models of the normative link-layer contracts in
-[`docs/design/2026-07-27-sequenced-incarnation-links-design.md`](../design/2026-07-27-sequenced-incarnation-links-design.md).
+This directory contains two models and 26 TLC configurations. The tables below
+record earlier completed runs; they have not been regenerated for this
+ documentation rewrite. Read [What is NOT proven](#what-is-not-proven) before
+using the results to support a correctness claim.
 
-Two modules, 26 configurations, all exhaustively checked. Every number in this file was
-observed by running TLC; nothing here is extrapolated. **Read [What is NOT proven](#what-is-not-proven)
-before citing any of it** — the models are small, deliberately partial, and one of them records
-an under-specification the design document still carries.
+The models address separate parts of the
+[sequenced-link design](../design/2026-07-27-sequenced-incarnation-links-design.md):
 
-That design document also defines a contract 3, a Redis-coordinated membership state machine,
-and this directory once held a `Membership.tla` for it. The protocol it modelled has been
-deleted from the library and the module went with it; see
-[the note at the end of the change log](#removal-of-the-membership-model).
+| Module | Contract | Question |
+|---|---|---|
+| [MessageIdentity.tla](MessageIdentity.tla) | 1: identity | Which fields distinguish incompatible operation schedules on a FIFO stream? |
+| [SequencedLink.tla](SequencedLink.tla) | 2: durability | Can one directed link preserve ordered delivery through abstract freeze and restore steps? |
 
----
+Neither model composes identity checks with replay. Neither models Local Drain.
 
-## Modules and the contracts they map to
+## Status against the code (wire version 4)
 
-| Module | Design contract | Axis | What it answers |
-|---|---|---|---|
-| [`MessageIdentity.tla`](MessageIdentity.tla) | Contract 1 — message identity | A | Which envelope fields are *necessary* to make silent substitution impossible on the unframed `Direct` transport under divergent programs? |
-| [`SequencedLink.tla`](SequencedLink.tla) | Contract 2 — transport durability | C | Does one directed sequenced link lose, duplicate or reorder anything when `criu dump --tcp-close` can fire at an arbitrary instant? |
+The models were written for the July design and were not rerun after the August
+27 wire-format change. The following differences matter when comparing them
+with the implementation:
 
-Neither module models more than its own contract. **Nothing checks the two together** — see
-[the composition gap](#the-composition-gap-the-biggest-hole).
-
-### Status against the code (wire version 4)
-
-The models were written against the July design and have not been re-run since the wire cut
-of 2026-08-27. What that cut changed does not reach the properties they check, but a reader
-comparing model to code should know where the vocabulary has drifted:
-
-* `MessageIdentity` names its envelope fields `mid` (`message_id`) and `len` (`total_length`).
-  Both wire fields are gone: `message_id` was equal to `transport_seq` by construction and
-  `total_length` to `payload_length`, and version 4 dropped them. The model's `mid` is a per-lane
-  FIFO position that both ends derive identically, which is why it "discriminates nothing" below
-  — the code's per-lane, sequence-ordered drain queues give the same position implicitly, so the
-  necessity results stand with `len` read as `payload_length`.
-* `SequencedLink` carries a CREDIT dimension (`Reserve`, `sndCreditLimit`) and a separate
-  `ackSafe` watermark. The implementation has no credit at all (see the implementation note,
-  "What the blocking shape cannot do") and maintains `ack_safe_seq` as a copy of
-  `next_received`. Both are abstractions the model is a superset of; the durability invariants
-  are checked on the part the code implements.
-* The model's handshake exchanges `(next_send, next_expected, ack_safe, lowest_retained)`; the
-  30-byte wire handshake carries the first, second and fourth. Nothing in the code carries an
-  incarnation on the sequenced path any more, so every mention of contract 3 or of incarnations
-  in either module refers to a protocol that no longer exists.
-* The spec document both modules cite lives at `docs/design/`; the modules' header comments
-  used to point at a directory that has since been renamed.
-
----
+- `MessageIdentity` calls its FIFO position `mid` and its length `len`. The wire
+  fields `message_id` and `total_length` were removed as redundant; the current
+  code uses sequence-ordered receive queues and `payload_length`.
+- `SequencedLink` models receiver CREDIT and a separate `ackSafe` watermark.
+  The implementation has no CREDIT protocol and keeps `ack_safe_seq` equal to
+  `next_received` in production. Model results involving those extra mechanisms
+  are not validation of an implemented receiver-memory limit.
+- The model handshake includes `next_send`, `next_expected`, `ack_safe`, and
+  `lowest_retained`. The version-4 wire handshake carries the first, second, and
+  fourth, in a 30-byte payload.
+- The old sequenced membership protocol and `Membership.tla` were removed.
+  Incarnation references in the original model commentary concern that retired
+  protocol, not the current sequenced wire format.
 
 ## Reproducing
 
-Toolchain: TLC2 version 2.19 (`tla2tools.jar`), Java 21. No Toolbox; command line only.
-Run from **inside this directory**.
+Recorded toolchain: TLC2 2.19 (`tla2tools.jar`) and Java 21. Run from this directory
+and adjust the JAR path for your installation.
 
 ```bash
 cd docs/tla        # from the repository root
@@ -78,39 +62,32 @@ java -XX:+UseParallelGC -cp ~/.local/share/tla/tla2tools.jar tlc2.TLC \
      -workers auto -cleanup -config SequencedLink_correct.cfg SequencedLink.tla
 ```
 
-Notes on the command line:
 
-* `-config <name>.cfg` is required because each module carries many configurations, every one
-  of them named after the property it checks rather than after its module; TLC's default
-  search for `<Module>.cfg` therefore finds nothing.
-* `-cleanup` is safe **only when runs are sequential** — it wipes `states/`, which both
-  modules in this directory share. Concurrent runs need distinct `-metadir`.
-* Run all 26 sequentially: **≈ 1 minute wall clock** on 16 workers. The slowest single
-  configuration is `MessageIdentity_FullTuple_len3` at 30 s; every other one is under 5 s.
-* Exit codes: `0` = no error, `12` = invariant violated, `13` = temporal property violated.
-  For the deliberately-broken and probe configurations, a **non-zero exit is the pass
-  condition**.
+Specify `-config`: the configurations have descriptive names, so TLC's default
+`<Module>.cfg` lookup will not find them. Run sequentially when using `-cleanup`,
+which removes the shared `states/` directory. Concurrent runs need separate
+`-metadir` paths.
+
+The recorded complete sweep took about one minute with 16 workers. TLC exit code
+0 means no error; 12 means an invariant violation; 13 means a temporal-property
+violation. Broken and probe configurations deliberately require a violation.
 
 ### Reproducibility caveat
 
-Runs that **complete** (`Model checking completed`) are exhaustive and their state counts are
-exactly reproducible. Runs that **stop at a violation** are not: TLC's parallel workers reach
-the counterexample by different routes each time, so `states generated`, `distinct states` and
-the reported search depth vary run to run, and the trace itself may differ. The *outcome* —
-which invariant or property is violated — is stable. Numbers below for violating runs are from
-one observed run and are illustrative; numbers for completing runs are exact.
-
----
+A run ending with `Model checking completed` exhausts its configured state space.
+For the recorded toolchain and settings, those completed runs reproduced their
+state counts. Parallel runs that stop at a counterexample can take different
+paths, so their counts, depths, and traces can differ. The required violated
+property is the result to compare; the violating-run counts below describe one
+observed run.
 
 ## Results
-
-All 26 configurations, real output.
 
 ### `SequencedLink.tla` — contract 2
 
 | Config | Outcome | States gen. | Distinct | Depth |
 |---|---|---|---|---|
-| `SequencedLink_correct` | **No error** — the headline theorem | 7,991 | 2,932 | 29 |
+| `SequencedLink_correct` | **No error** — within the stated bounds | 7,991 | 2,932 | 29 |
 | `SequencedLink_correct_large` | **No error** — `Reserve > W`, `MaxMsg=4`, `W=3` | 96,431 | 30,567 | 34 |
 | `SequencedLink_reserve_below_window` | No error *(`Reserve < W`; see finding SL-2)* | 3,738 | 1,551 | 39 |
 | `SequencedLink_broken_ackonreceipt` | `OrderingInv2` VIOLATED *(expected)* | 40 | 33 | 9 |
@@ -127,9 +104,9 @@ All 26 configurations, real output.
 | `SequencedLink_probe_Probe_FreezePos3_CommittedNotAcked` | VIOLATED *(required)* | 126 | 81 | 11 |
 | `SequencedLink_probe_Probe_FreezePos4_AckOnTheWire` | VIOLATED *(required)* | 305 | 189 | 14 |
 
-The seven probes are invariants **asserted in order to be refuted**. A probe that *passes*
-means the model never reaches the state of interest and the corresponding "no error found"
-result is partly vacuous. All seven are refuted.
+The seven probes deliberately assert that a state of interest is unreachable.
+Each is expected to fail, showing that the model actually reaches that state.
+All seven produced the required counterexample.
 
 Independent non-vacuity evidence, from `-coverage 1` on `SequencedLink_correct` (format is
 `distinct:generated`):
@@ -141,8 +118,8 @@ Independent non-vacuity evidence, from `-coverage 1` on `SequencedLink_correct` 
 <AppConsume>:     869:1194    <EmitAck>:        673:987     <AbortedEnd>:   0:0
 ```
 
-Every action fires, including `Replay` and `Handshake`; `AbortedEnd` never fires, which is
-`NoAbort` restated.
+`Replay` and `Handshake` both execute. `AbortedEnd` never executes, consistent
+with `NoAbort`.
 
 ### `MessageIdentity.tla` — contract 1
 
@@ -156,271 +133,130 @@ Every action fires, including `Replay` and `Handshake`; `AbortedEnd` never fires
 | `MessageIdentity_LaneAndIndex_specprogram` | + `collective_index` | `NoEqualIndexCollision` VIOLATED | 42 | 6 | 4 |
 | `MessageIdentity_LaneOnly` | lane + ordinal | `NoCollectiveCollision` VIOLATED | 3,725 | 3,669 | 3 |
 | `MessageIdentity_LaneOnly_specprogram` | lane + ordinal | `NoSilentSubstitution` VIOLATED | 41 | 5 | 4 |
-| `MessageIdentity_OrdinalOnly` | today's `Direct` | `NoCrossLaneSubstitution` VIOLATED | 3,630 | 3,602 | 3 |
-| `MessageIdentity_OrdinalOnly_p2p_vs_barrier` | today's `Direct` | `NoCrossLaneSubstitution` VIOLATED | 368 | 352 | 3 |
+| `MessageIdentity_OrdinalOnly` | unframed `Direct` | `NoCrossLaneSubstitution` VIOLATED | 3,630 | 3,602 | 3 |
+| `MessageIdentity_OrdinalOnly_p2p_vs_barrier` | unframed `Direct` | `NoCrossLaneSubstitution` VIOLATED | 368 | 352 | 3 |
 
----
 
 ## Bounds, and why
 
-Every bound is small on purpose: an exhausted small model is worth more than a timed-out
-large one. Nothing below is a symmetry-reduction or a state constraint that could hide a
-counterexample; all bounds are either enabling-condition budgets or `TypeOK` assertions.
+The bounds allow complete exploration of the selected state spaces. They are
+enabling-condition budgets or type assertions, not symmetry reductions or
+extra state constraints used to discard executions.
 
 | Module | Bound | Value | Why this value |
 |---|---|---|---|
 | SequencedLink | `MaxMsg` | 3 (4 large) | Only has to exceed `W` so the window actually blocks. |
 | | `W` | 2 (3 large) | Smallest window with >1 frame in flight, so one `Freeze` destroys several frames at once. |
-| | `Reserve` | 2 (4 large, 1 in the below-window config) | 2 is the boundary case `Reserve = W`; 4 is the `Reserve > W` case the spec's config validation requires. |
+| | `Reserve` | 2 (4 large, 1 in the below-window config) | 2 is the boundary case `Reserve = W`; 4 is the `Reserve > W` case the original proposal required. |
 | | `MaxFreezes` | 2 (1 in the broken configs) | 2 permits a second freeze *during* repair of the first. |
 | MessageIdentity | ranks | 2 | The spec's counterexample is at N=2, and it is the only size where `bcast` and `barrier` both collapse to one 1-byte frame on the same directed pair. |
 | | `MaxProgLen` | 2 (3 in two configs) | Length 2 already exhibits all three verdicts. Length 3 over the 6-symbol alphabet is 66,564 program pairs, so length 3 uses a 4-symbol alphabet. |
-| | frame length | always 1 byte | Deliberate: the collision of interest is between frames of *equal* length, so `total_length` must not be allowed to do the discriminating. |
+| | frame length | always 1 byte | Deliberate: the collision of interest is between frames of *equal* length, so payload length must not be allowed to do the discriminating. |
 
----
 
 ## What is PROVEN
 
-Read every one of these as prefixed by *"within the bounds in the table above, and modulo the
-abstractions in the next section"*.
+These statements apply **within the configured bounds and abstractions**.
 
-**Contract 1 (`MessageIdentity`).** Over **all** divergent program pairs of length ≤ 2 (and
-≤ 3 in two configs) drawn from a 6-symbol alphabet — not a hand-picked pair:
+`MessageIdentity` shows that unframed matching can silently substitute data from
+a different operation. Adding a lane still allows collective collisions;
+adding a collective index still allows different operations at that index to
+collide. Operation kind and reduction flags distinguish the modeled cases.
+The aligned full-tuple configuration accepts all 258 compatible program pairs
+within its scope, and a separate witness shows that mismatches can be rejected.
+The two-rank model does not establish the necessity of `root`.
 
-1. Today's unframed `Direct` admits silent substitution at depth 3.
-2. Adding `lane` + per-lane FIFO drain queues is **not** enough: two *different collectives*
-   still collide.
-3. Adding `collective_index` as well is **not** enough — machine-checked confirmation of the
-   spec's claim that "a bare per-communicator collective counter is also insufficient", with
-   `collective_index` equal on both sides in the trace.
-4. `op_kind` and the `commutative`/`associative` flags are each **independently** necessary:
-   `reduce` vs `reduce_nc` collide with identical `op_kind`, `root`, `collective_index` and
-   length; only the flags separate them. Neither may be dropped as an optimisation.
-5. The full envelope never rejects a well-formed program pair (`NoFalseAbort` /
-   `NoLoudAbort` over all 258 distinct `Compatible` pairs of length ≤ 3). This is the one
-   result here that is not true by construction.
-6. The validation actually fires (`NoLoudAbort` witness), rather than hanging or accepting.
+`SequencedLink` preserves no-loss, retention, non-duplication, and FIFO invariants
+for one directed stream. Under its fairness assumptions, completed sends are
+eventually consumed across the modeled freezes. Deliberately broken ACK,
+retention, and drain-queue variants violate their required properties. The
+correct configurations never take the impossible-state abort path.
 
-**Contract 2 (`SequencedLink`).** On one directed link, with `Freeze` (`criu dump
---tcp-close`) enabled at **every** reachable non-aborted state below the bound:
+`DedupUnreachable` holds in that directed-link model because the handshake
+replays exactly the needed suffix. It is not evidence that a production dedup
+check is unnecessary under executions the model does not include.
 
-7. Nothing posted is lost, duplicated or reordered (`NoLossSafety`, `RetentionSafety`,
-   `NoDuplication`, `FIFO`), and every message whose `send()` returned is eventually consumed
-   (`DeliveryObligation`), across up to 2 freezes with replay and handshake reconciliation.
-8. The three ordering invariants hold, and each is load-bearing: five separate fault
-   injections (ACK-on-receipt in three stages, volatile drain queue, prune-on-transmit in two
-   stages) are each caught, and three of the five surface as *actual data loss*, not merely as
-   a violated internal invariant.
-9. Receiver-side dedup is unreachable (`DedupUnreachable` holds everywhere): because the
-   handshake replays exactly `[next_received, next_send)`, no duplicate ever reaches the
-   receiver on a single directed link. The `Classification::Duplicate` branch in Plan C is
-   defensive dead code and its test case cannot be reached by driving the real handshake.
-10. No impossible-state abort ever fires in the correct configuration (`NoAbort`), while the
-    broken configurations do drive the handshake into a loud abort — so the abort path is
-    reachable but never spuriously taken.
+## Design clarification: P2P root
 
----
-
-## Where model checking CONTRADICTED the design spec
-
-One item. Findings D-1, D-2 and D-3 were all against contract 3's membership state machine and
-were removed with it; the numbering below is left alone so that citations elsewhere in the repo
-still resolve to what they meant. **The design document has not been edited**; what follows is
-recorded here for the authors to act on.
-
-### D-4 (minor). Contract 1's `root` field is under-specified for the P2P lane
-
-The envelope table defines `root` as *"Collective root, or the peer id for p2p"*. "The peer
-id" is ambiguous: if each side writes "the other end", the sender writes `1` and the receiver
-expects `0`, and every legal p2p receive becomes a loud abort. `MessageIdentity.tla` silently
-resolved this to **`root` = destination rank** on both sides, which is the only self-consistent
-choice; `NoFalseAbort` holding depends on that resolution. Contract 1 should say
-"the destination rank" explicitly.
-
----
+The original text described `root` as “the peer,” which is ambiguous because the
+two endpoints have different peers. The model uses the **destination rank** at
+both ends. The design now states that definition explicitly. This was recorded
+as finding D-4; D-1 through D-3 concerned the removed membership model.
 
 ## What is NOT proven
 
-This section is the point of the document. A formal spec that quietly assumes away the hard
-part is worse than none.
+### The composition gap
 
-### The composition gap (the biggest hole)
+No model checks a rank frozen in the middle of a divergent P2P schedule while
+replayed frames are matched against its restored operation state.
 
-**The claim the link layer exists to support — that a rank can be frozen and restored at an
-arbitrary instant while its peers are running *arbitrary divergent point-to-point schedules* —
-is not checked by either of these modules, and is not implied by their conjunction.**
-
-Each module removes exactly what the other contains:
-
-| | freeze / restore | divergent schedules | envelope | link durability |
+| Model | Divergent schedules | Freeze/restore | Identity checks | Reliable link |
 |---|---|---|---|---|
-| `MessageIdentity` | ✗ none | ✓ exhaustive | ✓ | ✗ assumes perfect FIFO |
-| `SequencedLink` | ~ abstract `Freeze`/`Restore` steps | ✗ one directed stream | ✗ | ✓ |
+| MessageIdentity | Yes, within bounds | No | Yes | Assumes perfect FIFO |
+| SequencedLink | No; one directed stream | Abstract actions | No | Yes |
 
-So there is **no** machine-checked statement about a rank being frozen *in the middle of* a
-divergent schedule and its peer replaying frames that are then matched against the restored
-process's expectations. Specifically unverified:
+Consequently, the two results do not establish that restored operation counters
+agree with advancing survivors, that identity checks are correct on all replay
+paths, or that a fresh process can take over a rank. Fresh-process replacement
+is not an implemented substitute for checkpoint restore.
 
-* Whether a replayed frame's `collective_index` / `message_id`, restored from a CRIU image,
-  still agrees with a survivor that kept advancing during the freeze.
-* **Counter seeding for a process that takes a rank over from scratch** rather than being
-  restored from an image (`SequencedLink::seed`). The design says seeded counters make
-  divergence loud; no module models a fresh process, a reset counter, or the seeding.
-* The interaction of contract 1's identity validation with contract 2's replay: a frame
-  replayed after repair is validated by contract 1 machinery that no module exercises on a
-  replayed frame.
+The C++ test
+`CheckpointFreezePoints/identity_is_still_enforced_on_a_frame_that_arrives_by_replay`
+checks one identity/replay interaction. Partial-frame tests also cover a gap that
+hid the original header-before-payload watermark bug. These are useful tests of
+specific paths, not exhaustive checks of the composition.
 
-A third module composing a 2-rank divergent schedule over two sequenced links with one
-freeze/restore would be the highest-value next piece of work. Neither of the current two
-substitutes for it.
+### MessageIdentity limitations
 
-**Partially closed by implementation tests, which are evidence but not proof.** The third
-bullet — identity validation applied to a *replayed* frame — is now exercised directly against
-the real transport by
-`CheckpointFreezePoints/identity_is_still_enforced_on_a_frame_that_arrives_by_replay`: a frame
-is put on the wire a second time after a repair, belonging to a different logical operation
-than the one the receiver awaits, and is refused rather than delivered. That is one path
-through the composition, chosen because it is the one where a frame reaches the receiver
-without the sender having just produced it. It says nothing about the first two bullets, and a
-test over one path is not a check over all of them.
+- No checkpoint, counter reset, partial I/O, or keyed store is modeled.
+- Every frame is one byte. This deliberately exposes equal-length collisions;
+  the cross-lane example requires a one-byte application message.
+- At two ranks, `root` necessity is not exhibited, and some reduction-flag
+  mismatches do not yet change the arithmetic result. Both need larger cases.
+- `FullTuple` is also the model's definition of ground-truth identity, so its
+  no-substitution result follows from that definition. The weaker-envelope
+  counterexamples, aligned-program check, and rejection witness supply the
+  additional evidence.
+- `NoFalseAbort` is vacuous for weaker envelopes whose checked fields always
+  agree. `Terminates` follows from the finite, acyclic program-counter graph.
 
-The freeze positions this file lists as abstracted away (partial egress, partial parse) are
-likewise covered only by implementation tests — and that abstraction hid a real defect: the
-transport advanced its receive watermark at header-parse time, so a freeze between a header and
-its payload let the peer prune a message it had never delivered. See
-`docs/design/2026-07-30-sequenced-links-implementation.md`, rule R1.
+### SequencedLink limitations
 
-### `MessageIdentity`
+- **One DATA direction.** The model cannot exhibit a bidirectional ACK-behind-DATA
+  deadlock. The below-window reserve configuration passing does not validate the
+  original reserve constraint. That CREDIT/reserve scheme is not implemented.
+- **Atomic frames and handshake.** Partial headers, partial payloads, and DATA/ACK
+  byte interleaving are absent. A real stream must serialize complete frames.
+- **Frame-count memory model.** Byte limits collapse into window size `W`.
+  Retention is assumed to be an admission limit, never an eviction policy.
+- **No time, deadlines, or discovery.** Liveness assumes weakly fair `Restore`
+  and `Handshake` actions. Actual socket-driven discovery must supply progress;
+  a silent stopped peer does not automatically satisfy that assumption.
+- **No permanent failure.** `Freeze` represents a planned checkpoint with an
+  image. Lost images, crashes without images, image corruption, and competing
+  restores are outside the model.
+- **No combined lane or operation identity.** Receiver dedup being unreachable
+  here applies only to this single-direction execution model.
 
-* **No freeze, no restore, no incarnation change, no counter reset.** Consequence:
-  `message_id` discriminates nothing here. Its "job-lifetime, never reset" property matters
-  against the ClientServer counter reset, which is a *keyed store*, not a FIFO stream — a
-  different transport model, entirely absent.
-* **ClientServer is not modelled at all.** Every A2-stage claim in the spec — job-lifetime
-  keys, consumer-delete namespaces, `GET`/commit/`DEL` never `GETDEL`, the barrier
-  deduplicated-rank-set fix, `KEYS *` scoping — is unverified, and the counterexample corpus
-  that used to drive that path was removed with the epoch protocol, so nothing exercises it
-  now either.
-* **`root` necessity is not exhibited.** At N=2 no two collectives agree on lane, `op_kind`,
-  `collective_index` and length while disagreeing on `root`. `root` is carried per the spec;
-  this module does not show it necessary. That needs N ≥ 3.
-* **`wire_version` and `fragment_index` are absent**, as is fragmentation and any partial
-  write.
-* **All frames are 1 byte.** This is what makes the p2p-vs-collective collision fire; a
-  real application sending a large p2p message would not collide with a 1-byte barrier
-  fragment on length alone. The *collective-vs-collective* collisions are unconditional (those
-  frames really are all 1 byte); the *cross-lane* one requires a 1-byte application message.
-* **`NoFalseAbort` is vacuous in three of four configs.** Under `OrdinalOnly` the checked
-  field set is empty, so `LoudAbort` can never fire; under `LaneOnly`/`LaneAndIndex` the
-  checked fields always agree. It is a real result only under `FullTuple`, and the dedicated
-  evidence is `MessageIdentity_FullTuple_aligned`.
-* **"FullTuple holds" is true by construction**, because ground-truth identity is defined as
-  exactly the FullTuple field set. The load-bearing outputs are the three *necessity* results,
-  `NoFalseAbort`, and the `LoudAbort` witness — not that one.
-* **`Terminates` is trivial**: every action strictly increases `pc[0]+pc[1]`, so the state
-  graph is finite and acyclic. It would only catch a modelling error.
-* **N=2 understates the reduce-flag divergence.** At N=2 `reduce_ltr` and `reduce_no_order`
-  emit the same pattern *and* compute the same answer, so a flags mismatch is a latent
-  divergence; the wrong arithmetic only materialises at N ≥ 3.
+### Finite scope
 
-### `SequencedLink`
-
-* **One DATA direction only.** Therefore the `drain_reserve_frames >= window_frames`
-  constraint — which exists to prevent the ack-behind-data deadlock — is **NOT verified**.
-  `SequencedLink_reserve_below_window.cfg` sets `Reserve = 1, W = 3`, a config the spec's
-  parse-time validation rejects, and it passes clean (3,738 / 1,551, depth 39, liveness holds).
-  That is not a counterexample to the spec; it is evidence that the hazard is genuinely
-  bidirectional and cannot be exhibited without two DATA directions sharing one egress FIFO.
-  **The constraint remains an unchecked implementation obligation.** If it is worth gating
-  config parsing, it deserves its own bidirectional module.
-* **No lanes, no fragments, no message identity** — contract 1 is out of scope. (Reassembly
-  would sit between `Deliver` and `Commit` and only widen the volatile window, so the omission
-  is conservative.)
-* **Bytes are frames.** `max_frame_bytes` and `retention_limit_bytes` collapse into the frame
-  count `W`. Valid only under the Plan C decision that the retention cap is an *admission*,
-  never an *eviction*, threshold. **The spec's open item 1 (cap behaviour at
-  `retention_limit_bytes`) is therefore assumed resolved, not resolved.**
-* **Frames are atomic on the wire.** The spec's egress-serialisation rule (a partially written
-  DATA frame completes before any ACK begins) is a framing-corruption rule and framing
-  corruption is abstracted away. Sound for the durability argument specifically; the
-  interleaving hazard itself is an unchecked implementation obligation.
-* **The handshake is atomic** (one step, not one RTT), and **the parser stages at most one
-  frame**. Both understate the volatile set, which is conservative in the correct
-  configuration.
-* **No time, no timeouts, no coordinator.** However a survivor comes to learn that its peer
-  was restored collapses into a nondeterministic, weakly fair `Restore`, and this module says
-  nothing about that mechanism. **The liveness result is conditional on `WF_vars(Restore)` and
-  `WF_vars(Handshake)`** — i.e. on repair discovery never waiting for EOF/RST/timeout. If
-  discovery were socket-driven, `Restore` would not be weakly fair in the `--tcp-close
-  --leave-stopped` case (the survivor's socket stays ESTABLISHED and silent) and
-  `DeliveryObligation` would fail. There is no directory left to discharge that assumption, so
-  the whole of it now rests on the transport: the restored process re-establishes toward its
-  peers, and a survivor accepts that connection from `service_transport`, which runs from
-  inside every blocking read and write rather than only from `build_mesh`.
-* **`Freeze` is a *planned* checkpoint.** No crash-without-image, no permanent peer death, no
-  image corruption, no double-restore race.
-* **An ack-on-consume policy is not modelled** (it prunes strictly less, so the modelled case
-  is the harder one).
-* **`DedupUnreachable` is proven only for a single direction with one restore at a time.** A
-  double-restore race is not modelled.
-
-### Bound-scope honesty
-
-Nothing here is proven for unbounded N, unbounded messages, unbounded freezes or unbounded
-program length. The largest configurations are 4 messages with a 3-frame window and 2 freezes,
-and programs of length 3 over a 4-symbol alphabet. Read every result as *"no counterexample
-exists at these bounds"*. Small-scope arguments make that persuasive for the *classes* of bug
-modelled here (interleaving, ordering, arbitration); they say nothing about bugs whose smallest
-instance is larger — and finding D-4's `root` necessity gap is a concrete example of exactly
-such a bug living at N ≥ 3.
-
----
-
-## Changes made by the integration/audit pass
-
-All are additive and gated on new constants defaulting to the previously-modelled behaviour.
-Re-running every pre-existing config after these edits reproduced its previous outcome, and
-every exhaustive run reproduced its exact state count.
-
-| File | Change |
-|---|---|
-| `SequencedLink.tla` | New `CONSTANT DrainQueueVolatile` (Freeze destroys the drain queue) and `CONSTANT PruneOnTransmit` (retention released at socket-write). Both `FALSE` = the spec. |
-| all `SequencedLink*.cfg` | New constants assigned their spec values. |
-| new: `SequencedLink_broken_volatile_drainq.cfg` | Teeth test: a defect that respects ordering invariant 2 but lies about durability. |
-| new: `SequencedLink_broken_prune_on_transmit{,_loss}.cfg` | Teeth test: breaks ordering invariant 3 directly; stage 2 shows it reaching actual loss. |
-
-### Removal of the membership model
-
-`Membership.tla` and its 11 configurations were deleted together with the Redis-coordinated
-epoch migration protocol they modelled. Contract 3 described that protocol's directory,
-leases and pause entries; with the control plane gone from the library there is nothing left
-for the module to be a model *of*, and keeping it would have asserted machine-checked support
-for code that no longer exists. Findings D-1, D-2 and D-3 went with it. Nothing in contracts 1
-and 2 depended on it — the two surviving modules never referenced `Membership.tla`, and every
-remaining configuration reproduces the outcome and, where the run completes, the exact state
-count recorded above.
-
----
+No result covers unbounded ranks, messages, freezes, or program length. The
+largest message configuration has four messages and a three-frame window;
+configurations allow at most two freezes. The longer identity configurations
+use programs of length three over a four-symbol alphabet. A bug whose smallest
+example exceeds those bounds can remain undetected.
 
 ## Extending the models
 
-1. **Compose them.** The highest-value next module is the one described under
-   [the composition gap](#the-composition-gap-the-biggest-hole): two ranks running divergent
-   schedules over two sequenced links, with one freeze and restore in the middle. Take
-   `MessageIdentity`'s program/`Compile` machinery, replace its perfect FIFO `chan` with
-   `SequencedLink`'s `dataChan`/`retained`/`drainQ`, and let `SequencedLink`'s `Freeze` and
-   `Restore` drive the cut. Expect to need `MaxProgLen = 2` and `MaxMsg = 2` to stay
-   exhaustible.
-2. **Bidirectional `SequencedLink`.** Add a second DATA direction sharing one egress FIFO per
-   socket. This is the *only* way to check `drain_reserve_frames >= window_frames`; a model
-   that cannot exhibit the deadlock the constraint prevents cannot validate the constraint.
-3. **N ≥ 3 in `MessageIdentity`.** Needed for `root` necessity and for the reduce-flag
-   divergence to become a wrong *answer* rather than a latent identity mismatch. The state
-   space grows fast; drop the alphabet to `{send, recv, bcast, reduce}` first.
-4. **ClientServer identity.** A keyed-store model (keys, not a stream) for the A2 claims.
-   `S3` and `Redis` carry real traffic and nothing — model or test — checks their identity
-   discipline.
+1. Compose two ranks, divergent schedules, two directed links, and a freeze/restore.
+   Start with small program and message bounds so TLC can exhaust the model.
+2. Add bidirectional DATA with shared per-socket egress to examine ACK progress
+   and any proposed receive-credit policy.
+3. Extend identity cases to at least three ranks to test root selection and
+   reduction-order effects on answers.
+4. Model Redis and S3 keys, checkpointed counters, retries, and cleanup separately.
+   Existing store implementation tests do not replace a keyed-store model.
 
-When adding a configuration: if it is expected to *fail*, say so in a comment at the top of
-the `.cfg` and add it to the results table with the required outcome, so a future reader can
-tell a regression from an intentional refutation.
+For a new configuration, document its expected outcome in the `.cfg`. Record the
+required violation for deliberately broken cases so it is distinguishable from
+a regression.

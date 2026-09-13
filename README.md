@@ -1,10 +1,112 @@
-<img src="docs/fmi.svg" width="100%">
+<img src="docs/fmi.svg" width="100%" alt="FMI">
 
 # FaaS Message Interface
-Serverless platforms provide massive parallelism with very high elasticity and fine-grained billing. Because of these properties, they are increasingly used for stateful, distributed jobs at large scales. However, a major limitation of the commonly used platforms is communication: Individual functions cannot communicate directly and using external storage or databases for ephemeral data can be slow and expensive. We present FMI, the FaaS Message Interface, to overcome this limitation. FMI is an easy-to-use, high-performance framework for general-purpose communication in Function as a Service platforms. It supports different communication channels (including direct communication with our TCP NAT hole punching system), a model-driven channel selection according to performance or cost, and provides optimized collective implementations that exploit characteristics of the different channels.
-In our experiments, FMI can speed up communication for a distributed machine learning job by up to 1,200x, while reducing cost at the same time by factors of up to 365. It provides a simple interface and can be integrated into existing codebases with a few minor changes.
 
-If you use FMI in your work, then please cite our [ACM ICS 2023 paper](https://spcl.inf.ethz.ch/Publications/index.php?pub=459):
+FMI is a C++17 communication library with Python bindings. It provides MPI-like
+point-to-point operations and collectives for serverless and distributed
+applications. A cost model selects a transport for each operation according to
+message size and the application's preference for speed or cost.
+
+This fork adds checkpoint and migration support to the original FMI library.
+Applications, benchmark results, and migration drivers live in
+[fmi-spot-migration](https://github.com/McLavish/fmi-spot-migration).
+
+## Transports and migration
+
+| Backend | How ranks communicate | Requirements |
+|---|---|---|
+| `Direct` | TCP connections established through TCPunch NAT traversal | A TCPunch rendezvous server |
+| `DirectTCP` | Direct TCP connections | Reachable rank addresses and Redis for discovery |
+| `DrainTCP` | Direct TCP with coordinated socket draining | Reachable rank addresses and Redis for discovery and migration control |
+| `Redis` | Values in a shared Redis instance | A Redis server |
+| `S3` | Objects in a shared bucket | An S3-compatible service |
+
+`Direct` and `DirectTCP` support **Retain-and-Replay**: set `framed` and
+`recover_links` to `true` to retain messages until acknowledged and replay them
+when a connection is rebuilt. **Local Drain** uses `DrainTCP` with `drain: true`
+to move socket data into process memory before a planned checkpoint. Store
+backends use `recover: true` to reconnect and retry store operations.
+
+These mechanisms support externally driven checkpoint and restore without
+application checkpoint calls. They do not reconstruct a lost process: restoring
+a rank requires its checkpoint image. Local Drain also requires coordination
+before the connection is lost. See the [design guide](docs/design/README.md) for
+protocol details and limitations.
+
+## Build and use the C++ library
+
+Dependencies are a C++17 compiler, CMake, and Boost, plus hiredis for Redis-based
+backends, the AWS SDK for S3, and TCPunch for `Direct`. Optional backends can be
+disabled at build time. From the repository root:
+
+```bash
+git submodule update --init --recursive
+cmake -S . -B build -DFMI_ENABLE_S3=OFF -DFMI_ENABLE_TCPUNCH=OFF
+cmake --build build -j"$(nproc)"
+```
+
+This configuration builds the Redis, DirectTCP, and DrainTCP backends. For the
+full build, test setup, and dependency options, see [CLAUDE.md](CLAUDE.md).
+
+To use FMI from another CMake project:
+
+```cmake
+add_subdirectory(path/to/fmi)
+target_link_libraries(your_application PRIVATE FMI::FMI)
+```
+
+The target supplies its public include path. Construct one communicator per rank:
+
+```cpp
+#include <Communicator.h>
+
+FMI::Communicator comm(peer_id, num_peers, "config/fmi.json", "MyApp", 512);
+```
+
+Ranks must agree on the communicator name and size, and use distinct IDs in
+`[0, num_peers)`. Use a unique communicator name for each job run. The final
+argument is the memory allocation in MiB used by the cost model. Choose a
+configuration from [config/](config/) and set its service addresses for your
+installation.
+
+## Build and use the Python binding
+
+The binding requires Python development headers and a Boost.Python library built
+for the same Python version. `python/` is a separate CMake project:
+
+```bash
+cmake -S python -B python/build -DFMI_ENABLE_S3=OFF -DFMI_ENABLE_TCPUNCH=OFF
+cmake --build python/build -j"$(nproc)"
+export PYTHONPATH="$PWD/python/build${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+Then create a communicator:
+
+```python
+import fmi
+
+comm = fmi.Communicator(peer_id, num_peers, "config/fmi.json", "MyApp", 512)
+```
+
+Collective calls take explicit type descriptors such as
+`fmi.types(fmi.datatypes.int)`. See [the examples](docs/mainpage.md),
+[the Python sample](python/tests/client.py), and the Python version guidance in
+[CLAUDE.md](CLAUDE.md).
+
+## Documentation and citation
+
+- [Developer guide](CLAUDE.md): builds, tests, architecture, and configuration.
+- [Protocol design](docs/design/README.md): Retain-and-Replay and Local Drain.
+- [TLA+ models](docs/tla/README.md): checked properties and model limitations.
+- [Open work](TODO.md): known defects and proposed improvements.
+- [Original ICS 2023 paper](https://spcl.inf.ethz.ch/Publications/.pdf/2023_ics_fmi.pdf)
+  and [original thesis](https://doi.org/10.3929/ethz-b-000532425): the original FMI
+  interface, transport selection, and evaluation.
+
+The upstream API documentation is at [fmi.opencore.ch](https://fmi.opencore.ch).
+Generate documentation for this fork with [docs/Doxyfile](docs/Doxyfile).
+
+If you use FMI in your work, cite the original paper:
 
 ```
 @inproceedings{10.1145/3577193.3593718,
@@ -26,63 +128,7 @@ series = {ICS '23}
 }
 ```
 
-## Dependencies
+## Original authors
 
-- C++17 or higher
-- Boost
-- AWS SDK for C++
-- hiredis
-- [TCPunch](https://github.com/OpenCoreCH/TCPunch)
-
-## Installation (C++)
-- Clone this repository
-- Add to your CMakeLists.txt:
-```cmake
-add_subdirectory(path_to_repo/FMI/)
-
-target_link_libraries(${PROJECT_NAME} PRIVATE FMI)
-target_include_directories(${PROJECT_NAME} PRIVATE ${FMI_INCLUDE_DIRS})
-```
-- Integrate the library into your project:
-```cpp
-#include <Communicator.h>
-...
-FMI::Communicator comm(peer_id, num_peers, "config/fmi.json", "MyApp", 512);
-```
-
-## Installation (Python)
-- Clone this repository
-```shell
-cd python
-mkdir build
-cd build
-cmake ..
-make
-```
-- `fmi.so` gets created in the `python/build` directory. You can copy it into your Python module path or include the build directory via `PYTHONPATH`. The library can then be integrated into your project:
-```python
-import fmi
-comm = fmi.Communicator(peer_id, num_peers, "config/fmi.json", "MyApp", 512);
-```
-
-### Docker Images
-The Docker images [FMI-build-docker](https://github.com/OpenCoreCH/FMI-build-docker) contain all necessary dependencies and set up the environment for you. See the repo for details.
-
-### AWS Lambda Layer
-For even easier deployment, we provide AWS CloudFormation templates to create Lambda layers in [python/aws](python/aws). Simply run `sam build` and `sam deploy --guided` in the folder corresponding to your Python version, which creates a Lambda layer in your account that can be added to your function. As soon as you added the layer, you can simply use `import fmi` and work with the library.
-
-## Examples
-C++ sample code for the library is available at [tests/communicator.cpp](tests/communicator.cpp), the usage from Python is demonstrated in [python/tests/client.py](python/tests/client.py). 
-
-The TCP backends can additionally carry every message inside a sequenced link (`"framed": true, "recover_links": true` on the backend): frames are numbered and stamped with the operation they belong to, retained until the peer acknowledges them, and replayed after a connection is lost and rebuilt. A rank can then be checkpointed and restored mid-job by an external tool — the application has no checkpoint API, hook or annotation in it, and never learns that it was frozen. A runnable demonstration with a randomized sweep is `benchmarks/migration/criu-transparent/` in [fmi-spot-migration](https://github.com/McLavish/fmi-spot-migration), which builds this library as a submodule.
-
-## Documentation
-
-The architecture of the system, including a comparison with existing systems and benchmarks, is documented in the ACM ICS'23 paper [FMI: Fast and Cheap Message Passing for Serverless Functions](https://spcl.inf.ethz.ch/Publications/.pdf/2023_ics_fmi.pdf). More details can be found in the thesis [FMI: The FaaS Message Interface](https://doi.org/10.3929/ethz-b-000532425).
-
-A technical documentation of the system (for people that want to extend it) is available at [fmi.opencore.ch](https://fmi.opencore.ch).
-
-## Authors
-
-* [Marcin Copik (ETH Zurich)](https://github.com/mcopik/) - maintainer.
-* [Roman Böhringer (OpenCoreCH)](https://github.com/OpenCoreCH) - main author of FMI.
+- [Marcin Copik](https://github.com/mcopik/), ETH Zurich.
+- [Roman Böhringer](https://github.com/OpenCoreCH), OpenCoreCH.
