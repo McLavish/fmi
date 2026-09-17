@@ -1,7 +1,8 @@
 # Open work
 
-This list comes from the August 17, 2026 implementation review and the September
-7 migration-correctness review. Completed wire-format cleanup and obsolete
+This list comes from the August 17, 2026 implementation review, the September
+7 migration-correctness review, and (two §4 items) the September 16/17 overhead
+campaign on the slimfly27-30 nodes. Completed wire-format cleanup and obsolete
 planning notes have been removed. Source references use symbols where possible
 because line numbers move as the code changes.
 
@@ -85,14 +86,11 @@ The old claim that neither mechanism had been measured is obsolete.
   length mismatch, use `std::runtime_error`. Make the caller-visible contract
   consistent.
 
-- [ ] **Oversized frames look like a full retention window.**
-  `SequencedLink::admit` returns false for both conditions. An oversized message
-  therefore consumes the timeout budget before reporting a retention limit with
-  zero outstanding data. Distinguish permanent size rejection from backpressure.
-
-- [ ] **Two transport limits cannot be configured.**
-  `parse_tcp_params` omits `link_max_frame_bytes` (default 16 MiB) and
-  `max_link_repairs`, although it reads the other link limits.
+- [ ] **`max_link_repairs` cannot be configured.**
+  `parse_tcp_params` reads the other link limits (`link_max_frame_bytes` since
+  00acd96, where `send_object` also refuses an oversized message by name before
+  `SequencedLink::admit` can mistake it for a full window), but the repair budget
+  stays fixed at 4.
 
 - [ ] **The stuck-rank diagnostic derives wait time from inconsistent deadlines.**
   Some `pump` callers pass a short slice deadline, so subtracting `max_timeout`
@@ -213,6 +211,71 @@ consumers in fmi-spot-migration.
   would contain a stale ACK. Avoid adding a payload copy just to join the buffers:
   the initial transmission currently reads directly from the application buffer,
   in addition to the separate retained copy.
+- [ ] **Read pending standalone ACKs opportunistically on sends to one-way links.**
+  On a link that carries data one way, retention is pruned in two situations
+  only: `send_object` finds the link blocked (`SequencedLink::send_blocked`:
+  `link_window_frames` retained frames or `link_retention_limit_bytes`) and calls
+  `drain_acks`, or a wait on another descriptor outlasts a 20 ms `pump` slice and
+  `service_established_links` runs. The receiver's standalone ACKs, one per
+  `link_ack_interval` committed frames, meanwhile sit unread in the sender's
+  socket buffer. Steady-state retention on a one-way link is therefore bounded
+  by the window (256 frames), not by the ACK interval (32). Measured in
+  fmi-spot-migration's 2026-09-16/17 overhead campaign
+  (`benchmarks/overhead/RESULTS-slimfly27.md`, *Arm B's retention on one-way
+  links*): `variable_payloads` at 128 ranks holds up to **378 MiB per rank**
+  (seven outgoing links per rank, six of them one-way, about 64 MB each at the
+  bound) and is still rising after 189 rounds. The same shape held 84 MiB on
+  slower hosts, where waits routinely outlasted the slice and servicing pruned
+  retention as a side effect. The one-way stream flood holds about 200 MiB for
+  the same reason.
+  Proposal: in `send_object`, before `admit`, once a link's retained frame count
+  reaches a threshold at which an ACK is already owed (for example
+  `2 * link_ack_interval`), call `drain_acks(rcpt_id, 0)`. With a zero budget
+  that routine is one `recv(MSG_PEEK | MSG_DONTWAIT)`: it applies the cumulative
+  ACK of whatever header heads the stream, consumes it only if it is an ACK
+  frame, leaves a data frame for `recv_object`, and returns at once when nothing
+  is pending. Expected bound: about `link_ack_interval` frames plus frames in
+  flight per one-way link, about 8 MB instead of 64 MB per link for that shape
+  and about 60 MB instead of 450 MB per rank.
+  Constraints: gate the peek (the threshold, and at most once per
+  `link_ack_interval` sends while above it). An ungated extra syscall per send
+  would add to the small-message cost the item above is about; links with return
+  traffic never reach the threshold because piggybacked ACKs prune them. Keep
+  the `app_owns_stream` and `inbound_stage` guards of `drain_acks`, and confirm
+  its staged-frame branch cannot wait at a zero budget. `drain_acks` returns
+  after consuming one ACK unless the link is blocked, and that ACK is the oldest
+  pending one: drain every ACK frame at the head, or the newest watermark is
+  applied late. ACKs are cumulative and a stale one is a no-op, so protocol
+  safety is unchanged.
+  Not covered: the tail below one interval (a link that carries fewer than
+  `link_ack_interval` frames between ACKs keeps them until more traffic or the
+  `flush_tail` at finalize; the rare links of a rotating-root broadcast hold up
+  to 31 frames each for a whole run) and large frames (32 frames of 4 MiB are
+  still 128 MB per link). A byte-based ACK trigger on the receiver, in addition
+  to the frame count, would bound the second; the idle tail needs a timed or
+  servicing-driven ACK and is a separate decision.
+  Tests: a one-way stream of more than `link_window_frames` frames whose sender
+  never blocks and whose `retained_bytes()` stays within a small multiple of the
+  ACK interval; the existing blocked-window test must still pass. This changes
+  what the overhead campaigns report for Retain-and-Replay's memory (`p6-rss`,
+  the 4 MiB microbench cells, `stream-r2`), so it arrives there as a pin bump
+  with a re-measurement.
+- [ ] **DrainTCP moves large point-to-point messages slower than DirectTCP on a
+  fast link.** In the 2026-09-16/17 overhead campaign (fmi-spot-migration,
+  `benchmarks/overhead/RESULTS-slimfly27.md`, *Latency and bandwidth*) a 4 MiB
+  ping-pong between two otherwise idle ranks over 100 Gbit/s IPoIB takes 1.2-1.5
+  times as long on DrainTCP as on DirectTCP (2.3-2.8 against 3.4 GB/s; broadcast
+  2.8-2.9 against 4.8 GB/s), in every trial and in all three drain
+  configurations, the unarmed one included, so it is the raw-stream data path
+  and not the drain machinery. Up to 1 MiB the two agree, the gap shrinks to
+  about 10 % at 4 ranks and is gone at 8 and 16, and the slower hosts of the
+  earlier campaign (lower per-pair bandwidth) did not show it. `send_object` and
+  `recv_object` issue exactly one non-blocking syscall per acquisition of the
+  per-link mutex and `poll` between partial transfers, where DirectTCP blocks in
+  `write_all`/`read_all`; profile that loop (syscalls and lock round trips per
+  megabyte, socket buffer sizes) before changing it. Whatever changes must keep
+  the invariant the loop exists for: a drain can interrupt an operation between
+  two I/O steps and resume it at a byte offset.
 - [ ] Pool retained payload allocations where beneficial. Retention must outlive
   the application's send buffer; removing that ownership copy is not generally
   valid.
