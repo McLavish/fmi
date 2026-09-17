@@ -254,6 +254,16 @@ consumers in fmi-spot-migration.
   still 128 MB per link). A byte-based ACK trigger on the receiver, in addition
   to the frame count, would bound the second; the idle tail needs a timed or
   servicing-driven ACK and is a separate decision.
+  Measure first (about ten minutes on a quiesced cluster; not yet run): arm B
+  `variable_payloads` at 128 ranks on slimfly27-30 with 39 and with about 400
+  rounds, one trial each, from a hand-kept campaign file. The campaign ran 189
+  rounds where the earlier hosts ran 39, and its existing data cannot separate
+  the two causes of the 378 MiB. The 39-round run does: about 80 MiB would make
+  it run length alone, about 190 MiB (what the 189-round run held at round 39)
+  leaves the rest to waits shorter than the `pump` slice. The 400-round run
+  shows whether retention levels off at the window bound of about 450 MB per
+  rank. The same two runs repeated after the change are its acceptance
+  measurement: both should stay within about 60 MB of the baseline's 22 MiB.
   Tests: a one-way stream of more than `link_window_frames` frames whose sender
   never blocks and whose `retained_bytes()` stays within a small multiple of the
   ACK interval; the existing blocked-window test must still pass. This changes
