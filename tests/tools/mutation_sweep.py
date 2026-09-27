@@ -213,7 +213,16 @@ MUTS = [
   "    if (!links[partner_id].ack_due(flush_tail ? 1 : link_ack_interval)) {",
   "    if (true) {"),
  ("no_ack_drain_when_blocked","src/comm/TcpChannelBase.cpp",
-  "        drain_acks(rcpt_id, static_cast<long>(max_timeout));",""),
+  "            const bool dead = drain_acks(rcpt_id, static_cast<long>(max_timeout));",
+  "            const bool dead = false;"),
+ # A sender waiting for acks on a link that died must repair it: after a restore that closed
+ # the connection (ENOTCONN), and when the peer goes away (EOF/ECONNRESET). Killed by the two
+ # LinkLiveness a_sender_waiting_for_acks_repairs_* cases.
+ ("ack_wait_blind_to_hard_errors","src/comm/TcpChannelBase.cpp",
+  "        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {\n            // Peer closed, or the connection is gone",
+  "        if (n == 0) {\n            // Peer closed, or the connection is gone"),
+ ("full_window_never_repairs","src/comm/TcpChannelBase.cpp",
+  "            if (!dead) {","            if (true) {"),
  ("ack_interval_may_reach_the_window","src/comm/TcpChannelBase.cpp",
   "    if (link_ack_interval >= link_window_frames) {","    if (false) {"),
  ("ack_frames_are_not_skipped","src/comm/TcpChannelBase.cpp",

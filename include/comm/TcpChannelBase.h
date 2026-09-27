@@ -249,8 +249,13 @@ namespace FMI::Comm {
          * exactly where it was for recv_object to read normally and only payload-free ack
          * frames are consumed. The peeked cumulative ack is applied either way, so even a data
          * frame left in the stream prunes retention.
+         *
+         * Returns true when it stopped because the link is dead (EOF, a hard receive error
+         * such as the ENOTCONN of a connection a criu restore closed, or no descriptor at
+         * all): no ack will ever arrive on it, and only a repair — whose handshake carries
+         * what the peer holds — can release the window.
          */
-        void drain_acks(Utils::peer_num partner_id, long budget_ms);
+        bool drain_acks(Utils::peer_num partner_id, long budget_ms);
 
         //! Commits between standalone acks. Zero means "ack whenever anything is outstanding".
         std::uint32_t link_ack_interval = 32;

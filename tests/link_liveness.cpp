@@ -21,6 +21,7 @@
 #include "forked_rank_guard.h"
 
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -58,6 +59,27 @@ namespace {
     int* shared_flags(int n) {
         return static_cast<int*>(mmap(nullptr, n * sizeof(int), PROT_READ | PROT_WRITE,
                                       MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    }
+
+    //! DirectTCP whose link can be left the way a criu restore with --tcp-close leaves it.
+    class RestorableDirectTCP : public DirectTCP {
+    public:
+        using DirectTCP::DirectTCP;
+        //! Put an unconnected TCP socket at the link's descriptor number: after such a
+        //! restore the process owns the same fd, and recv on it fails with ENOTCONN. The dup2
+        //! closes the old connection, so the peer sees it end.
+        void close_link_as_restore_would(FMI::Utils::peer_num p) {
+            if (p < sockets.size() && sockets[p] >= 0) {
+                const int fresh = ::socket(AF_INET, SOCK_STREAM, 0);
+                ::dup2(fresh, sockets[p]);
+                ::close(fresh);
+            }
+        }
+    };
+
+    long ms_since(std::chrono::steady_clock::time_point t0) {
+        return static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count());
     }
 }
 
@@ -486,6 +508,128 @@ BOOST_AUTO_TEST_CASE(two_ranks_writing_oversized_frames_to_each_other_both_compl
     rank_guard.reap_ranks();
     BOOST_CHECK_MESSAGE(ok[0] == 1, "rank 0's write jammed against rank 1's, or its receive was wrong");
     BOOST_CHECK_MESSAGE(ok[1] == 1, "rank 1's write jammed against rank 0's, or its receive was wrong");
+}
+
+BOOST_AUTO_TEST_CASE(a_sender_waiting_for_acks_repairs_a_link_its_restore_closed) {
+    // The 128-rank variable_payloads failure of 2026-09-18: a rank checkpointed while its send
+    // waited for acks on a one-way link came back from criu with that connection closed.
+    // drain_acks knew only EOF, so ENOTCONN sent it round its poll loop until max_timeout, and
+    // the send then failed at the retention limit without ever repairing — while the acks it
+    // waited for had died with the old stream, and only the peer's handshake on a new
+    // connection can say what the peer holds. Rank 0 is the listener side of this link, as
+    // the failing rank was.
+    constexpr int num_peers = 2;
+    constexpr int messages = 12;   // three windows
+    const std::string name = unique_comm("restored");
+    int* ok = shared_flags(num_peers);
+    int* closed = shared_flags(1);
+    int* elapsed = shared_flags(1);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    ok[peer_id] = 0;
+    if (peer_id == 0) { closed[0] = 0; elapsed[0] = -1; }
+
+    try {
+        RestorableDirectTCP ch(one_way_params(), model_params());   // window 4, 8 s deadline
+        ch.set_peer_id(peer_id);
+        ch.set_num_peers(num_peers);
+        ch.set_comm_name(name);
+
+        if (peer_id == 0) {
+            // One delivered message and a full window behind it, as in the window test above.
+            for (int i = 0; i < 5; i++) {
+                OperationScope scope(p2p_identity(1));
+                ch.send({reinterpret_cast<char*>(&i), sizeof(i)}, 1);
+            }
+            ch.close_link_as_restore_would(1);
+            closed[0] = 1;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 5; i < messages; i++) {
+                OperationScope scope(p2p_identity(1));
+                ch.send({reinterpret_cast<char*>(&i), sizeof(i)}, 1);
+            }
+            elapsed[0] = static_cast<int>(ms_since(t0));
+            ok[0] = 1;
+        } else {
+            int failures = 0;
+            for (int i = 0; i < messages; i++) {
+                int got = -1;
+                OperationScope scope(p2p_identity(1));
+                ch.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 0);
+                failures += (got != i);
+                while (i == 0 && !closed[0]) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            }
+            ok[1] = (failures == 0);
+        }
+        ch.finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "the sender did not get past the full window on the closed link");
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "the receiver did not get every message once, in order");
+    // Repaired, not waited out: the old code spent the whole 8 s deadline spinning.
+    BOOST_CHECK_MESSAGE(elapsed[0] >= 0 && elapsed[0] < 4000,
+                        "sends after the restore took " << elapsed[0] << " ms");
+}
+
+BOOST_AUTO_TEST_CASE(a_sender_waiting_for_acks_repairs_when_its_peer_goes_away) {
+    // The same stall seen from a rank that stays: its send is waiting for acks when the peer
+    // is checkpointed and the connection ends. EOF made drain_acks return and the send fail
+    // at the retention limit on the spot, killing a healthy rank because its peer moved.
+    // Here the waiting sender is the dialer (rank 1), so both directions of repair are covered.
+    constexpr int num_peers = 2;
+    constexpr int messages = 12;
+    const std::string name = unique_comm("peergone");
+    int* ok = shared_flags(num_peers);
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    ok[peer_id] = 0;
+
+    try {
+        RestorableDirectTCP ch(one_way_params(), model_params());
+        ch.set_peer_id(peer_id);
+        ch.set_num_peers(num_peers);
+        ch.set_comm_name(name);
+
+        if (peer_id == 1) {
+            // Message 5 waits in drain_acks: the window is full and the receiver is silent.
+            for (int i = 0; i < messages; i++) {
+                OperationScope scope(p2p_identity(0));
+                ch.send({reinterpret_cast<char*>(&i), sizeof(i)}, 0);
+            }
+            ok[1] = 1;
+        } else {
+            int failures = 0;
+            for (int i = 0; i < messages; i++) {
+                int got = -1;
+                OperationScope scope(p2p_identity(0));
+                ch.recv({reinterpret_cast<char*>(&got), sizeof(got)}, 1);
+                failures += (got != i);
+                if (i == 0) {
+                    // Long enough for the sender to fill its window and start waiting, then
+                    // leave: the frames still unread here die with the connection.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    ch.close_link_as_restore_would(1);
+                }
+            }
+            ok[0] = (failures == 0);
+        }
+        ch.finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(ok[1] == 1, "the waiting sender failed instead of repairing the link");
+    BOOST_CHECK_MESSAGE(ok[0] == 1, "the receiver did not get every message once, in order");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

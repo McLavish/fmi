@@ -114,15 +114,18 @@ void FMI::Comm::TcpChannelBase::maybe_send_ack(Utils::peer_num partner_id, bool 
     links[partner_id].note_ack_sent(watermark);
 }
 
-void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budget_ms) {
-    if (!recover_links || partner_id >= links.size() || sockets[partner_id] < 0) {
-        return;
+bool FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budget_ms) {
+    if (!recover_links || partner_id >= links.size()) {
+        return false;
+    }
+    if (sockets[partner_id] < 0) {
+        return true;   // closed by a repair that did not complete; nothing can arrive here
     }
     if (partner_id < app_owns_stream.size() && app_owns_stream[partner_id]) {
         // Unreachable today — nothing under recv_object sends — but the peek below would
         // read mid-frame bytes if a future path got here with the claim armed, so the
         // invariant is enforced rather than assumed.
-        return;
+        return false;
     }
     const long deadline = steady_now_ms() + std::max<long>(budget_ms, 0);
     char encoded[frame_header_bytes];
@@ -137,19 +140,19 @@ void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budg
                 try {
                     finish_stage(partner_id);
                 } catch (const std::exception&) {
-                    return;   // let the receive path report it properly
+                    return false;   // let the receive path report it properly
                 }
                 if (!links[partner_id].send_blocked()) {
-                    return;
+                    return false;
                 }
                 continue;
             }
             if (filled < 0) {
-                return;   // peer gone; the receive path turns that into a repair
+                return true;   // peer gone
             }
             const long remaining = deadline - steady_now_ms();
             if (remaining <= 0) {
-                return;
+                return false;
             }
             struct pollfd pfd{sockets[partner_id], POLLIN, 0};
             ::poll(&pfd, 1, static_cast<int>(std::min<long>(remaining, 1000)));
@@ -157,13 +160,16 @@ void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budg
         }
         long n = ::recv(sockets[partner_id], encoded, frame_header_bytes,
                         MSG_PEEK | MSG_DONTWAIT);
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+            // Peer closed, or the connection is gone: ENOTCONN on a socket a criu restore
+            // left closed, ECONNRESET from a peer killed by its own dump. Waiting here used
+            // to spin until the deadline (poll reports POLLHUP at once, so nothing slows it).
+            return true;
+        }
         if (n < 0 || static_cast<std::size_t>(n) < frame_header_bytes) {
-            if (n == 0) {
-                return;   // peer closed; the receive path turns that into a repair
-            }
             const long remaining = deadline - steady_now_ms();
             if (remaining <= 0) {
-                return;
+                return false;
             }
             if (link_trace()) {
                 static thread_local long last_da_note = 0;
@@ -177,7 +183,7 @@ void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budg
             struct pollfd pfd{sockets[partner_id], POLLIN, 0};
             if (::poll(&pfd, 1, static_cast<int>(std::min<long>(remaining, 1000))) <= 0) {
                 if (steady_now_ms() >= deadline) {
-                    return;
+                    return false;
                 }
                 continue;
             }
@@ -186,33 +192,46 @@ void FMI::Comm::TcpChannelBase::drain_acks(Utils::peer_num partner_id, long budg
         FrameHeader peeked;
         if (decode_header(encoded, frame_header_bytes, link_max_frame_bytes, peeked)
             != DecodeStatus::Ok) {
-            return;   // let the receive path report it properly, with its own diagnostics
+            return false;   // let the receive path report it properly, with its own diagnostics
         }
         links[partner_id].on_ack(peeked.cumulative_ack);
         if (peeked.frame_type == FrameType::Handshake) {
+            // The first frame on a repaired link. It says what the peer holds, and reconciling
+            // it prunes all of that, which after a repair is usually what opens the window.
             int available = 0;
-            if (::ioctl(sockets[partner_id], FIONREAD, &available) != 0 ||
-                static_cast<std::size_t>(available) < frame_header_bytes + handshake_bytes) {
-                return;
+            if (::ioctl(sockets[partner_id], FIONREAD, &available) != 0) {
+                return true;
+            }
+            if (static_cast<std::size_t>(available) < frame_header_bytes + handshake_bytes) {
+                // Its payload is still arriving: wait for it rather than give up on the one
+                // frame this wait needs. POLLIN is already set by the header bytes, so sleep.
+                if (steady_now_ms() >= deadline) {
+                    return false;
+                }
+                ::poll(nullptr, 0, 1);
+                continue;
             }
             read_all(partner_id, encoded, frame_header_bytes);
             char offered[handshake_bytes];
             read_all(partner_id, offered, handshake_bytes);
             reconcile_handshake(partner_id, offered);
+            if (!links[partner_id].send_blocked()) {
+                return false;
+            }
             continue;
         }
         if (peeked.frame_type != FrameType::Ack) {
             // A data frame belongs to recv_object, so it stays in the stream untouched. Its
             // ack has already been applied, which is the only thing needed here.
-            return;
+            return false;
         }
         try {
             read_all(partner_id, encoded, frame_header_bytes);   // consume the ack just peeked
         } catch (const LinkReplaced&) {
-            return;   // the fresh link's acks arrive on their own schedule
+            return false;   // the fresh link's acks arrive on their own schedule
         }
         if (!links[partner_id].send_blocked()) {
-            return;
+            return false;
         }
     }
 }
@@ -632,14 +651,31 @@ void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rc
         // because every frame the peer sends prunes retention; on a one-way link — which a
         // binomial tree produces as soon as there are three ranks — nothing prunes it but the
         // peer's standalone acks, and those have to be collected explicitly.
-        drain_acks(rcpt_id, static_cast<long>(max_timeout));
-        if (!links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {
-            throw std::runtime_error(transport_tag + ": link to peer " + std::to_string(rcpt_id) +
-                                     " is at its retention limit with " +
-                                     std::to_string(links[rcpt_id].retained_bytes()) +
-                                     " bytes outstanding and " +
-                                     std::to_string(links[rcpt_id].replay_suffix().size()) +
-                                     " frames unacknowledged");
+        //
+        // If the link died meanwhile (the peer was checkpointed, or this rank was and its
+        // restore closed the connection), the acks it was owed died with the stream: repair
+        // it, and the peer's handshake on the new connection says what it holds. Bounded like
+        // the receive path's repairs.
+        int repairs = 0;
+        while (true) {
+            const bool dead = drain_acks(rcpt_id, static_cast<long>(max_timeout));
+            if (links[rcpt_id].admit(header, buf.buf, buf.len, stamped)) {
+                break;
+            }
+            if (!dead) {
+                throw std::runtime_error(transport_tag + ": link to peer " +
+                                         std::to_string(rcpt_id) + " is at its retention limit with " +
+                                         std::to_string(links[rcpt_id].retained_bytes()) +
+                                         " bytes outstanding and " +
+                                         std::to_string(links[rcpt_id].replay_suffix().size()) +
+                                         " frames unacknowledged");
+            }
+            if (++repairs > max_link_repairs) {
+                throw std::runtime_error(transport_tag + ": link to peer " +
+                                         std::to_string(rcpt_id) + " could not be repaired after " +
+                                         std::to_string(max_link_repairs) + " attempts");
+            }
+            repair_link(rcpt_id);
         }
     }
     stamped.cumulative_ack = links[rcpt_id].next_received();
