@@ -223,6 +223,15 @@ MUTS = [
   "        if (n == 0) {\n            // Peer closed, or the connection is gone"),
  ("full_window_never_repairs","src/comm/TcpChannelBase.cpp",
   "            if (!dead) {","            if (true) {"),
+ # A restored rank must re-dial the links it had while its application is blocked elsewhere
+ # (the pump's rescue), and only those. Killed by TransportRecovery
+ # a_restored_rank_redials_the_links_it_had_while_blocked_elsewhere: the first wedges the job,
+ # the second makes the restored rank dial a peer it never talked to.
+ ("suspect_state_sized_lazily","src/comm/TcpChannelBase.cpp",
+  "    if (link_suspect_since.size() != num_peers) {\n        // Here and not only where servicing",
+  "    if (false) {\n        // Here and not only where servicing"),
+ ("relocation_debts_on_every_peer","src/comm/DirectTCP.cpp",
+  "            if (q != peer_id && severed[q]) {","            if (q != peer_id) {"),
  ("ack_interval_may_reach_the_window","src/comm/TcpChannelBase.cpp",
   "    if (link_ack_interval >= link_window_frames) {","    if (false) {"),
  ("ack_frames_are_not_skipped","src/comm/TcpChannelBase.cpp",

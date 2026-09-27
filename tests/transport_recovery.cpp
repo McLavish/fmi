@@ -17,6 +17,36 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <cstdio>
+#include <cstring>
+
+#if FMI_ENABLE_REDIS
+namespace FMI::Comm {
+    struct DirectTCPTestAccess {
+        //! What a criu restore on another machine leaves behind: a different kernel boot id,
+        //! and at every link's descriptor an unconnected socket (--tcp-close). Each old
+        //! connection is reset, as a dumped process's are when it is killed.
+        static void restore_elsewhere(DirectTCP& t) {
+            t.birth_boot_id = "restored-on-another-machine";
+            for (int fd : t.sockets) {
+                if (fd < 0) {
+                    continue;
+                }
+                struct linger reset {1, 0};
+                ::setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset));
+                const int fresh = ::socket(AF_INET, SOCK_STREAM, 0);
+                ::dup2(fresh, fd);
+                ::close(fresh);
+            }
+        }
+        static bool holds_link(const DirectTCP& t, FMI::Utils::peer_num p) {
+            return p < t.sockets.size() && t.sockets[p] >= 0;
+        }
+        static bool owes_reconcile(const DirectTCP& t, FMI::Utils::peer_num p) {
+            return p < t.link_needs_reconcile.size() && t.link_needs_reconcile[p];
+        }
+    };
+}
+#endif
 
 //! Retention and replay inside the TRANSPORT, across a connection that actually dies.
 /*!
@@ -443,6 +473,116 @@ BOOST_AUTO_TEST_CASE(recovery_over_the_real_rendezvous) {
     BOOST_REQUIRE_EQUAL(out->count, messages);
     for (int i = 0; i < messages; i++) {
         BOOST_CHECK_EQUAL(out->values[i], payload_for(i));
+    }
+}
+#endif // FMI_ENABLE_REDIS
+
+#if FMI_ENABLE_REDIS
+BOOST_AUTO_TEST_CASE(a_restored_rank_redials_the_links_it_had_while_blocked_elsewhere) {
+    // The post-cut wedge of 2026-09-18 (E2 serial K8, serial K32, parallel K16: every rank
+    // timed out 61.5 s after the cut). DirectTCP dials down, so a lower rank whose link to a
+    // restored rank died can only wait for that rank to dial it back. If the restored rank is
+    // itself blocked on a third rank that transitively waits for the lower one, only the
+    // pump's rescue of dead links breaks the cycle — and it was gated on a vector that only a
+    // servicing pass seeing an open descriptor die ever sized, which a restored rank never
+    // does: its relocation reset closes every descriptor first.
+    //
+    // Rank 3 is restored elsewhere. Rank 1's send to it fails and waits for 3 to dial; rank 3
+    // waits for rank 2, which waits for rank 1. Rank 0 is alive throughout but never talked to
+    // rank 3, so rank 3 has nothing to re-dial there: the reset must not invent a link to it.
+    constexpr int num_peers = 4;
+    const std::string name = "reloc_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+            "_" + std::to_string(getpid());
+
+    struct Shared { int ok[num_peers]; int warm[num_peers]; int restored; int dialed_zero; int owes_zero; };
+    Shared* out = static_cast<Shared*>(mmap(nullptr, sizeof(Shared), PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    std::memset(out, 0, sizeof(Shared));
+    out->dialed_zero = -1;
+    out->owes_zero = -1;
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    try {
+        auto params = dtcp_recover_params();
+        params["max_timeout"] = "8000";
+        DirectTCP ch(params, dtcp_model());
+        ch.set_peer_id(peer_id);
+        ch.set_num_peers(num_peers);
+        ch.set_comm_name(name);
+
+        auto send = [&](int value, FMI::Utils::peer_num to) {
+            OperationScope scope(p2p_identity(to));
+            ch.send({reinterpret_cast<char*>(&value), sizeof(value)}, to);
+        };
+        auto recv = [&](FMI::Utils::peer_num from) {
+            int value = -1;
+            OperationScope scope(p2p_identity(peer_id));
+            ch.recv({reinterpret_cast<char*>(&value), sizeof(value)}, from);
+            return value;
+        };
+        auto all_warm = [&] {
+            for (int r = 0; r < num_peers; r++) {
+                if (!out->warm[r]) { return false; }
+            }
+            return true;
+        };
+        auto await = [](const volatile int& flag) {
+            while (!flag) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+        };
+
+        // Links 3-1, 3-2, 2-1 and 1-0 exist before the restore; 3-0 never does.
+        int good = 1;
+        if (peer_id == 3) {
+            send(31, 1);
+            send(32, 2);
+            out->warm[3] = 1;
+            while (!all_warm()) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            DirectTCPTestAccess::restore_elsewhere(ch);
+            out->restored = 1;
+            good &= (recv(2) == 23);   // first touch: repair, relocation reset, then the wait
+            good &= (recv(1) == 13);
+            out->dialed_zero = DirectTCPTestAccess::holds_link(ch, 0);
+            out->owes_zero = DirectTCPTestAccess::owes_reconcile(ch, 0);
+        } else if (peer_id == 2) {
+            good &= (recv(3) == 32);
+            send(21, 1);
+            out->warm[2] = 1;
+            good &= (recv(1) == 12);
+            send(23, 3);
+        } else if (peer_id == 1) {
+            good &= (recv(3) == 31);
+            good &= (recv(2) == 21);
+            send(10, 0);
+            out->warm[1] = 1;
+            await(out->restored);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));   // the resets land
+            send(13, 3);   // fails on the reset connection; waits for rank 3 to dial back
+            send(12, 2);
+            send(11, 0);
+        } else {
+            good &= (recv(1) == 10);
+            out->warm[0] = 1;
+            good &= (recv(1) == 11);   // pumping, and so reachable, the whole time
+        }
+        out->ok[peer_id] = good;
+        ch.finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    for (int r = 0; r < num_peers; r++) {
+        BOOST_CHECK_MESSAGE(out->ok[r] == 1, "rank " << r << " did not complete with the right values");
+    }
+    if (out->ok[3] == 1) {
+        BOOST_CHECK_MESSAGE(out->dialed_zero == 0,
+                            "the restored rank dialed a peer it had never been connected to");
+        BOOST_CHECK_MESSAGE(out->owes_zero == 0,
+                            "the relocation reset planted a reconcile debt on a link that never existed");
     }
 }
 #endif // FMI_ENABLE_REDIS

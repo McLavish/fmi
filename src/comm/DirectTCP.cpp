@@ -89,20 +89,29 @@ bool FMI::Comm::DirectTCP::reset_transport_if_relocated() {
         std::fprintf(stderr, "[lt] RELOCATION-RESET old_boot=%.8s new_boot=%.8s\n",
                      birth_boot_id.c_str(), current.c_str());
     }
+    // Which links this reset severs: an open descriptor or a connection not yet adopted.
+    std::vector<char> severed(num_peers, 0);
+    for (Utils::peer_num q = 0; q < num_peers; q++) {
+        severed[q] = (q < sockets.size() && sockets[q] >= 0) || pending_links.count(q) > 0;
+    }
     close_sockets();
     close_transport_state();
     // Every link this reset severed must REPLAY when it re-forms. Closing the fds here
     // bypasses the per-link I/O-error discovery that normally plants the reconcile debt
     // through repair_link, and a markless re-established link skips its handshake and
     // replay entirely — the peer then classifies the retained-frames hole as a FATAL
-    // sequence gap (adversarial-review finding, confirmed). Plant the debts wholesale,
-    // exactly as per-link repairs would have.
+    // sequence gap (adversarial-review finding, confirmed). Plant the debts exactly as
+    // per-link repairs would have — and only there. A link already closed owes its debt
+    // already (every path that closes one outside teardown plants it), and a peer this
+    // rank never connected to has nothing to replay: a debt there would make the pump's
+    // rescue of orphaned links dial every lower rank of the job, one after another, each
+    // waiting for that rank to service its listener.
     if (recover_links) {
         if (link_needs_reconcile.size() != num_peers) {
             link_needs_reconcile.assign(num_peers, 0);
         }
         for (Utils::peer_num q = 0; q < num_peers; q++) {
-            if (q != peer_id) {
+            if (q != peer_id && severed[q]) {
                 link_needs_reconcile[q] = 1;
             }
         }

@@ -100,11 +100,6 @@ The old claim that neither mechanism had been measured is obsolete.
   residue-dependent behavior; the earlier claim that it could never fire was
   too broad.
 
-- [ ] **Orphaned-link redial depends on incompletely initialized state.**
-  The rescue path requires `link_suspect_since.size() == num_peers`, but that
-  vector is initialized by another path observing a live descriptor. Initialize
-  all repair-state vectors consistently in `ensure_link_state`.
-
 - [ ] **`maybe_send_ack` checks the wrong vector before indexing sockets.**
   It guards against `links.size()` but accesses `sockets[partner_id]`. A queued
   receive before socket initialization could expose an out-of-bounds access.

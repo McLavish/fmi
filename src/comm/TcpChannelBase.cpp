@@ -64,6 +64,14 @@ void FMI::Comm::TcpChannelBase::ensure_link_state() {
     if (outbound_frozen.size() < num_peers) {
         outbound_frozen.resize(num_peers, 0);
     }
+    if (link_suspect_since.size() != num_peers) {
+        // Here and not only where servicing first sees a live descriptor die: the pump's
+        // rescue of dead links is gated on this vector, and a rank restored on another
+        // machine closes every descriptor in its relocation reset before servicing can see
+        // one die. Sized late, the rescue never ran on such a rank, and a lower peer waiting
+        // for it to dial back waited until its deadline (the post-cut wedges of 2026-09-18).
+        link_suspect_since.assign(num_peers, 0);
+    }
 }
 
 namespace {

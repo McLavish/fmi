@@ -29,6 +29,9 @@ namespace FMI::Comm {
      * Knative scale-from-zero). Those are exactly the cases Direct is for.
      */
     class DirectTCP : public TcpChannelBase {
+        //! Tests only (tests/transport_recovery.cpp): puts a rank in the state a criu restore
+        //! on another machine leaves it in, and inspects its links afterwards.
+        friend struct DirectTCPTestAccess;
     public:
         explicit DirectTCP(std::map<std::string, std::string> params, std::map<std::string, std::string> model_params);
 
