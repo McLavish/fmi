@@ -419,7 +419,10 @@ namespace FMI::Comm {
         void write_frame(Utils::peer_num rcpt_id, const FrameHeader& header, const char* payload);
 
         //! Write exactly @p len bytes to @p rcpt_id, looping over partial writes.
-        void write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len);
+        //! @p sent_out, when given, receives the bytes that reached the socket, also when the
+        //! write throws: a frame abandoned partway must retire its connection (write_frame).
+        void write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len,
+                       std::size_t* sent_out = nullptr);
 
         //! Read exactly @p len bytes from @p sender_id, looping over partial reads.
         void read_all(Utils::peer_num sender_id, char* data, std::size_t len);

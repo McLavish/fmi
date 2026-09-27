@@ -202,6 +202,23 @@ namespace {
             return peer < links.size() ? links[peer].replay_suffix().size() : 0;
         }
 
+        void set_timeout(unsigned ms) { max_timeout = ms; }
+        //! One data frame of @p bytes straight onto the wire, as a replay writes it.
+        void write_raw_frame(FMI::Utils::peer_num peer, const std::vector<char>& bytes) {
+            check_socket(peer, "raw");
+            ensure_link_state();
+            FrameHeader h;
+            h.frame_type = FrameType::Data;
+            h.payload_length = static_cast<std::uint32_t>(bytes.size());
+            write_frame(peer, h, bytes.data());
+        }
+        bool holds_link(FMI::Utils::peer_num peer) const {
+            return peer < sockets.size() && sockets[peer] >= 0;
+        }
+        bool owes_reconcile(FMI::Utils::peer_num peer) const {
+            return peer < link_needs_reconcile.size() && link_needs_reconcile[peer];
+        }
+
     protected:
         int establish(FMI::Utils::peer_num, const std::string&) override {
             return board.checkout(side);
@@ -334,6 +351,23 @@ BOOST_AUTO_TEST_CASE(reverse_traffic_prunes_retention_through_the_piggybacked_ac
     BOOST_CHECK_MESSAGE(retained_after.load() < 6,
                         "retention was never pruned: " << retained_after.load()
                                                        << " frames still held after 6 exchanges");
+}
+
+BOOST_AUTO_TEST_CASE(a_frame_abandoned_partway_retires_its_connection) {
+    // A frame is all or nothing on a connection: the rest of one abandoned partway is what the
+    // peer reads as the next header. A 128-rank variable_payloads restore of 2026-09-27 died of
+    // it: a replay of 1 MiB frames timed out at pump depth 3, servicing swallowed the Timeout,
+    // and the next handshake went out on the same connection behind the fragment ("malformed
+    // frame" at the peer). Here the peer never reads, so the frame's write times out partway.
+    Switchboard board;
+    PairedChannel tx(board, 0, 0, 2);
+    tx.set_timeout(300);
+    const std::vector<char> big(8u << 20, 'x');   // far beyond a socketpair's buffer
+    BOOST_CHECK_THROW(tx.write_raw_frame(1, big), FMI::Utils::Timeout);
+    BOOST_CHECK_MESSAGE(!tx.holds_link(1),
+                        "a connection holding a fragment of a frame must not carry another");
+    BOOST_CHECK_MESSAGE(tx.owes_reconcile(1),
+                        "the retired link must be rebuilt with a handshake and a replay");
 }
 
 BOOST_AUTO_TEST_CASE(a_malformed_handshake_is_rejected_rather_than_reconciled) {

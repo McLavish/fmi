@@ -242,6 +242,11 @@ MUTS = [
  ("moved_link_discarded","src/comm/DirectTCP.cpp",
   "            if (kept >= 0) {\n                pending_links[target] = kept;\n            }",
   "            if (kept >= 0) {\n                ::close(kept);\n            }"),
+ # A frame abandoned partway retires its connection (TransportRecovery
+ # a_frame_abandoned_partway_retires_its_connection).
+ ("fragment_left_on_a_live_connection","src/comm/TcpChannelBase.cpp",
+  "        if (header_sent + payload_sent > 0 && fd_at_entry >= 0 &&",
+  "        if (false && header_sent + payload_sent > 0 && fd_at_entry >= 0 &&"),
  # listen_port_base must fix the port (TransportRecovery listen_port_base_gives_each_rank_*).
  ("listen_port_base_ignored","src/comm/DirectTCP.cpp",
   "        if (listen_port_base > 0) {\n            const long port",

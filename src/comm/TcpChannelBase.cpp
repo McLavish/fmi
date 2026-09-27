@@ -426,7 +426,8 @@ bool FMI::Comm::TcpChannelBase::pump(Utils::peer_num peer, short events, long de
     }
 }
 
-void FMI::Comm::TcpChannelBase::write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len) {
+void FMI::Comm::TcpChannelBase::write_all(Utils::peer_num rcpt_id, const char* data, std::size_t len,
+                                          std::size_t* sent_out) {
     // MSG_NOSIGNAL: a peer that closed mid-migration must surface as EPIPE, not kill the
     // process with SIGPIPE. Loop: a blocking send under SO_SNDTIMEO may accept only part of
     // a large buffer, and a silent short send would desynchronize the byte stream.
@@ -447,6 +448,11 @@ void FMI::Comm::TcpChannelBase::write_all(Utils::peer_num rcpt_id, const char* d
         ~FreezeGuard() { --depths[peer]; }
     } freeze_guard{outbound_frozen, rcpt_id};
     std::size_t sent = 0;
+    struct ProgressGuard {
+        std::size_t* out;
+        const std::size_t& sent;
+        ~ProgressGuard() { if (out != nullptr) *out = sent; }
+    } progress_guard{sent_out, sent};
     const long deadline = steady_now_ms() + static_cast<long>(max_timeout);
     const int fd_at_entry = sockets[rcpt_id];
     const std::uint64_t gen_at_entry = generation(rcpt_id);
@@ -547,9 +553,32 @@ void FMI::Comm::TcpChannelBase::write_frame(Utils::peer_num rcpt_id, const Frame
     encode_header(header, encoded);
     // Header immediately precedes its payload with nothing interleaved, which holds because a
     // channel is only ever driven by one application thread at a time.
-    write_all(rcpt_id, encoded, frame_header_bytes);
-    if (header.payload_length > 0) {
-        write_all(rcpt_id, payload, header.payload_length);
+    //
+    // A frame is all or nothing on a connection: the rest of one abandoned partway is what the
+    // peer reads as the next header. So a write that throws with part of its frame on the wire
+    // retires the connection — nothing may follow the fragment on it, and the link is rebuilt
+    // and replayed on a fresh one. (A variable_payloads restore, 2026-09-27: a replay of 1 MiB
+    // frames timed out at pump depth 3, servicing swallowed the Timeout, and the next handshake
+    // went out on the same connection behind the fragment: "malformed frame" at the peer.)
+    const int fd_at_entry = sockets[rcpt_id];
+    const std::uint64_t gen_at_entry = generation(rcpt_id);
+    std::size_t header_sent = 0;
+    std::size_t payload_sent = 0;
+    try {
+        write_all(rcpt_id, encoded, frame_header_bytes, &header_sent);
+        if (header.payload_length > 0) {
+            write_all(rcpt_id, payload, header.payload_length, &payload_sent);
+        }
+    } catch (const LinkReplaced&) {
+        throw;   // the fragment went to a connection that is already gone
+    } catch (...) {
+        if (header_sent + payload_sent > 0 && fd_at_entry >= 0 &&
+            sockets[rcpt_id] == fd_at_entry && generation(rcpt_id) == gen_at_entry) {
+            ::close(fd_at_entry);
+            sockets[rcpt_id] = -1;
+            note_link_replaced(rcpt_id);
+        }
+        throw;
     }
     if (rcpt_id < links.size()) {
         // The piggybacked ack has reached the wire, so the standalone path need not repeat it.
