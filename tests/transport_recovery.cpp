@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #if FMI_ENABLE_REDIS
@@ -47,6 +48,18 @@ namespace FMI::Comm {
             return p < t.link_needs_reconcile.size() && t.link_needs_reconcile[p];
         }
         static int listen_port(const DirectTCP& t) { return t.listen_port; }
+        static std::string boot_id(const DirectTCP& t) { return t.birth_boot_id; }
+        //! Reset one live connection, as the dump of the process at its other end does.
+        static void reset_link(DirectTCP& t, FMI::Utils::peer_num p) {
+            if (p >= t.sockets.size() || t.sockets[p] < 0) {
+                return;
+            }
+            struct linger reset {1, 0};
+            ::setsockopt(t.sockets[p], SOL_SOCKET, SO_LINGER, &reset, sizeof(reset));
+            const int fresh = ::socket(AF_INET, SOCK_STREAM, 0);
+            ::dup2(fresh, t.sockets[p]);
+            ::close(fresh);
+        }
     };
 }
 #endif
@@ -587,6 +600,84 @@ BOOST_AUTO_TEST_CASE(a_restored_rank_redials_the_links_it_had_while_blocked_else
         BOOST_CHECK_MESSAGE(out->owes_zero == 0,
                             "the relocation reset planted a reconcile debt on a link that never existed");
     }
+}
+
+BOOST_AUTO_TEST_CASE(a_rank_moved_while_establishing_resets_before_it_uses_the_link) {
+    // V1 of 2026-09-27, serial K8 trial 3: rank 1 was dumped mid-repair of its link to rank 0,
+    // dumped just before it, and restored on another machine. Its repair completed inside the
+    // second the periodic relocation check waits -- criu's time namespace hides the freeze --
+    // so it never reset: the registry kept the dump host's address, and every higher peer
+    // dialed it there until its deadline. Here rank 1's machine changes (FMI_BOOT_ID_FILE)
+    // while it waits in build_mesh for rank 0 to accept, and rank 0 accepts well inside that
+    // second.
+    constexpr int num_peers = 2;
+    const std::string stamp =
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+            std::to_string(getpid());
+    const std::string name = "movedest_" + stamp;
+    const std::string boot_file = "/tmp/fmi-boot-id-" + stamp;
+    auto write_boot_id = [&](const char* id) {
+        const std::string tmp = boot_file + ".tmp";
+        if (FILE* f = std::fopen(tmp.c_str(), "w")) {
+            std::fputs(id, f);
+            std::fclose(f);
+            std::rename(tmp.c_str(), boot_file.c_str());
+        }
+    };
+    write_boot_id("machine-before");
+
+    struct Shared { int ok[num_peers]; int link_down; int reset_seen; };
+    Shared* out = static_cast<Shared*>(mmap(nullptr, sizeof(Shared), PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    std::memset(out, 0, sizeof(Shared));
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+    if (peer_id == 1) {
+        ::setenv("FMI_BOOT_ID_FILE", boot_file.c_str(), 1);
+    }
+
+    try {
+        auto params = dtcp_recover_params();
+        params["max_timeout"] = "8000";
+        DirectTCP ch(params, dtcp_model());
+        ch.set_peer_id(peer_id);
+        ch.set_num_peers(num_peers);
+        ch.set_comm_name(name);
+
+        OperationScope scope(p2p_identity(0));
+        if (peer_id == 1) {
+            int warm = 10, after = 11;
+            ch.send({reinterpret_cast<char*>(&warm), sizeof(warm)}, 0);
+            while (!out->link_down) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            // Fails on the reset connection; the repair waits in build_mesh for rank 0.
+            ch.send({reinterpret_cast<char*>(&after), sizeof(after)}, 0);
+            out->reset_seen = DirectTCPTestAccess::boot_id(ch) == "machine-after";
+            out->ok[1] = 1;
+        } else {
+            int warm = -1, after = -1;
+            ch.recv({reinterpret_cast<char*>(&warm), sizeof(warm)}, 1);
+            DirectTCPTestAccess::reset_link(ch, 1);
+            out->link_down = 1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            write_boot_id("machine-after");   // rank 1 "wakes up" elsewhere, mid-wait
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            ch.recv({reinterpret_cast<char*>(&after), sizeof(after)}, 1);   // accepts it
+            out->ok[0] = (warm == 10 && after == 11);
+        }
+        ch.finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+
+    rank_guard.reap_ranks();
+    std::remove(boot_file.c_str());
+    BOOST_CHECK_MESSAGE(out->ok[0] == 1 && out->ok[1] == 1, "the exchange across the move failed");
+    BOOST_CHECK_MESSAGE(out->reset_seen == 1,
+                        "rank 1 used a link it completed after moving without resetting its "
+                        "transport: its registry entry still names the old machine");
 }
 
 BOOST_AUTO_TEST_CASE(listen_port_base_gives_each_rank_its_port_across_a_relocation) {

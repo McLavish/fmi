@@ -62,8 +62,13 @@ FMI::Comm::DirectTCP::DirectTCP(std::map<std::string, std::string> params,
 }
 
 std::string FMI::Comm::DirectTCP::read_boot_id() {
+    // FMI_BOOT_ID_FILE stands in for the kernel's file in tests, which make a rank believe it
+    // woke up on another machine at a moment they choose. Looked up on every call: a value
+    // cached by a process that later forks the ranks of a test would outlive the test's own.
+    const char* override_path = std::getenv("FMI_BOOT_ID_FILE");
     std::string id;
-    if (FILE* f = std::fopen("/proc/sys/kernel/random/boot_id", "r")) {
+    if (FILE* f = std::fopen(override_path != nullptr && override_path[0] != '\0'
+                                     ? override_path : "/proc/sys/kernel/random/boot_id", "r")) {
         char buf[64] = {};
         if (std::fgets(buf, sizeof(buf), f) != nullptr) {
             id = buf;
@@ -681,12 +686,49 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
     long next_connect_attempt = 0;
     long next_publish_attempt = 0;
 
+    // After a relocation reset, this loop's locals belong to the pre-relocation attempt; the
+    // connects in flight aimed at addresses that meant something on the old machine. Restart
+    // THIS establishment on the fresh transport, same target, same deadline.
+    auto restart_on_fresh_transport = [&] {
+        for (auto& [rank, fd] : unconfirmed) {
+            (void) rank;
+            ::close(fd);
+        }
+        unconfirmed.clear();
+        ensure_listener();
+        // The dropped connect was this establishment's only path to a LOWER target:
+        // connect_batch consumed want_connect when it issued it, and nothing refills the
+        // queue once unconfirmed is cleared — without this the loop would publish and service
+        // until its whole deadline with no dial in flight (adversarial-review finding,
+        // confirmed).
+        if (target < peer_id &&
+            std::find(want_connect.begin(), want_connect.end(), target) == want_connect.end()) {
+            want_connect.push_back(target);
+        }
+    };
+
     // One event loop, and it keeps servicing the listener the whole time it waits — accepting
     // from any peer, not just the one we want. That is what makes lazy establishment safe: the
     // only thing a rank ever waits for is a HIGHER rank connecting to it, so the wait-for
     // relation runs strictly upward and cannot close a cycle, and a rank that is waiting is
     // still handing out every accept and acknowledgement it owes.
-    while (!have_link(target)) {
+    while (true) {
+        if (have_link(target)) {
+            // One more check before the link is handed out. A freeze inside this loop resumes
+            // with its clock where the dump left it (criu's time namespace), so the periodic
+            // check below can still be up to a second away when the link completes — and then
+            // nothing ever resets: the rank keeps the dump host's address in the registry and
+            // its dead descriptors, and every higher peer dials an address nobody listens on
+            // until its deadline (rank 1 of a serial K8 cut, 2026-09-27, mid-repair of its
+            // link to the rank dumped just before it). The reset discards the fresh link too;
+            // it is re-dialled from the new machine.
+            if (!reset_transport_if_relocated()) {
+                break;
+            }
+            restart_on_fresh_transport();
+            next_publish_attempt = 0;   // advertise the new address before anything else
+            continue;
+        }
         long now = monotonic_ms();
         if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
             static thread_local long last_bm_note = 0;
@@ -718,25 +760,7 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
         // establishment's HGETALL polls, and it also renews the TTL for long waits.
         if (now >= next_publish_attempt) {
             if (reset_transport_if_relocated()) {
-                // This loop's locals belong to the pre-relocation attempt; the connects in
-                // flight aimed at addresses that meant something on the old machine. Restart
-                // THIS establishment on the fresh transport, same target, same deadline.
-                for (auto& [rank, fd] : unconfirmed) {
-                    (void) rank;
-                    ::close(fd);
-                }
-                unconfirmed.clear();
-                ensure_listener();
-                // The dropped connect was this establishment's only path to a LOWER target:
-                // connect_batch consumed want_connect when it issued it, and nothing refills
-                // the queue once unconfirmed is cleared — without this the loop would
-                // publish and service until its whole deadline with no dial in flight
-                // (adversarial-review finding, confirmed).
-                if (target < peer_id &&
-                    std::find(want_connect.begin(), want_connect.end(), target) ==
-                            want_connect.end()) {
-                    want_connect.push_back(target);
-                }
+                restart_on_fresh_transport();
             }
             try {
                 publish_self(deadline_ms);

@@ -232,6 +232,11 @@ MUTS = [
   "    if (false) {\n        // Here and not only where servicing"),
  ("relocation_debts_on_every_peer","src/comm/DirectTCP.cpp",
   "            if (q != peer_id && severed[q]) {","            if (q != peer_id) {"),
+ # A link completed after a move must not be used before the relocation reset (TransportRecovery
+ # a_rank_moved_while_establishing_resets_before_it_uses_the_link).
+ ("establishment_exit_skips_relocation_check","src/comm/DirectTCP.cpp",
+  "            if (!reset_transport_if_relocated()) {\n                break;\n            }",
+  "            if (true) {\n                break;\n            }"),
  # listen_port_base must fix the port (TransportRecovery listen_port_base_gives_each_rank_*).
  ("listen_port_base_ignored","src/comm/DirectTCP.cpp",
   "        if (listen_port_base > 0) {\n            const long port",
