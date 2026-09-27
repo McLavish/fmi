@@ -48,6 +48,10 @@ FMI::Comm::DirectTCP::DirectTCP(std::map<std::string, std::string> params,
     registry_poll_interval_ms = std::stoi(TcpEndpoint::param_or(params, "registry_poll_interval_ms", "5"));
     connect_retry_interval_ms = std::stoi(TcpEndpoint::param_or(params, "connect_retry_interval_ms", "10"));
     registry_ttl_s = std::stoi(TcpEndpoint::param_or(params, "registry_ttl_s", "3600"));
+    listen_port_base = std::stoi(TcpEndpoint::param_or(params, "listen_port_base", "0"));
+    if (listen_port_base < 0 || listen_port_base > 65535) {
+        throw std::runtime_error("DirectTCP: listen_port_base must be between 0 and 65535");
+    }
     parse_tcp_params(params);
     parse_tcp_model_params(model_params);
     // Constructed but not connected: peer_id/num_peers/comm_name are pushed in after
@@ -149,14 +153,30 @@ void FMI::Comm::DirectTCP::ensure_listener() {
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(0); // let the kernel pick a free port
         if (!TcpEndpoint::resolve_ipv4(bind_host, addr.sin_addr)) {
             addr.sin_addr.s_addr = htonl(INADDR_ANY);
         }
-        if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-            std::string error = strerror(errno);
-            ::close(fd);
-            throw std::runtime_error("DirectTCP: bind to " + bind_host + " failed: " + error);
+        bool bound = false;
+        if (listen_port_base > 0) {
+            const long port = static_cast<long>(listen_port_base) + static_cast<long>(peer_id);
+            if (port <= 65535) {
+                addr.sin_port = htons(static_cast<std::uint16_t>(port));
+                bound = ::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
+            }
+            if (!bound) {
+                // Still a working rank, only without the fixed port's protection at restore.
+                std::fprintf(stderr, "[FMI] DirectTCP rank %u: cannot listen on port %ld (%s); "
+                             "using an ephemeral port\n", static_cast<unsigned>(peer_id), port,
+                             port <= 65535 ? strerror(errno) : "beyond 65535");
+            }
+        }
+        if (!bound) {
+            addr.sin_port = htons(0); // let the kernel pick a free port
+            if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+                std::string error = strerror(errno);
+                ::close(fd);
+                throw std::runtime_error("DirectTCP: bind to " + bind_host + " failed: " + error);
+            }
         }
         // SOMAXCONN, not a small constant: in a 32-rank binomial broadcast several peers issue
         // their SYN to the same rank simultaneously, and Linux silently drops the overflow —

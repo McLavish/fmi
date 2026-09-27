@@ -232,6 +232,10 @@ MUTS = [
   "    if (false) {\n        // Here and not only where servicing"),
  ("relocation_debts_on_every_peer","src/comm/DirectTCP.cpp",
   "            if (q != peer_id && severed[q]) {","            if (q != peer_id) {"),
+ # listen_port_base must fix the port (TransportRecovery listen_port_base_gives_each_rank_*).
+ ("listen_port_base_ignored","src/comm/DirectTCP.cpp",
+  "        if (listen_port_base > 0) {\n            const long port",
+  "        if (false) {\n            const long port"),
  ("ack_interval_may_reach_the_window","src/comm/TcpChannelBase.cpp",
   "    if (link_ack_interval >= link_window_frames) {","    if (false) {"),
  ("ack_frames_are_not_skipped","src/comm/TcpChannelBase.cpp",

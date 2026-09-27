@@ -159,7 +159,12 @@ DirectTCP requires inbound connectivity to each rank. For fixed hosts with
 multiple interfaces, set `advertise_host` to an address peers can reach; a
 load-balanced Kubernetes Service address cannot identify a particular rank.
 For cross-host checkpoint restore, **leave `advertise_host` empty** so the
-transport can discover its new address.
+transport can discover its new address. A criu image also carries the rank's
+listener, and the restore re-binds its port on the destination, where an
+ephemeral port may already be taken; `listen_port_base` (default 0, ephemeral)
+makes rank r listen on `listen_port_base + r`. Choose a base below the hosts'
+`ip_local_port_range`. If that port cannot be bound, the rank warns and falls
+back to an ephemeral port.
 
 `reset_transport_if_relocated()` detects a changed kernel boot ID, discards stale
 socket and discovery state, and marks each severed link for reconciliation. Each

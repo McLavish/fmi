@@ -6,6 +6,8 @@
 #include "../include/comm/DirectTCP.h"
 #include "forked_rank_guard.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <atomic>
@@ -44,6 +46,7 @@ namespace FMI::Comm {
         static bool owes_reconcile(const DirectTCP& t, FMI::Utils::peer_num p) {
             return p < t.link_needs_reconcile.size() && t.link_needs_reconcile[p];
         }
+        static int listen_port(const DirectTCP& t) { return t.listen_port; }
     };
 }
 #endif
@@ -584,6 +587,83 @@ BOOST_AUTO_TEST_CASE(a_restored_rank_redials_the_links_it_had_while_blocked_else
         BOOST_CHECK_MESSAGE(out->owes_zero == 0,
                             "the relocation reset planted a reconcile debt on a link that never existed");
     }
+}
+
+BOOST_AUTO_TEST_CASE(listen_port_base_gives_each_rank_its_port_across_a_relocation) {
+    // A criu image carries the rank's listening socket, and the restore re-binds that port on
+    // the destination, where an ephemeral port can already be in use (the E2 parallel K32
+    // restore that failed with EADDRINUSE, 2026-09-18). With listen_port_base, rank r listens
+    // on base + r, again after its relocation reset; a port that is taken costs only the
+    // protection, not the rank: it falls back to an ephemeral port.
+    constexpr int num_peers = 2;
+    constexpr int base = 7300;   // below the ephemeral range
+    const std::string name = "lport_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+            "_" + std::to_string(getpid());
+
+    struct Shared { int ok[num_peers]; int restored; int port0_before; int port0_after; int port1; };
+    Shared* out = static_cast<Shared*>(mmap(nullptr, sizeof(Shared), PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    std::memset(out, 0, sizeof(Shared));
+
+    ForkedRankGuard rank_guard;
+    int& peer_id = rank_guard.peer_id;
+    rank_guard.fork_ranks(num_peers);
+
+    int blocker = -1;
+    try {
+        if (peer_id == 1) {
+            // Something else already holds rank 1's port.
+            blocker = ::socket(AF_INET, SOCK_STREAM, 0);
+            struct sockaddr_in taken{};
+            taken.sin_family = AF_INET;
+            taken.sin_addr.s_addr = htonl(INADDR_ANY);
+            taken.sin_port = htons(base + 1);
+            if (::bind(blocker, reinterpret_cast<struct sockaddr*>(&taken), sizeof(taken)) != 0 ||
+                ::listen(blocker, 1) != 0) {
+                throw std::runtime_error("test setup: cannot occupy port " + std::to_string(base + 1));
+            }
+        }
+        auto params = dtcp_recover_params();
+        params["listen_port_base"] = std::to_string(base);
+        DirectTCP ch(params, dtcp_model());
+        ch.set_peer_id(peer_id);
+        ch.set_num_peers(num_peers);
+        ch.set_comm_name(name);
+
+        OperationScope scope(p2p_identity(0));
+        if (peer_id == 0) {
+            int got1 = -1, got2 = -1;
+            ch.recv({reinterpret_cast<char*>(&got1), sizeof(got1)}, 1);
+            out->port0_before = DirectTCPTestAccess::listen_port(ch);
+            DirectTCPTestAccess::restore_elsewhere(ch);
+            out->restored = 1;
+            ch.recv({reinterpret_cast<char*>(&got2), sizeof(got2)}, 1);   // repairs, resets
+            out->port0_after = DirectTCPTestAccess::listen_port(ch);
+            out->ok[0] = (got1 == 1 && got2 == 2);
+        } else {
+            int one = 1, two = 2;
+            ch.send({reinterpret_cast<char*>(&one), sizeof(one)}, 0);
+            out->port1 = DirectTCPTestAccess::listen_port(ch);
+            while (!out->restored) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            ch.send({reinterpret_cast<char*>(&two), sizeof(two)}, 0);
+            out->ok[1] = 1;
+        }
+        ch.finalize();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[rank %d] %s\n", peer_id, e.what());
+    }
+    if (blocker >= 0) {
+        ::close(blocker);
+    }
+
+    rank_guard.reap_ranks();
+    BOOST_CHECK_MESSAGE(out->ok[0] == 1 && out->ok[1] == 1, "the exchange across the relocation failed");
+    BOOST_CHECK_EQUAL(out->port0_before, base);
+    BOOST_CHECK_EQUAL(out->port0_after, base);
+    BOOST_CHECK_MESSAGE(out->port1 > 0 && out->port1 != base + 1,
+                        "rank 1 should have fallen back to an ephemeral port, got " << out->port1);
 }
 #endif // FMI_ENABLE_REDIS
 

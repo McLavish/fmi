@@ -161,6 +161,12 @@ namespace FMI::Comm {
 
         int listen_fd = -1;
         int listen_port = 0;
+        //! `listen_port_base` from the config: when positive, rank r listens on base + r
+        //! instead of an ephemeral port. A criu image carries its listener, and the restore
+        //! re-binds that port on the destination; an ephemeral one can already be taken
+        //! there. Choose a base below the hosts' ip_local_port_range. 0 (the default) keeps
+        //! the ephemeral port.
+        int listen_port_base = 0;
         std::uint64_t listener_nonce = 0;
         std::string advertised_ip;
 
