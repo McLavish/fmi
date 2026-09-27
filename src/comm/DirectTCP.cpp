@@ -712,6 +712,9 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
     // only thing a rank ever waits for is a HIGHER rank connecting to it, so the wait-for
     // relation runs strictly upward and cannot close a cycle, and a rank that is waiting is
     // still handing out every accept and acknowledgement it owes.
+    // Set when the rank turns out to have moved with the link already in hand: the new address
+    // must be in the registry before the link is handed out.
+    bool must_publish = false;
     while (true) {
         if (have_link(target)) {
             // One more check before the link is handed out. A freeze inside this loop resumes
@@ -720,14 +723,30 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             // nothing ever resets: the rank keeps the dump host's address in the registry and
             // its dead descriptors, and every higher peer dials an address nobody listens on
             // until its deadline (rank 1 of a serial K8 cut, 2026-09-27, mid-repair of its
-            // link to the rank dumped just before it). The reset discards the fresh link too;
-            // it is re-dialled from the new machine.
-            if (!reset_transport_if_relocated()) {
+            // link to the rank dumped just before it). The fresh link itself was made from the
+            // new machine and survives the reset: discarding it made the peer, mid-handshake
+            // on it, fail its repair a second time (the first fix did that; ranks crashed).
+            int kept = -1;
+            if (auto it = pending_links.find(target); it != pending_links.end()) {
+                kept = it->second;
+                pending_links.erase(it);
+            }
+            const bool moved = reset_transport_if_relocated();
+            if (kept >= 0) {
+                pending_links[target] = kept;
+            }
+            if (moved) {
+                if (have_link(target)) {
+                    ensure_listener();
+                } else {
+                    restart_on_fresh_transport();   // it was adopted already, and the reset took it
+                }
+                must_publish = true;
+                next_publish_attempt = 0;
+            }
+            if (!must_publish && have_link(target)) {
                 break;
             }
-            restart_on_fresh_transport();
-            next_publish_attempt = 0;   // advertise the new address before anything else
-            continue;
         }
         long now = monotonic_ms();
         if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
@@ -765,6 +784,7 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             try {
                 publish_self(deadline_ms);
                 next_publish_attempt = monotonic_ms() + 1000;
+                must_publish = false;
             } catch (const std::runtime_error&) {
                 next_publish_attempt = monotonic_ms() + registry_poll_interval_ms;
             }

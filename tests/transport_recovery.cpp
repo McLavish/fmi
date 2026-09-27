@@ -626,7 +626,7 @@ BOOST_AUTO_TEST_CASE(a_rank_moved_while_establishing_resets_before_it_uses_the_l
     };
     write_boot_id("machine-before");
 
-    struct Shared { int ok[num_peers]; int link_down; int reset_seen; };
+    struct Shared { int ok[num_peers]; int link_down; int reset_seen; int accepted; };
     Shared* out = static_cast<Shared*>(mmap(nullptr, sizeof(Shared), PROT_READ | PROT_WRITE,
                                             MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     std::memset(out, 0, sizeof(Shared));
@@ -658,6 +658,7 @@ BOOST_AUTO_TEST_CASE(a_rank_moved_while_establishing_resets_before_it_uses_the_l
             out->ok[1] = 1;
         } else {
             int warm = -1, after = -1;
+            const unsigned connections_before = DirectTCP::connection_count();
             ch.recv({reinterpret_cast<char*>(&warm), sizeof(warm)}, 1);
             DirectTCPTestAccess::reset_link(ch, 1);
             out->link_down = 1;
@@ -666,6 +667,7 @@ BOOST_AUTO_TEST_CASE(a_rank_moved_while_establishing_resets_before_it_uses_the_l
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             ch.recv({reinterpret_cast<char*>(&after), sizeof(after)}, 1);   // accepts it
             out->ok[0] = (warm == 10 && after == 11);
+            out->accepted = static_cast<int>(DirectTCP::connection_count() - connections_before);
         }
         ch.finalize();
     } catch (const std::exception& e) {
@@ -678,6 +680,9 @@ BOOST_AUTO_TEST_CASE(a_rank_moved_while_establishing_resets_before_it_uses_the_l
     BOOST_CHECK_MESSAGE(out->reset_seen == 1,
                         "rank 1 used a link it completed after moving without resetting its "
                         "transport: its registry entry still names the old machine");
+    // The warm-up link and the repair's: the link made from the new machine is kept, not
+    // replaced by a third, which is what killed peers mid-handshake at scale.
+    BOOST_CHECK_EQUAL(out->accepted, 2);
 }
 
 BOOST_AUTO_TEST_CASE(listen_port_base_gives_each_rank_its_port_across_a_relocation) {

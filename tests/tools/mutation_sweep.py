@@ -235,8 +235,13 @@ MUTS = [
  # A link completed after a move must not be used before the relocation reset (TransportRecovery
  # a_rank_moved_while_establishing_resets_before_it_uses_the_link).
  ("establishment_exit_skips_relocation_check","src/comm/DirectTCP.cpp",
-  "            if (!reset_transport_if_relocated()) {\n                break;\n            }",
-  "            if (true) {\n                break;\n            }"),
+  "            const bool moved = reset_transport_if_relocated();",
+  "            const bool moved = false;"),
+ # ...and keeps the link it just made from the new machine: discarding it kills the peer
+ # mid-handshake on it (same test: the exchange fails, and rank 0 accepts a third connection).
+ ("moved_link_discarded","src/comm/DirectTCP.cpp",
+  "            if (kept >= 0) {\n                pending_links[target] = kept;\n            }",
+  "            if (kept >= 0) {\n                ::close(kept);\n            }"),
  # listen_port_base must fix the port (TransportRecovery listen_port_base_gives_each_rank_*).
  ("listen_port_base_ignored","src/comm/DirectTCP.cpp",
   "        if (listen_port_base > 0) {\n            const long port",
