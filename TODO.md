@@ -123,6 +123,17 @@ The old claim that neither mechanism had been measured is obsolete.
   but future re-entry could make collective counters count internal work.
   Define and enforce the nesting contract.
 
+- [ ] **A drain test assumes the acceptor has filed once its reply arrives.**
+  `a_failed_event_does_not_swallow_the_migrate_behind_it` injects a leave notice
+  as soon as `WiredPeer::greet` returns, but `exchange_hello_as_acceptor` sends
+  its reply before `file_link`. A notice applied in that gap finds no
+  descriptor, so the drain the test expects never runs, and the receive waits
+  out `migration_max_ms` instead. It fails in most runs on slimfly18, at
+  7d31136 and at 92ced7b alike: the stale-notice check of 92ced7b does not apply
+  to notices without an incarnation. Either the test waits until the link is
+  filed, or the acceptor files before it replies, holding the link lock until
+  the reply is out. The second also closes the gap outside the tests.
+
 ## 2. Structural duplication
 
 DirectTCP and DrainTCP duplicate connection establishment. Moving DrainTCP under
