@@ -185,6 +185,17 @@ it to `inbound`, and closes it. Two message orderings need explicit handling:
 - **Notice after restore:** reject an old leave notice when the link or recorded
   peer epoch already belongs to a newer incarnation. Otherwise, it could tear
   down a valid replacement connection.
+- **Notice during a reconnect:** a restored rank reads, from its saved cursor,
+  the leave notices its peers' previous incarnations wrote after it sealed. One
+  can arrive while the hello to that peer's restored incarnation is in flight,
+  before the link records the new incarnation, so neither check above can tell
+  it is stale. The link records which incarnation wrote the notice that opened
+  its window (`notice_incarnation`). When the hello completes with a newer
+  incarnation, the notice is treated as stale: the window closes and the
+  connection is kept. Before this check, the dialer dropped such a connection
+  while the acceptor, already filed, could be writing into it; a 125-rank
+  global checkpoint in fmi-spot-migration lost 744 and 23,064 bytes that way
+  (2026-10-05) and failed at the next hello's counter check.
 
 A dialer rechecks draining state before installing a connection. The acceptor
 allows the restored peer's new connection. Application threads retain their byte

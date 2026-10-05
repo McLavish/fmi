@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -219,6 +220,12 @@ namespace FMI::Comm {
             //! Highest lineage seen from this peer. A hello claiming a lower one is a
             //! superseded process and is refused.
             std::uint64_t peer_incarnation = 0;
+            //! The lineage that wrote the leave notice which opened this link's current window,
+            //! or the maximum when no notice with a lineage did (a notice without one, a drain the
+            //! data path inferred, this rank's own migration). A dial whose hello then proves it
+            //! reached a NEWER lineage has raced a notice that was stale -- read late, after this
+            //! rank's own restore -- and keeps the connection the acceptor has already filed.
+            std::uint64_t notice_incarnation = std::numeric_limits<std::uint64_t>::max();
             //! Set by the control thread, thrown by the application thread. The control thread
             //! must never throw: it would terminate the process while application threads are
             //! parked on link state it holds.
@@ -339,7 +346,12 @@ namespace FMI::Comm {
          * @param refuse_while_draining  what to do when a drain of this link began *during* the
          *        establishment — the whole of which runs with `l.mu` released: registry lookup,
          *        connect, two 56-byte moves. The answer differs by direction, and the asymmetry
-         *        is the protocol's, not an implementation detail:
+         *        is the protocol's, not an implementation detail. One case comes first, for
+         *        both directions: a window opened by a leave notice that an OLDER lineage wrote
+         *        than the one this hello reached was opened by a stale notice, read late after
+         *        this rank's own restore. It is closed and the connection filed, as
+         *        `apply_leave_notice` would have treated the notice had the link been filed
+         *        already (`notice_incarnation`). Otherwise:
          *        - **Dialing (true).** A drain that started mid-dial means the peer really is
          *          leaving: an application thread cannot even enter an establishment on a link
          *          that is already draining, so the notice (or the FIN the data path inferred one

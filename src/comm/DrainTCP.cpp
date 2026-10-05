@@ -653,7 +653,22 @@ bool FMI::Comm::DrainTCP::file_link(Utils::peer_num peer, int fd, std::uint64_t 
                                     bool refuse_while_draining) {
     LinkState& l = link(peer);
     std::lock_guard<std::mutex> lock(l.mu);
-    if (refuse_while_draining && l.draining) {
+    if (l.draining && l.notice_incarnation != std::numeric_limits<std::uint64_t>::max() &&
+        peer_incarnation > l.notice_incarnation && !l.drain_unconfirmed) {
+        // The window was opened by a leave notice written by a lineage this hello has just
+        // proved replaced: a notice read late, after this rank's own restore, and applied in the
+        // gap between the hello and this filing (both ends have one). Dialing, refusing would drop
+        // a connection the restored peer has already filed and may be writing into; accepting,
+        // keeping the window would park this link on a migration that is over
+        // (fmi-spot-migration, 2026-10-05). It is the confirmation the stale branch of
+        // apply_leave_notice would have taken it for, had the link been filed already.
+        BOOST_LOG_TRIVIAL(info) << "DrainTCP: rank " << peer_id << " kept a connection to "
+                                << "incarnation " << peer_incarnation << " of peer " << peer
+                                << ": the leave notice it raced was written by incarnation "
+                                << l.notice_incarnation;
+        l.peer_migrating = false;
+        close_migration_window_locked(l, monotonic_ms());
+    } else if (refuse_while_draining && l.draining) {
         // Re-checked here and not only at the top of the establishment: everything in between
         // runs with this lock released, so a leave notice can be applied in the gap — and it has
         // already taken its "the fd is -1, nothing to close" branch, which it will not take
@@ -1406,6 +1421,7 @@ void FMI::Comm::DrainTCP::close_migration_window_locked(LinkState& l, long now_m
         l.draining = false;
     }
     l.drain_unconfirmed = false;
+    l.notice_incarnation = std::numeric_limits<std::uint64_t>::max();
 }
 
 void FMI::Comm::DrainTCP::release_batch_state() noexcept {
@@ -1924,6 +1940,7 @@ void FMI::Comm::DrainTCP::apply_leave_notice(Utils::peer_num peer, std::uint64_t
         l.draining = true;
         l.draining_since_ms = monotonic_ms();
     }
+    l.notice_incarnation = leaver_incarnation;
     // Confirmed by the control plane: whatever the data path guessed, this is the answer.
     l.drain_unconfirmed = false;
     // And it stays true across this rank's own migration, if one follows: the restore leg closes

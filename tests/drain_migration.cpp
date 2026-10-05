@@ -1884,6 +1884,132 @@ BOOST_AUTO_TEST_CASE(a_drain_that_could_not_start_gives_the_batch_back) {
     ch->finalize();
 }
 
+/*
+ * Reproduction of the failure of fmi-spot-migration's first stage-3 pass (2026-10-05,
+ * benchmarks/pipeline/FIRSTPASS.md, trial f11-global_cr-k8-t1, links 8->2 and 4->3).
+ *
+ * After a restore, a rank reads from its saved cursor the leave notices that its peers' PREVIOUS
+ * lineage wrote after this rank sealed. One of them lands while this rank is dialling that peer's
+ * RESTORED lineage. The link still records the old lineage (file_link() has not run), so
+ * apply_leave_notice() cannot tell the notice is stale and marks the link draining; file_link()
+ * then refuses the connection and the dialer closes it. The acceptor filed its end the moment its
+ * reply went out (exchange_hello_as_acceptor), and its application writes at once: those bytes
+ * are discarded with the socket. The restore notice of the peer, read on the next control tick,
+ * reopens the link; the dialer's next hello is short of what the acceptor sent, the acceptor
+ * refuses it, and the dialer times out.
+ *
+ * What a correct channel does: deliver every byte the restored lineage sent. This test asserts
+ * that; it failed on 7d31136.
+ */
+BOOST_AUTO_TEST_CASE(a_stale_leave_notice_during_a_dial_to_the_restored_lineage_loses_no_byte) {
+    const std::string name = unique_comm("staledial");
+    auto ch = make_drain_channel(1, 2, name, drain_params("none", 4000, 5000, 4000));
+    auto* fake = new FakeDrainCoordinator();
+    ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
+    ch->on_registered();
+
+    PeerRegistry registry("127.0.0.1", 6379);
+    WiredListener restored;                 // peer 0's restored lineage, incarnation 1
+    restored.bind_and_publish(name, 0, registry);
+
+    constexpr std::size_t payload = 744;    // what rank 2 sent rank 8 inside the window
+    std::vector<char> got(payload, 0);
+    std::string outcome = "still running";
+    std::thread app([&]() {
+        try {
+            ch->recv({got.data(), payload}, 0);
+            outcome = "received";
+        } catch (const std::exception& e) {
+            outcome = e.what();
+        }
+    });
+
+    ResumeRecord first;
+    BOOST_REQUIRE_NO_THROW(first = restored.accept_hello(5000));
+    BOOST_TEST_MESSAGE("first hello from the dialer: incarnation " << first.sender_incarnation
+                       << ", sent " << first.bytes_sent << ", received " << first.bytes_received);
+    // One control tick, inside the window: the peer's PREVIOUS lineage's leave notice (incarnation
+    // 0), read late from the stream.
+    fake->inject(DrainEvent::Type::Leaving, 0, 0, {{"incarnation", "0"}});
+    BOOST_REQUIRE_NO_THROW(ch->poll_control_events());
+    // The restored lineage answers and its application writes at once, as rank 2's did.
+    BOOST_REQUIRE_NO_THROW(restored.reply(first, 1, 0, 0));
+    std::vector<char> data(payload, 'x');
+    const ssize_t written = ::send(restored.conn, data.data(), payload, MSG_NOSIGNAL);
+    BOOST_TEST_MESSAGE("the restored lineage wrote " << written << " bytes after its reply");
+
+    // Did the dialer keep the connection? A close with our bytes unread arrives as EOF or a reset.
+    bool dropped = false;
+    {
+        struct pollfd pfd{restored.conn, POLLIN, 0};
+        if (::poll(&pfd, 1, 2000) > 0) {
+            char byte = 0;
+            const ssize_t n = ::recv(restored.conn, &byte, 1, MSG_DONTWAIT);
+            dropped = (n == 0) || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
+        }
+    }
+    BOOST_TEST_MESSAGE("the dialer " << (dropped ? "DROPPED" : "kept") << " the connection");
+
+    // The next control tick: the restored lineage's own notice, which reopens the link.
+    fake->inject(DrainEvent::Type::Restored, 0, 1);
+    BOOST_REQUIRE_NO_THROW(ch->poll_control_events());
+
+    if (dropped) {
+        ::close(restored.conn);
+        restored.conn = -1;
+        try {
+            ResumeRecord second = restored.accept_hello(3000);
+            BOOST_TEST_MESSAGE("second hello from the dialer: received " << second.bytes_received
+                               << " of the " << written << " bytes the restored lineage sent");
+            // The real acceptor refuses a hello whose counters disagree: it closes without a reply.
+            ::close(restored.conn);
+            restored.conn = -1;
+        } catch (const std::exception& e) {
+            BOOST_TEST_MESSAGE("no second hello: " << e.what());
+        }
+    }
+    app.join();
+    BOOST_TEST_MESSAGE("the application's receive ended with: " << outcome);
+
+    BOOST_CHECK_MESSAGE(!dropped, "a stale leave notice made the dialer drop the connection to the "
+                                  "restored lineage after that lineage had filed it");
+    BOOST_CHECK_MESSAGE(outcome == "received" && got == data,
+                        "the bytes the restored lineage sent were lost: " << outcome);
+    ch->finalize();
+}
+
+//! The control: the same exchange with no stale notice. The restored lineage's bytes arrive.
+BOOST_AUTO_TEST_CASE(control_the_same_dial_without_the_stale_notice_loses_nothing) {
+    const std::string name = unique_comm("staledialcontrol");
+    auto ch = make_drain_channel(1, 2, name, drain_params("none", 4000, 5000, 4000));
+    auto* fake = new FakeDrainCoordinator();
+    ch->set_coordinator_for_testing(std::unique_ptr<DrainCoordinator>(fake));
+    ch->on_registered();
+    PeerRegistry registry("127.0.0.1", 6379);
+    WiredListener restored;
+    restored.bind_and_publish(name, 0, registry);
+    constexpr std::size_t payload = 744;
+    std::vector<char> got(payload, 0);
+    std::string outcome = "still running";
+    std::thread app([&]() {
+        try {
+            ch->recv({got.data(), payload}, 0);
+            outcome = "received";
+        } catch (const std::exception& e) {
+            outcome = e.what();
+        }
+    });
+    ResumeRecord first;
+    BOOST_REQUIRE_NO_THROW(first = restored.accept_hello(5000));
+    BOOST_REQUIRE_NO_THROW(restored.reply(first, 1, 0, 0));
+    std::vector<char> data(payload, 'x');
+    ::send(restored.conn, data.data(), payload, MSG_NOSIGNAL);
+    app.join();
+    BOOST_TEST_MESSAGE("control: the application's receive ended with: " << outcome);
+    BOOST_CHECK(outcome == "received" && got == data);
+    ch->finalize();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 #endif // FMI_ENABLE_REDIS
