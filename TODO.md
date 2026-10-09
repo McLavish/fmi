@@ -133,6 +133,12 @@ The old claim that neither mechanism had been measured is obsolete.
   to notices without an incarnation. Either the test waits until the link is
   filed, or the acceptor files before it replies, holding the link lock until
   the reply is out. The second also closes the gap outside the tests.
+  The second was tried once and failed: 466f5ea (2026-09-13) filed the link
+  before the reply and had the dialer record the peer's incarnation under the
+  lock. It was reverted on 2026-09-16 because DrainTCP microbenchmark cells at
+  128 ranks then timed out, 7 of 9, against 18 of 18 passing at its parent
+  00acd96; it failed on the Broadwell machines too. The commit is not kept. A
+  second attempt has to show 128-rank DrainTCP runs passing, not only the test.
 
 ## 2. Structural duplication
 
