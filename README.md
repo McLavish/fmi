@@ -17,22 +17,24 @@ Applications, benchmark results, and migration drivers live in
 |---|---|---|
 | `Direct` | TCP connections established through TCPunch NAT traversal | A TCPunch rendezvous server |
 | `DirectTCP` | Direct TCP connections | Reachable rank addresses and Redis for discovery |
-| `DrainTCP` | Direct TCP with coordinated socket draining | Reachable rank addresses and Redis for discovery and migration control |
+| `LocalDrain` | Direct TCP between ranks that can be moved to another host | Reachable rank addresses and a host manager on every host |
 | `Redis` | Values in a shared Redis instance | A Redis server |
 | `S3` | Objects in a shared bucket | An S3-compatible service |
 
-`Direct` and `DirectTCP` support **Retain-and-Replay**: set `framed` and
-`recover_links` to `true` to retain messages until acknowledged and replay them
-when a connection is rebuilt (a message is one frame of at most
-`link_max_frame_bytes`, 16 MiB unless the config raises it). **Local Drain** uses `DrainTCP` with `drain: true`
-to move socket data into process memory before a planned checkpoint. Store
-backends use `recover: true` to reconnect and retry store operations.
+**Local Drain** is the migration mechanism. A rank that has to leave its host
+closes its connections and reads them to EOF, so that every byte in flight is in
+process memory. It then stops without a socket, is checkpointed from outside, and
+continues on another host, where its peers reconnect. The application makes no
+checkpoint call. `DirectTCP` is the same wire without any of this: it is the
+baseline. Store backends use `recover: true` to reconnect and retry store
+operations.
 
-These mechanisms support externally driven checkpoint and restore without
-application checkpoint calls. They do not reconstruct a lost process: restoring
-a rank requires its checkpoint image. Local Drain also requires coordination
-before the connection is lost. See the [design guide](docs/design/README.md) for
-protocol details and limitations.
+Local Drain moves a rank that was told to leave. It does not reconstruct a lost
+process: a rank that dies ends the job. The host manager and the coordinator that
+drive a move are part of
+[fmi-spot-migration](https://github.com/McLavish/fmi-spot-migration); its
+`runtime/DESIGN.md` is the design record. See the
+[design guide](docs/design/README.md) for what this library holds.
 
 ## Build and use the C++ library
 
@@ -46,7 +48,7 @@ cmake -S . -B build -DFMI_ENABLE_S3=OFF -DFMI_ENABLE_TCPUNCH=OFF
 cmake --build build -j"$(nproc)"
 ```
 
-This configuration builds the Redis, DirectTCP, and DrainTCP backends. For the
+This configuration builds the Redis, DirectTCP, and LocalDrain backends. For the
 full build, test setup, and dependency options, see [CLAUDE.md](CLAUDE.md).
 
 To use FMI from another CMake project:
@@ -97,8 +99,7 @@ Collective calls take explicit type descriptors such as
 ## Documentation and citation
 
 - [Developer guide](CLAUDE.md): builds, tests, architecture, and configuration.
-- [Protocol design](docs/design/README.md): Retain-and-Replay and Local Drain.
-- [TLA+ models](docs/tla/README.md): checked properties and model limitations.
+- [Protocol design](docs/design/README.md): Local Drain.
 - [Open work](TODO.md): known defects and proposed improvements.
 - [Original ICS 2023 paper](https://spcl.inf.ethz.ch/Publications/.pdf/2023_ics_fmi.pdf)
   and [original thesis](https://doi.org/10.3929/ethz-b-000532425): the original FMI
