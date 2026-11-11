@@ -15,18 +15,21 @@ code changes.
 Nothing below has a number. Each needs one before the paper or a record states
 it.
 
-- [ ] **Plain DirectTCP against its last measured version.** The data path is
-  the same loop with the sequenced-link branches removed, and the wire is
-  unchanged. The publication of the address changed: once per establishment,
-  where it was repeated every second while an establishment waited. Parts 1 and
-  2 of the evaluation have to be measured again on the cluster with this build.
-  One number exists: a two-rank ping-pong on loopback (fmi-spot-migration,
-  `benchmarks/REDESIGN-LOOPBACK-2026-11-11.md`), where old and new DirectTCP
-  agree within 2 % from 8 B to 1 MiB.
-- [ ] **Steady-state cost of `LocalDrain` against DirectTCP**, at 2 to 128 ranks,
-  for small and for large messages (see §3, the 4 MiB case). On loopback with
-  two ranks (the same record) `LocalDrain` equals the old `DrainTCP` within 1 %
-  and DirectTCP within 2 %, up to 1 MiB.
+- [x] **Plain DirectTCP against its last measured version, Part 1.** Measured
+  on the cluster on 2026-11-11 at `7942dce` (fmi-spot-migration,
+  `benchmarks/overhead/RESULTS-redesign.md`): over 36 shape, ladder and
+  application cells the baseline is 1.50 % faster in the median than in October.
+  Since `7942dce` it builds its link name only when the socket is missing
+  (818 user instructions fewer per ping-pong iteration), so it is not October's
+  baseline.
+- [ ] **Part 2 of the evaluation (the migration experiments)** has to be
+  measured again on the cluster with this build.
+- [x] **Steady-state cost of `LocalDrain` against DirectTCP**, at 2 to 128 ranks.
+  Same record: median +0.55 % over the 36 cells (28 within 2 %), +0.08 to
+  +0.39 µs on a two-rank round trip of 30 µs up to 1 KiB, 316 user and 304 kernel
+  instructions more per ping-pong iteration. Large messages are not resolved:
+  from 4 KiB the runs of one arm differ by up to a factor of 2.8 (see §3, the
+  4 MiB case).
 - [x] **128 ranks and a real checkpoint**, as development runs on 2026-11-11
   (fmi-spot-migration, `benchmarks/REDESIGN-CLUSTER-DEVRUNS-2026-11-11.md`): LULESH
   at 125 ranks and HPCCG at 128 ranks on the cluster's four machines, with up to
@@ -36,7 +39,8 @@ it.
   (`runtime/tests/test_local_moves.py` there). Not a measurement window.
 - [ ] **`Direct` (TCPunch) and S3 were not compiled** after the change to
   `TcpChannelBase` and `Channel.h`: the TCPunch submodule and the AWS SDK were
-  not on the machine. The Python binding was not built either.
+  not on the machine. (The Python binding is built in the benchmark tree and
+  carried four workloads in the window of 2026-11-11.)
 
 ## 1. Defects of the first Local Drain channel, and what became of them
 
@@ -60,6 +64,16 @@ it.
 
 ## 2. Correctness
 
+- [ ] **`finalize()` during a leave.** `finalize()` says `bye` once, before it
+  waits for the service thread, and swallows a failure. A rank that finalizes
+  while it is leaving has no control link at that moment: it comes back on its
+  new host and ends without `bye`, and the host manager there reports it lost,
+  so a job that had finished is reported failed. Seen on 2026-11-11 with a move
+  in the last moments of an 8-rank LULESH (fmi-spot-migration,
+  `runtime/DESIGN.md` section 11); not reproduced in a test here yet. Smallest
+  fix: `finalize()` waits for a leave in progress to end and then says `bye` on
+  the link the rank has then. Not made on 2026-11-11 so that the library stayed
+  the commit the overhead window measured.
 - [ ] **`LocalDrain` after `fork`.** A child that inherits a started channel has
   its descriptors and none of its service thread. The tests fork before a
   channel starts. Decide whether a started channel must refuse to be used in a
@@ -121,6 +135,12 @@ it.
 
 ## 5. Configuration and build
 
+- [ ] **Leftovers to drop with the next change.** The `s<peer>=` and `r<peer>=`
+  counters in a rank's `drained` line: the host manager no longer reads them
+  (the coordinator's comparison was removed on 2026-11-11; the two ends of a
+  link compare their counters at reconnect). The `trim_heap` setting: it exists
+  so that a stop with and without the trim could be measured, and that
+  measurement was not run; keep the trim or drop it, without a switch.
 - [ ] Consolidate test-only JSON configurations under tests or generate them from
   a shared base. Preserve the relative-path behavior expected by test execution.
 - [ ] Remove unused model blocks for backends a configuration never enables.
