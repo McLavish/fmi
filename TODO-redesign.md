@@ -64,16 +64,13 @@ it.
 
 ## 2. Correctness
 
-- [ ] **`finalize()` during a leave.** `finalize()` says `bye` once, before it
-  waits for the service thread, and swallows a failure. A rank that finalizes
-  while it is leaving has no control link at that moment: it comes back on its
-  new host and ends without `bye`, and the host manager there reports it lost,
-  so a job that had finished is reported failed. Seen on 2026-11-11 with a move
-  in the last moments of an 8-rank LULESH (fmi-spot-migration,
-  `runtime/DESIGN.md` section 11); not reproduced in a test here yet. Smallest
-  fix: `finalize()` waits for a leave in progress to end and then says `bye` on
-  the link the rank has then. Not made on 2026-11-11 so that the library stayed
-  the commit the overhead window measured.
+- [x] **`finalize()` during a leave** (`9cf040e`, 2026-11-11). `finalize()` said `bye` once,
+  before it waited for the service thread, and swallowed a failure, so a rank that finalized
+  while it was leaving ended on its new host without `bye` and was reported lost. Now
+  `finalize()` waits for a move that has started and says `bye` on the link the rank has
+  then, and a leave that arrives once `finalize()` has begun is not started. Seen with a move
+  in the last moments of an 8-rank LULESH (fmi-spot-migration, `runtime/DESIGN.md`); the
+  timing that failed 3 times out of 3 before gives 10 jobs out of 10 done.
 - [ ] **`LocalDrain` after `fork`.** A child that inherits a started channel has
   its descriptors and none of its service thread. The tests fork before a
   channel starts. Decide whether a started channel must refuse to be used in a
@@ -135,12 +132,11 @@ it.
 
 ## 5. Configuration and build
 
-- [ ] **Leftovers to drop with the next change.** The `s<peer>=` and `r<peer>=`
-  counters in a rank's `drained` line: the host manager no longer reads them
-  (the coordinator's comparison was removed on 2026-11-11; the two ends of a
-  link compare their counters at reconnect). The `trim_heap` setting: it exists
-  so that a stop with and without the trim could be measured, and that
-  measurement was not run; keep the trim or drop it, without a switch.
+- [x] **Leftovers.** The `trim_heap` setting is gone (`6a61e7e`): the heap is always trimmed
+  before a stop, as in every run so far. The `s<peer>=` and `r<peer>=` counters in a rank's
+  `drained` line stay: the host manager no longer reads them, but three cases of
+  `tests/local_drain.cpp` check the counters through them.
+
 - [ ] Consolidate test-only JSON configurations under tests or generate them from
   a shared base. Preserve the relative-path behavior expected by test execution.
 - [ ] Remove unused model blocks for backends a configuration never enables.
