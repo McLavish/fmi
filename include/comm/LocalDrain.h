@@ -111,10 +111,25 @@ namespace FMI::Comm {
 
         //! The budget of one operation, with the time it waited out a move taken off.
         struct OperationClock {
+            bool running = false;
             long started_ms = 0;
             long budget_ms = 0;
             long credited_ms = 0;
             std::uint64_t baseline = 0;
+
+            //! Starts the budget, once: the first time the operation cannot go on at once. An
+            //! operation whose system call takes the whole message never reads the time.
+            //! Called with the link's lock held, like every other use of the clock, so an
+            //! operation that had to wait for that lock while a drain held it has not started
+            //! yet and is not charged for the wait.
+            void start(long now_ms, long budget, std::uint64_t link_total) {
+                if (!running) {
+                    running = true;
+                    started_ms = now_ms;
+                    budget_ms = budget;
+                    baseline = link_total;
+                }
+            }
 
             void absorb(std::uint64_t link_total) {
                 credited_ms += static_cast<long>(link_total - baseline);

@@ -1151,6 +1151,7 @@ void FMI::Comm::LocalDrain::ensure_link(Utils::peer_num peer, long deadline_ms) 
 void FMI::Comm::LocalDrain::wait_for_link(std::unique_lock<std::mutex>& lock, LinkState& l,
                                           Utils::peer_num peer, OperationClock& clock) {
     const long now = monotonic_ms();
+    clock.start(now, static_cast<long>(max_timeout), l.migration_ms_total);
     clock.absorb(l.migration_ms_total);
     if (l.draining) {
         const long elapsed = now - l.draining_since_ms;
@@ -1176,19 +1177,17 @@ void FMI::Comm::LocalDrain::wait_for_link(std::unique_lock<std::mutex>& lock, Li
 
 // --------------------------------------------------------------------------------- data path
 
+// One turn with the link's lock per system call, and nothing before the first one: the turn
+// checks that the link can be used, makes the call and counts its bytes. That turn is what a
+// drain needs (it takes the same lock, so it falls between two calls and the counters are
+// exact); a message that the kernel takes or gives whole costs exactly one. The budget of an
+// operation starts the first time it cannot go on at once (OperationClock::start), and a link
+// that does not exist yet is built from inside the loop, by the thread that wants it.
+
 void FMI::Comm::LocalDrain::send_object(channel_data buf, Utils::peer_num rcpt_id) {
     ensure_started();
     LinkState& l = link(rcpt_id);
     OperationClock clock;
-    {
-        // The clock starts under the lock. An operation that had to wait here for a drain to
-        // let go has not started yet, and is not charged for that wait.
-        std::lock_guard<std::mutex> lock(l.mu);
-        clock.started_ms = monotonic_ms();
-        clock.budget_ms = static_cast<long>(max_timeout);
-        clock.baseline = l.migration_ms_total;
-    }
-    ensure_link(rcpt_id, clock.deadline(monotonic_ms()));
     std::size_t moved = 0;
 
     while (moved < buf.len) {
@@ -1203,9 +1202,11 @@ void FMI::Comm::LocalDrain::send_object(channel_data buf, Utils::peer_num rcpt_i
                 continue;
             }
             if (l.fd < 0) {
-                // The thread that wants the link rebuilds it, and continues at its offset.
+                // The thread that wants the link builds it, and continues at its offset.
+                const long now = monotonic_ms();
+                clock.start(now, static_cast<long>(max_timeout), l.migration_ms_total);
                 clock.absorb(l.migration_ms_total);
-                const long deadline = clock.deadline(monotonic_ms());
+                const long deadline = clock.deadline(now);
                 lock.unlock();
                 ensure_link(rcpt_id, deadline);
                 continue;
@@ -1223,8 +1224,10 @@ void FMI::Comm::LocalDrain::send_object(channel_data buf, Utils::peer_num rcpt_i
                 continue;
             }
             if (err == EAGAIN || err == EWOULDBLOCK) {
+                const long now = monotonic_ms();
+                clock.start(now, static_cast<long>(max_timeout), l.migration_ms_total);
                 clock.absorb(l.migration_ms_total);
-                if (clock.expired(monotonic_ms())) {
+                if (clock.expired(now)) {
                     throw Utils::Timeout();
                 }
                 wait_fd = l.fd;
@@ -1258,14 +1261,8 @@ void FMI::Comm::LocalDrain::recv_object(channel_data buf, Utils::peer_num sender
     ensure_started();
     LinkState& l = link(sender_id);
     OperationClock clock;
-    {
-        std::lock_guard<std::mutex> lock(l.mu);
-        clock.started_ms = monotonic_ms();
-        clock.budget_ms = static_cast<long>(max_timeout);
-        clock.baseline = l.migration_ms_total;
-    }
-    // No establishment before the loop: bytes that a drain moved into memory are delivered as
-    // far as the counters go, and a message they complete needs no connection at all.
+    // Bytes that a drain moved into memory are delivered before any connection is looked at,
+    // as far as the counters go: a message they complete needs no connection at all.
     std::size_t moved = 0;
 
     while (moved < buf.len) {
@@ -1293,8 +1290,10 @@ void FMI::Comm::LocalDrain::recv_object(channel_data buf, Utils::peer_num sender
                 continue;
             }
             if (l.fd < 0) {
+                const long now = monotonic_ms();
+                clock.start(now, static_cast<long>(max_timeout), l.migration_ms_total);
                 clock.absorb(l.migration_ms_total);
-                const long deadline = clock.deadline(monotonic_ms());
+                const long deadline = clock.deadline(now);
                 lock.unlock();
                 ensure_link(sender_id, deadline);
                 continue;
@@ -1310,8 +1309,10 @@ void FMI::Comm::LocalDrain::recv_object(channel_data buf, Utils::peer_num sender
                 continue;
             }
             if (n < 0 && (err == EAGAIN || err == EWOULDBLOCK)) {
+                const long now = monotonic_ms();
+                clock.start(now, static_cast<long>(max_timeout), l.migration_ms_total);
                 clock.absorb(l.migration_ms_total);
-                if (clock.expired(monotonic_ms())) {
+                if (clock.expired(now)) {
                     throw Utils::Timeout();
                 }
                 wait_fd = l.fd;

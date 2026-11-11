@@ -631,6 +631,109 @@ BOOST_AUTO_TEST_CASE(an_operation_that_waits_out_a_move_keeps_its_budget) {
     r1->finalize();
 }
 
+//! Small messages at full rate while a rank moves again and again. Each message is taken or
+//! given whole by one system call, under one turn with the link's lock: the turn a drain has
+//! to fall between. Every message carries its number, so one that a move lost, repeated or
+//! put out of order breaks the count on the spot. First the receiving rank moves, then the
+//! sending one.
+BOOST_AUTO_TEST_CASE(numbered_messages_at_full_rate_stay_in_order_across_moves) {
+    TestHost host;
+    const std::string job = unique_job("rate");
+    auto r0 = make_rank(host.path(), 0, 2, job);
+    auto r1 = make_rank(host.path(), 1, 2, job);
+    ping_pong(r1, 1, r0, 0, 1);
+
+    const int moves_per_direction = 12;
+    for (int direction = 0; direction < 2; direction++) {
+        const Rank& from = direction == 0 ? r0 : r1;
+        const Rank& to = direction == 0 ? r1 : r0;
+        const unsigned from_rank = direction == 0 ? 0 : 1;
+        const unsigned to_rank = 1 - from_rank;
+        std::atomic<bool> stop{false};
+        std::atomic<long> received{0};
+        long sent = 0;
+        std::string send_failure;
+        std::string receive_failure;
+        std::thread sender([&]() {
+            try {
+                int number = 0;
+                for (; !stop.load(std::memory_order_relaxed); number++) {
+                    send_int(from, number, to_rank);
+                }
+                sent = number;
+                send_int(from, -1, to_rank);   // the end of the stream
+            } catch (const std::exception& e) {
+                send_failure = e.what();
+            }
+        });
+        std::thread receiver([&]() {
+            try {
+                for (int want = 0;; want++) {
+                    const int got = recv_int(to, from_rank);
+                    if (got == -1) {
+                        return;
+                    }
+                    if (got != want) {
+                        receive_failure = "message " + std::to_string(want) + " arrived as " +
+                                          std::to_string(got);
+                        return;
+                    }
+                    received.fetch_add(1, std::memory_order_relaxed);
+                }
+            } catch (const std::exception& e) {
+                receive_failure = e.what();
+            }
+        });
+        long slowest_ms = 0;
+        std::string each_ms;
+        bool moved_every_time = true;
+        for (int i = 0; i < moves_per_direction && moved_every_time; i++) {
+            // The stream must be running when the move is asked for, or the move would fall
+            // into a pause and prove nothing.
+            const long before = received.load();
+            moved_every_time = wait_until([&]() { return received.load() > before + 500; }, 10000);
+            if (!moved_every_time) {
+                break;
+            }
+            const auto asked = std::chrono::steady_clock::now();
+            TestHost::Drained report;
+            const std::string move = host.leave(job, 1, false);
+            moved_every_time = host.wait_drained(job, 1, move, 10000, &report) &&
+                               wait_until([&]() { return r1->is_held(); }, 10000);
+            const long took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - asked).count();
+            slowest_ms = std::max(slowest_ms, took_ms);
+            each_ms += " " + std::to_string(took_ms);
+            if (!moved_every_time) {
+                break;
+            }
+            BOOST_CHECK_EQUAL(r1->open_sockets(), 0);
+            const std::uint64_t next = r1->generation() + 1;
+            r1->release_hold();
+            moved_every_time = host.wait_here(job, 1, next, 10000) &&
+                               wait_until([&]() { return !r1->is_held() && r1->generation() == next; },
+                                          10000);
+        }
+        stop.store(true);
+        sender.join();
+        receiver.join();
+        BOOST_CHECK(moved_every_time);
+        BOOST_CHECK_MESSAGE(send_failure.empty(), "the sender failed: " << send_failure);
+        BOOST_CHECK_MESSAGE(receive_failure.empty(), "the receiver failed: " << receive_failure);
+        BOOST_CHECK_EQUAL(received.load(), sent);
+        BOOST_CHECK_GT(received.load(), 500L * moves_per_direction);
+        BOOST_TEST_MESSAGE("direction " << direction << ": " << sent << " messages across "
+                                        << moves_per_direction << " moves, each drained and held"
+                                        << each_ms << " ms after it was asked for");
+        // A drain has to get its turn with the lock even while a stream runs flat out.
+        BOOST_CHECK_LT(slowest_ms, 2000);
+    }
+    BOOST_CHECK_EQUAL(r1->generation(), 2u * moves_per_direction);
+    r0->finalize();
+    r1->finalize();
+    BOOST_CHECK_EQUAL(host.failures(), 0);
+}
+
 //! The real stop. A forked rank raises SIGSTOP when it is drained; at that moment it owns no
 //! socket, which is what lets its image be restored on any host. SIGCONT stands in for the
 //! restore.
