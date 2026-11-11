@@ -1,5 +1,8 @@
 # Developer guide
 
+> **On the `redesign` branch, read [CLAUDE-redesign.md](CLAUDE-redesign.md) instead.** This file
+> is the first system's guide and is otherwise unchanged.
+
 Read [README.md](README.md) for the public API and project overview. FMI is a
 C++17 library with a Boost.Python binding. This repository contains the library;
 applications, deployment tools, benchmarks, and migration drivers are maintained
@@ -23,7 +26,7 @@ also a submodule.
 | CMake option | Default | Effect |
 |---|---|---|
 | `FMI_ENABLE_S3` | `ON` | Builds S3; requires the AWS SDK for C++ |
-| `FMI_ENABLE_REDIS` | `ON` | Builds Redis and DirectTCP, with their hiredis-based helpers |
+| `FMI_ENABLE_REDIS` | `ON` | Builds Redis, DirectTCP, DrainTCP, and their hiredis-based helpers |
 | `FMI_ENABLE_TCPUNCH` | `ON` | Builds Direct and links the TCPunch submodule |
 | `FMI_USE_STATIC_BOOST` | `ON` | Requests static Boost libraries |
 | `FMI_BUILD_TESTS` | `OFF` | Builds the Boost.Test executable |
@@ -97,15 +100,14 @@ For the full build above:
 cd build/tests
 ./Boost_Tests_run
 ./Boost_Tests_run --run_test=Communicator/reduce
-./Boost_Tests_run --run_test=LocalDrainChannel
+./Boost_Tests_run --run_test=LinkLayer
 ./Boost_Tests_run --list_content
 ```
 
-Most tests require services. DirectTCP uses Redis for discovery. Direct requires
-`tcpunchd` on port 10000. With `FMI_ENABLE_TCPUNCH=OFF`, the communicator tests
-select DirectTCP and need no rendezvous server. The Local Drain tests need no
-service: they start their own test host manager (`tests/test_host.h`). Adjust the
-directory above for `build-local` or `build-s3`.
+Most tests require services. DirectTCP uses Redis for discovery, and the identity
+tests also use Redis as the data plane. Direct requires `tcpunchd` on port 10000.
+With `FMI_ENABLE_TCPUNCH=OFF`, the communicator tests select DirectTCP and need no
+rendezvous server. Adjust the directory above for `build-local` or `build-s3`.
 
 S3 failure tests use a local fake endpoint. Tests that require a real bucket skip
 unless `FMI_S3_TEST_BUCKET` is set; optional settings are
@@ -126,8 +128,8 @@ The call path is **Communicator → ChannelPolicy → Channel → backend**.
 | `Communicator` | Public point-to-point and collective API over `Data<T>` |
 | `ChannelPolicy` | Chooses a backend using the operation, message size, model parameters, and `fast` or `cheap` hint |
 | `PeerToPeer` | Implements collectives in terms of send and receive primitives |
-| `TcpChannelBase` | Shared plain socket data path for Direct and DirectTCP |
-| `LocalDrain` | Plain TCP data path of a rank that can leave its host and come back; derives from PeerToPeer |
+| `TcpChannelBase` | Shared raw and framed socket data paths for Direct and DirectTCP |
+| `DrainTCP` | Raw TCP data path with coordinated draining; derives from PeerToPeer |
 | `ClientServer` | Implements collectives through shared-store upload and download |
 | `RecoverableClientServer` | Store recovery behavior shared by Redis and S3 |
 
@@ -137,72 +139,101 @@ associativity and commutativity flags; those flags determine valid algorithms
 and evaluation order. Python wrappers return results directly and use explicit
 `fmi.types(...)` descriptors.
 
+`OperationScope` publishes operation identity in thread-local state so frames can
+be checked against the receive that consumes them. A scope saves and replaces the
+previous identity, then restores it on exit. Normal collective implementations
+call channel primitives within the communicator's scope. The implementation does
+**not** enforce the old comment's claim that the outermost nested scope wins.
+
 Configuration has two main blocks: `backends` enables and configures transports;
 `model` provides their cost parameters and `FaaS.gib_second_price`. Only enabled
 backends are constructed. A build option and a configuration flag have different
 effects: disabling a backend in JSON does not remove its code from the binary.
 
-### DirectTCP
-
-DirectTCP is the plain channel: the wire carries payload and nothing else, a rank
-stays where it started, and a link that breaks ends the job. It is the baseline
-that Local Drain is measured against.
+### DirectTCP discovery and relocation
 
 Each rank publishes an ephemeral listening address and nonce in the Redis hash
 `fmi:direct:<comm_name>`. Higher rank IDs dial lower IDs. A 32-byte hello checks
 that the connection reached the intended listener. Connections are established
-as operations need them, and a rank keeps accepting while it waits in a read or a
-write. Use [config/fmi_direct_tcp.json](config/fmi_direct_tcp.json) as a starting
-point.
+as operations need them. Use [config/fmi_direct_tcp.json](config/fmi_direct_tcp.json)
+as a starting point.
 
-DirectTCP requires inbound connectivity to each rank. For hosts with multiple
-interfaces, set `advertise_host` to an address peers can reach; a load-balanced
-Kubernetes Service address cannot identify a particular rank.
+DirectTCP requires inbound connectivity to each rank. For fixed hosts with
+multiple interfaces, set `advertise_host` to an address peers can reach; a
+load-balanced Kubernetes Service address cannot identify a particular rank.
+For cross-host checkpoint restore, **leave `advertise_host` empty** so the
+transport can discover its new address. A criu image also carries the rank's
+listener, and the restore re-binds its port on the destination, where an
+ephemeral port may already be taken; `listen_port_base` (default 0, ephemeral)
+makes rank r listen on `listen_port_base + r`. Choose a base below the hosts'
+`ip_local_port_range`. If that port cannot be bound, the rank warns and falls
+back to an ephemeral port.
 
-`framed` and `recover_links` are refused with an error: sequenced links
-(Retain-and-Replay) were removed on 2026-11-11.
+`reset_transport_if_relocated()` detects a changed kernel boot ID, discards stale
+socket and discovery state, and marks each severed link for reconciliation. Each
+rebuilt link then performs its handshake and replay. Publication also refreshes
+the advertised address. A same-host restore does not trigger the boot-ID reset.
+
+### Retain-and-Replay
+
+On Direct or DirectTCP, `framed: true` adds operation identity and sequence fields.
+`recover_links: true` also retains sent payloads until acknowledged and replays
+the unacknowledged suffix after reconnecting. Both flags default to false, and
+recovery requires framing. A message is always one frame, never fragmented;
+`link_max_frame_bytes` (default 16 MiB) caps its size on both ends of a link and
+is read from the backend config like `link_window_frames`, `link_ack_interval`
+and `link_retention_limit_bytes`. Raise it for applications whose messages are
+larger; the sender refuses a larger message by name.
+
+The current wire format is version 4: a **42-byte frame header** and **30-byte
+handshake payload**. Serialized link snapshots use version 3. Rebuild every rank
+together when changing wire versions; mixed versions can fail during the initial
+read, before a version error is reported. The old sequenced-link incarnation
+fence was removed in version 4; DrainTCP still uses incarnations separately.
+
+A receiver acknowledges data only after the whole payload is in application
+memory or a receive queue. Queued frames must be consumed in order. One-way
+traffic needs standalone ACKs to free sender retention. Progress comes from
+application calls that service sockets; there is no background replay engine
+that runs through arbitrary compute phases. See the
+[implementation rules](docs/design/2026-07-30-sequenced-links-implementation.md)
+and [model limitations](docs/tla/README.md).
 
 ### Local Drain
 
-`LocalDrain` uses a plain byte stream, with no header and no retained copy per
-message. It is the one channel whose ranks can be moved. The design, the messages
-of the control link and the rules of rank state are in fmi-spot-migration's
-`runtime/DESIGN.md`; read it before changing this channel.
+DrainTCP uses a raw byte stream, with no frame header or retained copy per
+message. Per-link locks protect individual nonblocking I/O steps; waits happen
+outside the lock so a drain can interrupt an operation between chunks. A
+56-byte connection record checks incarnations and byte counters after reconnect.
+A control thread accepts connections even while the application is computing.
 
-**Control link.** A rank connects to the host manager of its host over a Unix
-socket (`host_link` in the config, or `FMI_HOST_LINK` in the environment, which
-wins). It registers there (`hello`), asks there where a peer listens (`where`),
-gets rows of the rank table (`rank`), and is told there to leave (`leave`). The
-channel uses no Redis and polls nothing.
+With `drain: true`, `MigrationTrigger` handles process-wide migration requests and
+`DrainCoordinator` exchanges events through Redis. Only **one armed drain channel
+per process** is supported. Every rank must include `control` in its `trigger`
+setting so peers can cooperate with a migration; `both` includes signal and
+control requests.
 
-**Service thread.** One thread per channel sleeps in epoll on the listener, the
-control link and every peer link. It accepts connections while the application
-computes, notices a peer that closes, and runs the whole leave sequence.
+Migration closes the establishment gate, publishes `leaving`, parks the control
+thread, and locks the links. It half-closes all peer sockets before draining all
+of them to EOF into process memory. It then publishes `sealed`, closes remaining
+service connections, trims the heap, and stops the process. After restore it
+advances the epoch and incarnation, binds and advertises a fresh listener,
+publishes `restored`, and releases the locks. Peer connections reopen lazily.
+Rehearsal uses the same sequence without an external checkpoint.
 
-**Rank state only moves forward.** A row is `here` or `leaving` at a generation,
-or `gone`. A rank applies a row only if it is newer than the one it holds
-(`RankTable`), so repeated, late and reordered rows change nothing.
+The intended timeout policy excludes migration time from normal I/O budgets and
+uses `migration_max_ms` to bound migration waits. **Two defects reproduced on
+2026-09-07 remain open:** operations entered during a held drain lock can lose
+that time credit, and stale queued control requests can trigger another migration
+after restore. See [TODO.md](TODO.md). A larger `max_timeout` does not fix the
+stale-request defect.
 
-**Leaving.** On `leave`, the service thread waits for connections that are being
-built, closes the listener, takes every link lock, half-closes every peer socket
-and reads each to EOF into process memory. It reports `drained` with the byte
-counters of every link, closes the control link last, and stops the process with
-no socket left (`stop: sigstop`; `stop: hold` waits in place and exists for
-tests). After the restore it opens a new listener, registers the next generation,
-asks again for every peer it knew, waits for `synced`, and releases the locks.
-Links reopen when an operation needs them, and the 56-byte hello compares the
-byte counters of both ends. A rank that cannot drain reports `failed` and breaks
-its links: a move that fails ends the job.
-
-**A peer that leaves.** The FIN is the signal: the peer of a leaving rank closes
-its side as soon as it reads EOF, without waiting for a message. The row confirms
-that the close was a move. A close that no row explains within `drain_grace_ms`
-is a death and ends the job. A peer that finalized (`gone`) is a timeout for an
-operation that still waited for it.
-
-**Timeouts.** Time an operation spends waiting out a move is not charged to
-`max_timeout`, whether the operation began before the move or during it;
-`migration_max_ms` bounds the wait for a peer to come back.
+Local Drain handles planned migration. An unexpected connection loss becomes a
+terminal error if no matching leave notice arrives within `drain_grace_ms`.
+Cross-host CRIU restore requires privileges that preserve the source's
+`CLOCK_MONOTONIC` through a time namespace; `--unprivileged` can inherit a different
+host clock and expire deadlines immediately. See the
+[drain protocol](docs/design/2026-08-11-neighborhood-drain-protocol.md).
 
 ### Redis and S3 recovery
 
@@ -240,16 +271,14 @@ the same application call after a timeout.
 
 ## Maintenance constraints
 
-There is one migration mechanism, Local Drain. Retain-and-Replay (sequenced
-links: frames, retention, acknowledgments, replay), the first Local Drain channel
-(`DrainTCP` with its Redis coordinator and trigger thread) and the relocation
-logic of DirectTCP were removed on 2026-11-11. Their last version is the tag
-`pre-redesign`. Do not bring a second mechanism back without a decision recorded
-in fmi-spot-migration's `runtime/DESIGN.md`.
+Keep both migration mechanisms; their different overheads are measured in
+fmi-spot-migration. Do not treat the absence of a per-message drain header as the
+absence of thread, discovery, or code-size costs.
 
-`LocalDrain` does not derive from `TcpChannelBase`: its links are closed and
-reopened while operations are in flight, so every step of its data path runs
-under a per-link lock and resumes at a byte offset. `TcpChannelBase` has neither.
+DrainTCP and DirectTCP duplicate some connection-establishment code.
+`TcpChannelBase` does not own their listeners, registries, or dial loops, so
+reparenting DrainTCP would not remove most of that duplication. Its raw stream
+must also resume at a byte offset rather than restart at a frame boundary.
 
 Preserve the independent correctness fixes already carried by this fork:
 ClientServer scan bounds and reduction order, scan counter advancement on
