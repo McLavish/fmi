@@ -1554,9 +1554,14 @@ void FMI::Comm::LocalDrain::leave(const std::string& move) {
     const bool gated = gate.try_lock_for(std::chrono::milliseconds(std::max<long>(establish_yield_ms, 1)));
     drain_pending.store(false, std::memory_order_release);
     if (!gated) {
+        // The same end as a drain that fails below: a move that could not complete ends the
+        // job. Links that let go for this move are marked as draining and would otherwise wait
+        // for a rank that never left.
         BOOST_LOG_TRIVIAL(error) << "LocalDrain: rank " << peer_id << " could not leave: an "
                                  << "establishment still held the gate after " << establish_yield_ms
                                  << " ms";
+        break_every_link("broken by a move that could not start: an establishment did not let go",
+                         false);
         try {
             say("failed move=" + move + " reason=establishment");
         } catch (const std::exception&) {
