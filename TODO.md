@@ -27,12 +27,13 @@ it.
   for small and for large messages (see §3, the 4 MiB case). On loopback with
   two ranks (the same record) `LocalDrain` equals the old `DrainTCP` within 1 %
   and DirectTCP within 2 %, up to 1 MiB.
-- [ ] **128 ranks.** The tests run at most 8 ranks, as threads of one process
-  (two cases fork one rank), on loopback. The first Local Drain channel had a defect that appeared only at 128
-  ranks (466f5ea, reverted).
-- [ ] **A real checkpoint.** The tests stop a rank with `SIGSTOP` and continue it
-  with `SIGCONT` in place, and check that it owns no socket at the stop. No test
-  dumps and restores a rank with CRIU, on the same host or on another.
+- [x] **128 ranks and a real checkpoint**, as development runs on 2026-11-11
+  (fmi-spot-migration, `benchmarks/REDESIGN-CLUSTER-DEVRUNS-2026-11-11.md`): LULESH
+  at 125 ranks and HPCCG at 128 ranks on the cluster's four machines, with up to
+  16 moves of a whole host (criu dump, stream, restore on another machine), give
+  the result of the run without a move. Five applications and the eight
+  communication shapes do the same at 8 ranks on one machine
+  (`runtime/tests/test_local_moves.py` there). Not a measurement window.
 - [ ] **`Direct` (TCPunch) and S3 were not compiled** after the change to
   `TcpChannelBase` and `Channel.h`: the TCPunch submodule and the AWS SDK were
   not on the machine. The Python binding was not built either.
