@@ -20,8 +20,13 @@ it.
   unchanged. The publication of the address changed: once per establishment,
   where it was repeated every second while an establishment waited. Parts 1 and
   2 of the evaluation have to be measured again on the cluster with this build.
+  One number exists: a two-rank ping-pong on loopback (fmi-spot-migration,
+  `benchmarks/REDESIGN-LOOPBACK-2026-11-11.md`), where old and new DirectTCP
+  agree within 2 % from 8 B to 1 MiB.
 - [ ] **Steady-state cost of `LocalDrain` against DirectTCP**, at 2 to 128 ranks,
-  for small and for large messages (see §3, the 4 MiB case).
+  for small and for large messages (see §3, the 4 MiB case). On loopback with
+  two ranks (the same record) `LocalDrain` equals the old `DrainTCP` within 1 %
+  and DirectTCP within 2 %, up to 1 MiB.
 - [ ] **128 ranks.** The tests run at most 8 ranks, as threads of one process
   (two cases fork one rank), on loopback. The first Local Drain channel had a defect that appeared only at 128
   ranks (466f5ea, reverted).
