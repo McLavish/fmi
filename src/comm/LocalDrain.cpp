@@ -157,7 +157,6 @@ FMI::Comm::LocalDrain::LocalDrain(std::map<std::string, std::string> params,
     } else {
         throw std::runtime_error("LocalDrain: stop must be sigstop or hold, not " + stop);
     }
-    trim_heap = TcpEndpoint::param_or(params, "trim_heap", "true") != "false";
 
     bandwidth = std::stod(model_params.at("bandwidth"));
     overhead = std::stod(model_params.at("overhead"));
@@ -1645,11 +1644,8 @@ void FMI::Comm::LocalDrain::leave(const std::string& move) {
     control_buffer.clear();
 
 #if defined(__GLIBC__)
-    if (trim_heap) {
-        // Free memory that malloc still holds would travel in the image. Giving it back costs
-        // time before the stop; `trim_heap` exists so that both can be measured.
-        ::malloc_trim(0);
-    }
+    // Free memory that malloc still holds would travel in the image.
+    ::malloc_trim(0);
 #endif
     std::fflush(nullptr);
     const long stopping_ms = monotonic_ms();
@@ -1675,8 +1671,7 @@ void FMI::Comm::LocalDrain::leave(const std::string& move) {
                             << own_generation.load(std::memory_order_acquire) << " after "
                             << (monotonic_ms() - started_ms) << " ms (drained in "
                             << (drained_ms - started_ms) << " ms, "
-                            << (stopping_ms - drained_ms) << " ms to the stop"
-                            << (trim_heap ? " with the heap trimmed" : "") << ", "
+                            << (stopping_ms - drained_ms) << " ms to the stop, "
                             << (monotonic_ms() - continued_ms) << " ms to come back)";
 }
 

@@ -219,7 +219,6 @@ namespace FMI::Comm {
         long migration_max_ms = 120000;
         long establish_yield_ms = 2000;
         bool stop_by_signal = true;
-        bool trim_heap = true;
 
         double bandwidth = 0.;
         double overhead = 0.;
