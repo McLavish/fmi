@@ -154,13 +154,24 @@ void FMI::Comm::TcpChannelBase::read_all(Utils::peer_num sender_id, char* data, 
     }
 }
 
+// The name of a link is needed to build the link, and for nothing after that. FMI built it on
+// every operation: a string per message, and a heap allocation once the name passes 15
+// characters. Measured on a compute node, that was about 400 cycles of every ping-pong
+// iteration (fmi-spot-migration, benchmarks/REDESIGN-OVERHEAD-ATTRIBUTION-2026-11-11.md). As
+// the baseline of the overhead experiments this channel must not carry a cost that plain TCP
+// does not have, so the name is built only when the socket is missing.
+
 void FMI::Comm::TcpChannelBase::send_object(channel_data buf, Utils::peer_num rcpt_id) {
-    check_socket(rcpt_id, link_name(rcpt_id, true));
+    if (rcpt_id >= sockets.size() || sockets[rcpt_id] == -1) {
+        check_socket(rcpt_id, link_name(rcpt_id, true));
+    }
     write_all(rcpt_id, buf.buf, buf.len);
 }
 
 void FMI::Comm::TcpChannelBase::recv_object(channel_data buf, Utils::peer_num sender_id) {
-    check_socket(sender_id, link_name(sender_id, false));
+    if (sender_id >= sockets.size() || sockets[sender_id] == -1) {
+        check_socket(sender_id, link_name(sender_id, false));
+    }
     read_all(sender_id, buf.buf, buf.len);
 }
 
