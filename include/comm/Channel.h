@@ -106,8 +106,8 @@ namespace FMI::Comm {
          * The first point at which a channel knows its rank, the communicator's size and its
          * name, and therefore the first point at which it may bind a listener, publish itself to
          * a registry or start a thread. A channel that must be reachable before its first
-         * collective arms here rather than on the first data-path call: DrainTCP binds its
-         * listener, publishes, starts its control thread and attaches the migration trigger, so
+         * collective starts here rather than on the first data-path call: LocalDrain binds its
+         * listener, registers with its host manager and starts its service thread, so
          * a rank that is compute-bound for its first seconds still answers dials and is present
          * in the registry when its peers look for it. Must not throw. register_channel runs from
          * the Communicator constructor, and a channel that could not arm early reports that from

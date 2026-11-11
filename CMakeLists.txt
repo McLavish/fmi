@@ -24,7 +24,7 @@ if (hasParent)
 endif()
 
 find_package(Boost COMPONENTS log REQUIRED)
-# DrainTCP runs a control thread per channel; every backend links against the same library.
+# LocalDrain runs a service thread per channel; every backend links against the same library.
 find_package(Threads REQUIRED)
 
 if(NOT FMI_USE_STATIC_BOOST)
@@ -48,6 +48,7 @@ set(FMI_SOURCES
     src/comm/SequencedLink.cpp
     src/comm/TcpChannelBase.cpp
     src/comm/TcpEndpoint.cpp
+    src/comm/LocalDrain.cpp
 )
 
 set(FMI_LINK_LIBS
@@ -69,7 +70,7 @@ endif()
 
 if(FMI_ENABLE_REDIS)
     find_package(hiredis REQUIRED)
-    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp src/comm/DrainTCP.cpp src/comm/DrainCoordinator.cpp src/comm/PeerRegistry.cpp src/utils/MigrationTrigger.cpp)
+    list(APPEND FMI_SOURCES src/comm/Redis.cpp src/comm/DirectTCP.cpp src/comm/PeerRegistry.cpp)
     list(APPEND FMI_LINK_LIBS ${HIREDIS_LIBRARIES})
 endif()
 

@@ -6,8 +6,8 @@
 #if FMI_ENABLE_REDIS
 #include "../../include/comm/Redis.h"
 #include "../../include/comm/DirectTCP.h"
-#include "../../include/comm/DrainTCP.h"
 #endif
+#include "../../include/comm/LocalDrain.h"
 #if FMI_ENABLE_TCPUNCH
 #include "../../include/comm/Direct.h"
 #endif
@@ -38,12 +38,8 @@ std::shared_ptr<FMI::Comm::Channel> FMI::Comm::Channel::get_channel(std::string 
 #else
         throw std::runtime_error("DirectTCP backend was disabled at build time");
 #endif
-    } else if (name == "DrainTCP") {
-#if FMI_ENABLE_REDIS
-        return std::make_shared<DrainTCP>(params, model_params);
-#else
-        throw std::runtime_error("DrainTCP backend was disabled at build time");
-#endif
+    } else if (name == "LocalDrain") {
+        return std::make_shared<LocalDrain>(params, model_params);
     } else {
         throw std::runtime_error("Unknown channel name passed");
     }
