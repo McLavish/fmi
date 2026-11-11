@@ -157,6 +157,7 @@ FMI::Comm::LocalDrain::LocalDrain(std::map<std::string, std::string> params,
     } else {
         throw std::runtime_error("LocalDrain: stop must be sigstop or hold, not " + stop);
     }
+    trim_heap = TcpEndpoint::param_or(params, "trim_heap", "true") != "false";
 
     bandwidth = std::stod(model_params.at("bandwidth"));
     overhead = std::stod(model_params.at("overhead"));
@@ -1630,6 +1631,7 @@ void FMI::Comm::LocalDrain::leave(const std::string& move) {
         return;
     }
     held_gate = std::move(gate);
+    const long drained_ms = monotonic_ms();
 
     // 6. The control link goes last. After this the rank owns no socket at all.
     {
@@ -1642,9 +1644,14 @@ void FMI::Comm::LocalDrain::leave(const std::string& move) {
     control_buffer.clear();
 
 #if defined(__GLIBC__)
-    ::malloc_trim(0);
+    if (trim_heap) {
+        // Free memory that malloc still holds would travel in the image. Giving it back costs
+        // time before the stop; `trim_heap` exists so that both can be measured.
+        ::malloc_trim(0);
+    }
 #endif
     std::fflush(nullptr);
+    const long stopping_ms = monotonic_ms();
 
     if (stop_by_signal) {
         // The host manager, this rank's parent, sees the stop and checkpoints it. Execution
@@ -1658,11 +1665,18 @@ void FMI::Comm::LocalDrain::leave(const std::string& move) {
         held.store(false, std::memory_order_release);
     }
 
+    const long continued_ms = monotonic_ms();
     come_back();
+    // The clock of a restored rank does not count the time it was an image: the times below
+    // are the rank's own, before its stop and after its continue.
     BOOST_LOG_TRIVIAL(info) << "LocalDrain: rank " << peer_id << " of " << comm_name
                             << " is back at generation "
                             << own_generation.load(std::memory_order_acquire) << " after "
-                            << (monotonic_ms() - started_ms) << " ms";
+                            << (monotonic_ms() - started_ms) << " ms (drained in "
+                            << (drained_ms - started_ms) << " ms, "
+                            << (stopping_ms - drained_ms) << " ms to the stop"
+                            << (trim_heap ? " with the heap trimmed" : "") << ", "
+                            << (monotonic_ms() - continued_ms) << " ms to come back)";
 }
 
 void FMI::Comm::LocalDrain::come_back() {
