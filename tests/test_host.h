@@ -134,6 +134,17 @@ public:
         });
     }
 
+    //! Wait until @p rank has said `bye`, and return the generation it had then in @p at.
+    bool wait_bye(const std::string& job, unsigned rank, long timeout_ms, std::uint64_t* at) {
+        std::unique_lock<std::mutex> lock(mu);
+        const bool seen = changed.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                                           [&]() { return byes.count({job, rank}) > 0; });
+        if (seen && at != nullptr) {
+            *at = byes[{job, rank}];
+        }
+        return seen;
+    }
+
     [[nodiscard]] std::uint64_t generation_of(const std::string& job, unsigned rank) {
         std::lock_guard<std::mutex> lock(mu);
         return table[{job, rank}].generation;
@@ -275,6 +286,7 @@ private:
                 // it. The row itself is forgotten when the link closes.
                 const auto it = table.find({conn.job, conn.rank});
                 if (it != table.end()) {
+                    byes[{conn.job, conn.rank}] = it->second.generation;
                     const std::string line = "rank rank=" + std::to_string(conn.rank) + " generation=" +
                                              std::to_string(it->second.generation) + " state=gone";
                     for (auto& [other_fd, other] : conns) {
@@ -369,6 +381,7 @@ private:
     std::map<int, Conn> conns;
     std::map<std::pair<std::string, unsigned>, Row> table;
     std::map<std::pair<std::string, unsigned>, Drained> drained;
+    std::map<std::pair<std::string, unsigned>, std::uint64_t> byes;   // the generation at the goodbye
     int moves = 0;
     int failed = 0;
 };

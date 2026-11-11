@@ -471,6 +471,63 @@ BOOST_AUTO_TEST_CASE(a_peer_that_finalized_is_a_timeout) {
     r0->finalize();
 }
 
+//! An application that ends while its rank is being moved: finalize() waits for the move, and
+//! the goodbye is said on the control link the rank has when it is back. Said during the move
+//! it went nowhere, and the rank then ended on its new host without a word (2026-11-11: a move
+//! in the last moments of a job was reported as a lost rank).
+BOOST_AUTO_TEST_CASE(a_rank_that_finalizes_while_it_leaves_says_goodbye_once_it_is_back) {
+    TestHost host;
+    const std::string job = unique_job("lastmove");
+    auto r0 = make_rank(host.path(), 0, 2, job);
+    auto r1 = make_rank(host.path(), 1, 2, job);
+    ping_pong(r1, 1, r0, 0, 3);
+    move_out(host, job, r1, 1);          // drained, its control link closed, waiting in place
+    BOOST_CHECK_EQUAL(r1->open_sockets(), 0);
+
+    r1->finalize();                      // lets the rank go (stop=hold) and waits until it is back
+    std::uint64_t at = 99;
+    BOOST_REQUIRE(host.wait_bye(job, 1, 10000, &at));
+    BOOST_CHECK_EQUAL(at, 1u);           // said after the hello of generation 1, not before
+    BOOST_CHECK_EQUAL(r1->generation(), 1u);
+    r0->finalize();
+    BOOST_CHECK_EQUAL(host.failures(), 0);
+}
+
+//! A leave that arrives when the application has begun to end is not started: the rank says
+//! goodbye instead, and never stops itself.
+BOOST_AUTO_TEST_CASE(a_rank_that_is_finalizing_does_not_leave) {
+    for (int round = 0; round < 20; round++) {
+        TestHost host;
+        const std::string job = unique_job("ending");
+        auto r0 = make_rank(host.path(), 0, 2, job);
+        auto r1 = make_rank(host.path(), 1, 2, job);
+        ping_pong(r1, 1, r0, 0, 3);
+        // The request and the end race, each a little ahead in turn. Whichever comes first,
+        // the rank must end with a goodbye and must not be left waiting in place.
+        std::thread ender([&]() {
+            if (round % 2 == 1) {
+                std::this_thread::sleep_for(std::chrono::microseconds(30 * round));
+            }
+            r1->finalize();
+        });
+        if (round % 2 == 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(30 * round));
+        }
+        try {
+            host.leave(job, 1);
+        } catch (const std::runtime_error&) {
+            // The rank has finalized and closed its control link already.
+        }
+        ender.join();
+        std::uint64_t at = 99;
+        BOOST_REQUIRE(host.wait_bye(job, 1, 10000, &at));
+        BOOST_CHECK(at == 0u || at == 1u);   // before it left, or after it was back
+        BOOST_CHECK(!r1->is_held());
+        r0->finalize();
+        BOOST_CHECK_EQUAL(host.failures(), 0);
+    }
+}
+
 //! D12: a row that is older than what a rank knows changes nothing, however it is worded.
 BOOST_AUTO_TEST_CASE(a_stale_row_changes_nothing) {
     TestHost host;

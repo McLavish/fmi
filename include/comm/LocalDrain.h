@@ -271,6 +271,14 @@ namespace FMI::Comm {
         //! True from the request to leave until the rank is back. A second request that arrives
         //! in between is kept and acted on afterwards.
         bool in_transition = false;
+        //! A move and finalize() exclude each other. finalize() waits for a move that has
+        //! started, so that the goodbye is said on the control link the rank has when it is
+        //! back; a leave that arrives once finalize() has begun is not started, because a rank
+        //! that ends is not moved. Guards in_transition (written by the service thread) and
+        //! finalizing.
+        std::mutex transition_mutex;
+        std::condition_variable transition_done;
+        bool finalizing = false;
         std::string deferred_leave_move;
         std::uint64_t deferred_leave_generation = 0;
         std::unique_lock<std::shared_timed_mutex> held_gate;

@@ -430,6 +430,22 @@ void FMI::Comm::LocalDrain::finalize() {
     finalized = true;
     const bool was_started = started.exchange(false, std::memory_order_acq_rel);
     if (was_started) {
+        {
+            // A move that has started ends first: the goodbye is then said on the control link
+            // this rank has when it is back, on whichever host that is. Said earlier it would
+            // go nowhere (a rank that leaves has closed its control link), and the rank would
+            // end on its new host without a word, which a host manager takes for a death.
+            // From here on a leave is not started (leave()).
+            std::unique_lock<std::mutex> lock(transition_mutex);
+            finalizing = true;
+            if (in_transition && !stop_by_signal) {
+                // stop=hold: a rank that waits in place is let go, as a restore would.
+                lock.unlock();
+                release_hold();
+                lock.lock();
+            }
+            transition_done.wait(lock, [this]() { return !in_transition; });
+        }
         try {
             say("bye");
         } catch (const std::exception&) {
@@ -1541,11 +1557,27 @@ void FMI::Comm::LocalDrain::drain_all_links() {
 void FMI::Comm::LocalDrain::leave(const std::string& move) {
     const std::uint64_t generation = own_generation.load(std::memory_order_acquire);
     const long started_ms = monotonic_ms();
-    in_transition = true;
+    {
+        std::lock_guard<std::mutex> lock(transition_mutex);
+        if (finalizing) {
+            // The application is ending: finalize() says `bye` in a moment, and that tells the
+            // host manager what became of this rank. A rank that ends is not moved.
+            BOOST_LOG_TRIVIAL(info) << "LocalDrain: rank " << peer_id << " of " << comm_name
+                                    << " does not leave (move " << move << "): it is finalizing";
+            return;
+        }
+        in_transition = true;
+    }
     struct Done {
-        bool& flag;
-        ~Done() { flag = false; }
-    } done{in_transition};
+        LocalDrain& self;
+        ~Done() {
+            {
+                std::lock_guard<std::mutex> lock(self.transition_mutex);
+                self.in_transition = false;
+            }
+            self.transition_done.notify_all();
+        }
+    } done{*this};
     BOOST_LOG_TRIVIAL(info) << "LocalDrain: rank " << peer_id << " of " << comm_name
                             << " leaves at generation " << generation << " (move " << move << ")";
 
@@ -1601,7 +1633,7 @@ void FMI::Comm::LocalDrain::leave(const std::string& move) {
         // 4. Half-close all, read all to EOF.
         drain_all_links();
 
-        // 5. The report, with the counters the coordinator compares pair by pair.
+        // 5. The report, with this rank's byte counters for every peer.
         std::string line = "drained move=" + move + " generation=" + std::to_string(generation);
         for (Utils::peer_num p = 0; p < links.size(); p++) {
             if (p == peer_id) {
