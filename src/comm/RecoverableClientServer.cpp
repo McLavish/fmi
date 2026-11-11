@@ -30,10 +30,9 @@ namespace {
 
 FMI::Comm::RecoverableClientServer::RecoverableClientServer(std::map<std::string, std::string> params)
         : ClientServer(params) {
-    // Exact-string "true", the convention TcpChannelBase::parse_tcp_params uses for framed and
-    // recover_links (src/comm/TcpChannelBase.cpp:21-22). Config values reach a channel as an
-    // untyped map<string, string>, so anything that is not literally "true" — "1", "yes", "True"
-    // — leaves the flag off, in both places, rather than each backend inventing its own spelling.
+    // Exact-string "true". Config values reach a channel as an untyped map<string, string>, so
+    // anything that is not literally "true" — "1", "yes", "True" — leaves the flag off, rather
+    // than each backend inventing its own spelling.
     recover = params.count("recover") > 0 && params.at("recover") == "true";
     if (params.count("object_ttl_s") > 0 && !params.at("object_ttl_s").empty()) {
         try {

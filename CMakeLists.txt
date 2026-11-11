@@ -44,8 +44,6 @@ set(FMI_SOURCES
     src/comm/RecoverableClientServer.cpp
     src/utils/ChannelPolicy.cpp
     src/comm/PeerToPeer.cpp
-    src/comm/OperationScope.cpp
-    src/comm/SequencedLink.cpp
     src/comm/TcpChannelBase.cpp
     src/comm/TcpEndpoint.cpp
     src/comm/LocalDrain.cpp

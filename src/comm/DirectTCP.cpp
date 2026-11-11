@@ -14,12 +14,8 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <initializer_list>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -48,93 +44,15 @@ FMI::Comm::DirectTCP::DirectTCP(std::map<std::string, std::string> params,
     registry_poll_interval_ms = std::stoi(TcpEndpoint::param_or(params, "registry_poll_interval_ms", "5"));
     connect_retry_interval_ms = std::stoi(TcpEndpoint::param_or(params, "connect_retry_interval_ms", "10"));
     registry_ttl_s = std::stoi(TcpEndpoint::param_or(params, "registry_ttl_s", "3600"));
-    listen_port_base = std::stoi(TcpEndpoint::param_or(params, "listen_port_base", "0"));
-    if (listen_port_base < 0 || listen_port_base > 65535) {
-        throw std::runtime_error("DirectTCP: listen_port_base must be between 0 and 65535");
-    }
     parse_tcp_params(params);
     parse_tcp_model_params(model_params);
     // Constructed but not connected: peer_id/num_peers/comm_name are pushed in after
     // construction, and in the forked test harness the connection must be opened by the
     // process that will use it.
     registry = std::make_unique<PeerRegistry>(registry_host, registry_port);
-    birth_boot_id = read_boot_id();
-}
-
-std::string FMI::Comm::DirectTCP::read_boot_id() {
-    // FMI_BOOT_ID_FILE stands in for the kernel's file in tests, which make a rank believe it
-    // woke up on another machine at a moment they choose. Looked up on every call: a value
-    // cached by a process that later forks the ranks of a test would outlive the test's own.
-    const char* override_path = std::getenv("FMI_BOOT_ID_FILE");
-    std::string id;
-    if (FILE* f = std::fopen(override_path != nullptr && override_path[0] != '\0'
-                                     ? override_path : "/proc/sys/kernel/random/boot_id", "r")) {
-        char buf[64] = {};
-        if (std::fgets(buf, sizeof(buf), f) != nullptr) {
-            id = buf;
-            while (!id.empty() && (id.back() == '\n' || id.back() == ' ')) {
-                id.pop_back();
-            }
-        }
-        std::fclose(f);
-    }
-    return id;
-}
-
-bool FMI::Comm::DirectTCP::reset_transport_if_relocated() {
-    if (birth_boot_id.empty()) {
-        return false;
-    }
-    const std::string current = read_boot_id();
-    if (current.empty() || current == birth_boot_id) {
-        return false;
-    }
-    // Restored on a different machine. Contract and rationale on the declaration: wipe the
-    // transport wholesale — the same reset the FT-managed checkpoint hook performed — and
-    // let establishment start over on truth. Sequenced-link state is deliberately kept;
-    // replay over the fresh connections is what recovers the streams, exactly as on the
-    // same-host path.
-    if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
-        std::fprintf(stderr, "[lt] RELOCATION-RESET old_boot=%.8s new_boot=%.8s\n",
-                     birth_boot_id.c_str(), current.c_str());
-    }
-    // Which links this reset severs: an open descriptor or a connection not yet adopted.
-    std::vector<char> severed(num_peers, 0);
-    for (Utils::peer_num q = 0; q < num_peers; q++) {
-        severed[q] = (q < sockets.size() && sockets[q] >= 0) || pending_links.count(q) > 0;
-    }
-    close_sockets();
-    close_transport_state();
-    // Every link this reset severed must REPLAY when it re-forms. Closing the fds here
-    // bypasses the per-link I/O-error discovery that normally plants the reconcile debt
-    // through repair_link, and a markless re-established link skips its handshake and
-    // replay entirely — the peer then classifies the retained-frames hole as a FATAL
-    // sequence gap (adversarial-review finding, confirmed). Plant the debts exactly as
-    // per-link repairs would have — and only there. A link already closed owes its debt
-    // already (every path that closes one outside teardown plants it), and a peer this
-    // rank never connected to has nothing to replay: a debt there would make the pump's
-    // rescue of orphaned links dial every lower rank of the job, one after another, each
-    // waiting for that rank to service its listener.
-    if (recover_links) {
-        if (link_needs_reconcile.size() != num_peers) {
-            link_needs_reconcile.assign(num_peers, 0);
-        }
-        for (Utils::peer_num q = 0; q < num_peers; q++) {
-            if (q != peer_id && severed[q]) {
-                link_needs_reconcile[q] = 1;
-            }
-        }
-    }
-    birth_boot_id = current;
-    return true;
 }
 
 FMI::Comm::DirectTCP::~DirectTCP() {
-    // Settle retention and half-close before the abrupt close below: a straight close() from
-    // a finished rank RSTs away frames a still-working peer had not yet consumed, and that
-    // peer then re-establishes toward a process that no longer exists. See
-    // drain_links_for_shutdown's declaration for the full mechanism.
-    drain_links_for_shutdown();
     close_sockets();
     close_transport_state();
 }
@@ -148,66 +66,44 @@ std::string FMI::Comm::DirectTCP::registry_key() const {
 }
 
 void FMI::Comm::DirectTCP::ensure_listener() {
-    if (listen_fd < 0) {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) {
-            throw std::runtime_error("DirectTCP: socket() failed: " + std::string(strerror(errno)));
-        }
-        int one = 1;
-        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        if (!TcpEndpoint::resolve_ipv4(bind_host, addr.sin_addr)) {
-            addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        }
-        bool bound = false;
-        if (listen_port_base > 0) {
-            const long port = static_cast<long>(listen_port_base) + static_cast<long>(peer_id);
-            if (port <= 65535) {
-                addr.sin_port = htons(static_cast<std::uint16_t>(port));
-                bound = ::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
-            }
-            if (!bound) {
-                // Still a working rank, only without the fixed port's protection at restore.
-                std::fprintf(stderr, "[FMI] DirectTCP rank %u: cannot listen on port %ld (%s); "
-                             "using an ephemeral port\n", static_cast<unsigned>(peer_id), port,
-                             port <= 65535 ? strerror(errno) : "beyond 65535");
-            }
-        }
-        if (!bound) {
-            addr.sin_port = htons(0); // let the kernel pick a free port
-            if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-                std::string error = strerror(errno);
-                ::close(fd);
-                throw std::runtime_error("DirectTCP: bind to " + bind_host + " failed: " + error);
-            }
-        }
-        // SOMAXCONN, not a small constant: in a 32-rank binomial broadcast several peers issue
-        // their SYN to the same rank simultaneously, and Linux silently drops the overflow —
-        // the connector then retries on the TCP timer, blowing any sane deadline.
-        if (::listen(fd, SOMAXCONN) < 0) {
-            std::string error = strerror(errno);
-            ::close(fd);
-            throw std::runtime_error("DirectTCP: listen failed: " + error);
-        }
-        socklen_t len = sizeof(addr);
-        if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) < 0) {
-            std::string error = strerror(errno);
-            ::close(fd);
-            throw std::runtime_error("DirectTCP: getsockname failed: " + error);
-        }
-        listen_port = ntohs(addr.sin_port);
-        // Non-blocking: the event loop only accepts on a poll() hit, but a SYN withdrawn
-        // between the poll and the accept would otherwise block the loop indefinitely.
-        TcpEndpoint::set_nonblocking(fd, true);
-        listen_fd = fd;
-        // Fresh per listener incarnation: this is what lets a peer tell a live listener from a
-        // recycled ephemeral port belonging to some earlier run under the same comm_name.
-        listener_nonce = TcpEndpoint::random_nonce();
-        advertised_ip = TcpEndpoint::resolve_advertise_ip(advertise_host, registry_host,
-                                                          registry_port);
+    if (listen_fd >= 0) {
+        return;
     }
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        throw std::runtime_error("DirectTCP: socket() failed: " + std::string(strerror(errno)));
+    }
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    if (!TcpEndpoint::resolve_ipv4(bind_host, addr.sin_addr)) {
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
+    addr.sin_port = htons(0); // let the kernel pick a free port
+    if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        std::string error = strerror(errno);
+        ::close(fd);
+        throw std::runtime_error("DirectTCP: bind to " + bind_host + " failed: " + error);
+    }
+    if (::listen(fd, SOMAXCONN) < 0) {
+        std::string error = strerror(errno);
+        ::close(fd);
+        throw std::runtime_error("DirectTCP: listen failed: " + error);
+    }
+    socklen_t len = sizeof(addr);
+    if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) < 0) {
+        std::string error = strerror(errno);
+        ::close(fd);
+        throw std::runtime_error("DirectTCP: getsockname failed: " + error);
+    }
+    listen_port = ntohs(addr.sin_port);
+    TcpEndpoint::set_nonblocking(fd, true);
+    listen_fd = fd;
+    listener_nonce = TcpEndpoint::random_nonce();
+    advertised_ip = TcpEndpoint::resolve_advertise_ip(advertise_host, registry_host,
+                                                      registry_port);
 }
 
 void FMI::Comm::DirectTCP::publish_self(long deadline_ms) {
@@ -215,43 +111,13 @@ void FMI::Comm::DirectTCP::publish_self(long deadline_ms) {
     if (remaining <= 0) {
         throw Utils::Timeout();
     }
-    // Re-derived on EVERY publish, never trusted from listener creation: the cached value is
-    // the one piece of transport state that goes stale when a criu image is restored on a
-    // different machine. The listener itself survives relocation — criu re-binds
-    // 0.0.0.0:port wherever the port is free, and the nonce rides in the image — but an
-    // address derived on the dump host sends every higher peer to a machine this process no
-    // longer lives on, while this process waits for their dials on the new one: a mutual
-    // wedge for both sides' full deadlines (observed and traced, baseline@4p, rank 1 moved
-    // between hosts). Re-deriving here heals it at the first post-restore establishment,
-    // and peers pick the corrected entry up on their next registry poll. The probe is two
-    // syscalls ahead of a Redis round trip; with an explicit advertise_host it degenerates
-    // to returning the configured string (which is exactly why cross-host restore requires
-    // advertise_host to be left empty).
-    const std::string current_ip =
-            TcpEndpoint::resolve_advertise_ip(advertise_host, registry_host, registry_port);
-    // Never DOWNGRADE a working advertisement to the last-resort fallback: the probe can
-    // fail transiently (fd exhaustion in a repair storm, a resolver blip when registry_host
-    // is a name) while the publish itself still lands on the already-connected context — a
-    // poisoned loopback entry would send every dialer to its own machine. Adopting the
-    // fallback is right only when nothing better was ever known (single-host dev, where
-    // loopback genuinely is the address). The periodic republish retries the derivation, so
-    // a real relocation still heals on the next pass once the probe succeeds.
-    if (current_ip != advertised_ip &&
-        !(current_ip == "127.0.0.1" && !advertised_ip.empty())) {
-        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
-            std::fprintf(stderr, "[lt] ADVERTISE-MOVED old=%s new=%s port=%u\n",
-                         advertised_ip.c_str(), current_ip.c_str(),
-                         static_cast<unsigned>(listen_port));
-        }
-        advertised_ip = current_ip;
-    }
     registry->publish(registry_key(), std::to_string(peer_id),
                       advertised_ip + ":" + std::to_string(listen_port) + ":" +
                               std::to_string(listener_nonce),
                       registry_ttl_s, remaining);
 }
 
-std::string FMI::Comm::DirectTCP::frame_for(Utils::peer_num partner_id,
+std::string FMI::Comm::DirectTCP::hello_for(Utils::peer_num partner_id,
                                             std::uint64_t nonce) const {
     std::string buf(HELLO_SIZE, '\0');
     TcpEndpoint::put32(&buf[0], HELLO_MAGIC);
@@ -263,12 +129,12 @@ std::string FMI::Comm::DirectTCP::frame_for(Utils::peer_num partner_id,
     return buf;
 }
 
-bool FMI::Comm::DirectTCP::send_frame(int fd, Utils::peer_num partner_id,
+bool FMI::Comm::DirectTCP::send_hello(int fd, Utils::peer_num partner_id,
                                       std::uint64_t nonce) const {
-    const std::string frame = frame_for(partner_id, nonce);
+    const std::string hello = hello_for(partner_id, nonce);
     std::size_t sent = 0;
-    while (sent < frame.size()) {
-        long n = ::send(fd, frame.data() + sent, frame.size() - sent, MSG_NOSIGNAL);
+    while (sent < hello.size()) {
+        long n = ::send(fd, hello.data() + sent, hello.size() - sent, MSG_NOSIGNAL);
         if (n <= 0) {
             if (n < 0 && errno == EINTR) {
                 continue;
@@ -280,12 +146,8 @@ bool FMI::Comm::DirectTCP::send_frame(int fd, Utils::peer_num partner_id,
     return true;
 }
 
-bool FMI::Comm::DirectTCP::read_frame(int fd, Utils::peer_num& sender,
+bool FMI::Comm::DirectTCP::read_hello(int fd, Utils::peer_num& sender,
                                       std::uint64_t expect_nonce) const {
-    // The caller only ever reads a socket poll() has just reported readable, and the writer
-    // sends all 32 bytes in one go, so a short read here means the peer died mid-frame. Bound
-    // the wait tightly rather than inheriting the whole mesh deadline: a peer that connects and
-    // never speaks (a port scanner, a readiness probe) must not hold up the event loop.
     char buf[HELLO_SIZE];
     std::size_t got = 0;
     while (got < HELLO_SIZE) {
@@ -319,8 +181,6 @@ bool FMI::Comm::DirectTCP::read_frame(int fd, Utils::peer_num& sender,
     if (receiver != peer_id || claimed >= num_peers || claimed == peer_id) {
         return false;
     }
-    // The link hash carries the comm_name, so a connector belonging to a different
-    // communicator cannot pass itself off as the legitimate party for this one.
     if (TcpEndpoint::get64(buf + 16) != TcpEndpoint::fnv1a64(link_name(claimed, false))) {
         return false;
     }
@@ -347,9 +207,7 @@ std::vector<FMI::Utils::peer_num> FMI::Comm::DirectTCP::connect_batch(
     auto finish = [&](int fd, Utils::peer_num rank, std::uint64_t nonce) {
         TcpEndpoint::set_nonblocking(fd, false);
         apply_socket_options(fd);
-        // The hello goes out now, but the link is not usable until the peer acknowledges it:
-        // this connect may have landed on a recycled port owned by someone else entirely.
-        if (send_frame(fd, rank, nonce)) {
+        if (send_hello(fd, rank, nonce)) {
             unconfirmed[rank] = fd;
         } else {
             ::close(fd);
@@ -357,8 +215,6 @@ std::vector<FMI::Utils::peer_num> FMI::Comm::DirectTCP::connect_batch(
         }
     };
 
-    // Issue every connect first, then wait on all of them together: one poll for the whole
-    // batch rather than a round trip per peer.
     for (auto rank : wanted) {
         auto it = addrs.find(rank);
         if (it == addrs.end()) {
@@ -418,8 +274,6 @@ std::vector<FMI::Utils::peer_num> FMI::Comm::DirectTCP::connect_batch(
             int err = 0;
             socklen_t len = sizeof(err);
             if (::getsockopt(inflight[i].fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
-                // Refused or unreachable: the entry we read may be stale, so drop it and let
-                // the caller re-resolve from a fresh snapshot.
                 ::close(inflight[i].fd);
                 remaining.push_back(inflight[i].rank);
                 continue;
@@ -450,67 +304,15 @@ FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
     apply_socket_options(fd);
 
     Utils::peer_num claimed = 0;
-    // The connector addressed our listener nonce, which is what distinguishes this listener
-    // from whatever else has held this ephemeral port.
-    if (!read_frame(fd, claimed, listener_nonce)) {
+    if (!read_hello(fd, claimed, listener_nonce)) {
         ::close(fd);
         return AcceptResult::Rejected;
     }
-    // Already hold a LIVE link to that rank: a duplicate would silently replace a stream that
-    // may be mid-message.
-    //
-    // A link this rank believes it holds may nevertheless be dead, and after a checkpoint that
-    // is the normal case rather than a corner one: a restored rank comes back owning a
-    // descriptor for every peer, all of them closed by the restore, and every peer likewise
-    // holds a torn-down connection to it. Rejecting on the strength of that descriptor is what
-    // wedges the job. The rejected peer retries until its deadline while this rank waits to
-    // accept somebody else, and because a rank only discovers a dead link by doing I/O on it,
-    // the discovery can sit behind a collective that is itself waiting on the rejected peer.
-    // That closes a wait-for cycle the lazy-establishment argument in build_mesh explicitly
-    // relies on being impossible — it is, for a first establishment, and is not after a
-    // restore. Measured: checkpointing rank 0 of an 8-rank job wedged every rank in the job.
-    if (pending_links.count(claimed) > 0) {
-        if (!recover_links) {
-            ::close(fd);   // already holding a fresh connection for that rank
-            return AcceptResult::Rejected;
-        }
-        // The reconnect is the evidence, exactly as for sockets[] below: a peer only dials
-        // again after abandoning its previous attempt, so the parked descriptor is that
-        // abandoned attempt - observed for real when a dialer missed its hello-ack, closed
-        // its end, and every retry was then rejected on the strength of the dead fd it left
-        // behind, wedging both ranks until the job's deadline.
-        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
-            std::fprintf(stderr, "[lt] pending-REPLACE rank=%u oldfd=%d newfd=%d\n",
-                         static_cast<unsigned>(claimed), pending_links[claimed], fd);
-        }
-        ::close(pending_links[claimed]);
-        pending_links.erase(claimed);
+    if (pending_links.count(claimed) > 0 || (claimed < sockets.size() && sockets[claimed] >= 0)) {
+        ::close(fd);   // already holding a connection for that rank
+        return AcceptResult::Rejected;
     }
-    if (claimed < sockets.size() && sockets[claimed] >= 0) {
-        if (!recover_links) {
-            // Without the link layer a replacement cannot be reconciled, so the existing
-            // stream - which may be mid-message - has to win.
-            ::close(fd);
-            return AcceptResult::Rejected;
-        }
-        // With it, this connection IS the evidence. A peer only dials a rank it already had a
-        // link to after deciding that link is gone, and the hello it just passed proves it is
-        // that peer, on this comm. Believing the local descriptor instead is
-        // what wedged a restored rank: after criu the old descriptor can still *report*
-        // ESTABLISHED while nothing is on the other end, so probing it answers "live", the
-        // reconnect is refused, and the peer's handshake sits unread on a connection this rank
-        // accepted but never adopted.
-        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
-            std::fprintf(stderr, "[lt] accept-REPLACE rank=%u oldfd=%d newfd=%d\n",
-                         static_cast<unsigned>(claimed), sockets[claimed], fd);
-        }
-        ::close(sockets[claimed]);
-        sockets[claimed] = -1;
-        note_link_replaced(claimed);
-    }
-    // Acknowledge with a zero nonce: the connector has no nonce of its own to prove, it only
-    // needs to learn that it reached the rank it asked for.
-    if (!send_frame(fd, claimed, 0)) {
+    if (!send_hello(fd, claimed, 0)) {
         ::close(fd);
         return AcceptResult::Rejected;
     }
@@ -519,22 +321,10 @@ FMI::Comm::DirectTCP::AcceptResult FMI::Comm::DirectTCP::accept_one() {
     return AcceptResult::Accepted;
 }
 
-std::string FMI::Comm::DirectTCP::transport_state_note() const {
-    std::string note = "listen=" + std::to_string(listen_fd) + " pending={";
-    for (const auto& [rank, fd] : pending_links) {
-        note += std::to_string(rank) + ":" + std::to_string(fd) + " ";
-    }
-    return note + "}";
-}
-
 void FMI::Comm::DirectTCP::service_transport() {
     if (listen_fd < 0) {
         return;
     }
-    // Bounded, and never blocking: accept_one() returns false the moment the backlog is empty,
-    // and this runs inside somebody else's operation.
-    // Keep going past a rejection: only an empty backlog ends the pass. The bound is a
-    // backstop, not the exit condition.
     for (int seen = 0; seen < 64; seen++) {
         try {
             if (accept_one() == AcceptResult::Empty) {
@@ -544,222 +334,47 @@ void FMI::Comm::DirectTCP::service_transport() {
             break;   // the operation in flight owns error reporting, not this
         }
     }
-
-    // Adopt anything accepted for a link this rank does not currently hold. Leaving it parked
-    // until the application next talks to that peer means its handshake sits unread while the
-    // peer waits for ours — which is a deadlock, not a delay, when that peer is what this rank
-    // is ultimately waiting on.
+    // Accepting is not enough: the link goes into the socket table now, so that the next
+    // operation with that peer finds it there instead of establishing.
     adopt_pending(num_peers);
 }
 
 void FMI::Comm::DirectTCP::adopt_pending(Utils::peer_num exclude) {
-    // `exclude` protects establish()'s contract: build_mesh completes on a PENDING entry for
-    // its target, which establish() then pops and returns. Adopting the target here instead
-    // used to leave establish() finding nothing and reporting a timeout for a link that is
-    // fine — measured as 13 suite failures the one time it was tried; establish() now
-    // returns an already-adopted socket, so the exclude is an optimization that keeps the
-    // common path on the pop contract, not a correctness requirement. That matters because
-    // service_transport — reachable from INSIDE an in-flight establishment through servicing
-    // → reconcile → write_all → pump — excludes nothing, and skipping the target there would
-    // strand its sender: acknowledged at accept, its handshake and replay pushed into a
-    // connection nobody reads for as long as the establishment lasts. Everyone is fair game,
-    // and must be adopted even mid-establishment.
     for (auto it = pending_links.begin(); it != pending_links.end();) {
         const Utils::peer_num rank = it->first;
         const int fd = it->second;
-        if (rank == exclude) {
-            ++it;
-            continue;
-        }
         const bool unheld = sockets.empty() || (rank < sockets.size() && sockets[rank] < 0);
-        if (unheld && fd >= 0) {
+        if (rank != exclude && unheld && fd >= 0) {
             it = pending_links.erase(it);
-            try {
-                adopt_link(rank, fd);
-            } catch (const std::exception&) {
-                // Its handshake could not go out; the receive path will find the link broken
-                // and repair it, which is that path's job and not this one's.
-            }
+            adopt_link(rank, fd);
         } else {
             ++it;
         }
     }
 }
 
-
-bool FMI::Comm::DirectTCP::redial_dead_link(Utils::peer_num partner_id, long budget_ms) {
-    // Only the dialing side of the pair may act; the listener's whole obligation is already
-    // met by servicing its accept queue. DirectTCP dials DOWN: build_mesh connects to lower
-    // ranks and waits for higher ones.
-    if (partner_id >= peer_id) {
-        return false;
-    }
-    // Close the dead descriptor only here, at the moment its replacement is actually being
-    // dialed - closing it at observation time forced every reader through re-establishment
-    // for links whose death needed no repair at all (a peer that finalized after its last
-    // message). The mark makes check_socket pay the handshake and replay on the new link.
-    if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
-        close(sockets[partner_id]);
-        sockets[partner_id] = -1;
-    }
-    note_link_replaced(partner_id);
-    // Failures here were invisible — REDIALED prints only on success, so a redial that
-    // fails every slice for a whole deadline looks in a trace exactly like a redial that
-    // never ran. One throttled line per outcome makes the rescuer auditable.
-    const bool lt_on = [] {
-        const char* lt = std::getenv("FMI_LINK_TRACE");
-        return lt && lt[0] == '1';
-    }();
-    try {
-        build_mesh(partner_id, monotonic_ms() + std::max<long>(budget_ms, 50));
-    } catch (const Utils::Timeout&) {
-        if (lt_on) {
-            static thread_local long last_rdf_note = 0;
-            const long now = monotonic_ms();
-            if (now - last_rdf_note > 1000) {
-                last_rdf_note = now;
-                std::fprintf(stderr, "[lt] REDIAL-FAIL peer=%u reason=timeout budget=%ld\n",
-                             static_cast<unsigned>(partner_id), budget_ms);
-            }
-        }
-        return false;   // not now; pump retries next slice
-    } catch (const std::exception& e) {
-        if (lt_on) {
-            static thread_local long last_rde_note = 0;
-            const long now = monotonic_ms();
-            if (now - last_rde_note > 1000) {
-                last_rde_note = now;
-                std::fprintf(stderr, "[lt] REDIAL-FAIL peer=%u reason=%s\n",
-                             static_cast<unsigned>(partner_id), e.what());
-            }
-        }
-        return false;
-    }
-    // establish() pops the pending entry and check_socket stores it plus pays the debt.
-    if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
-        return true;
-    }
-    if (pending_links.count(partner_id) > 0) {
-        check_socket(partner_id, link_name(partner_id, true));
-        return partner_id < sockets.size() && sockets[partner_id] >= 0;
-    }
-    if (lt_on) {
-        static thread_local long last_rdn_note = 0;
-        const long now = monotonic_ms();
-        if (now - last_rdn_note > 1000) {
-            last_rdn_note = now;
-            std::fprintf(stderr, "[lt] REDIAL-FAIL peer=%u reason=no-link-after-mesh\n",
-                         static_cast<unsigned>(partner_id));
-        }
-    }
-    return false;
-}
-
 void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) {
-    ++establishment_depth;
-    struct DepthGuard {
-        int& depth;
-        ~DepthGuard() { --depth; }
-    } depth_guard{establishment_depth};
-    // Before touching any transport state: a criu image restored on a different machine
-    // must not build on what it woke up with (see reset_transport_if_relocated). Detecting
-    // it here covers every establishment that STARTS after the restore; the in-loop check
-    // below covers an establishment the freeze landed inside of.
-    reset_transport_if_relocated();
     ensure_listener();
 
-    auto have_link = [&](Utils::peer_num rank) {
-        return pending_links.count(rank) > 0 || (rank < sockets.size() && sockets[rank] >= 0);
-    };
-
-    // Only the link actually asked for is built. Establishing the full mesh up front would make
-    // the ordering argument trivial, but it costs O(num_peers^2) sockets across the job where a
-    // binomial-tree collective touches O(log num_peers) of them — measurably so: it left ~1500
-    // sockets per suite run in TIME_WAIT and starved the co-resident TCPunch backend of
-    // ephemeral ports.
+    // Only the link actually asked for is built. Establishing the full mesh up front would
+    // cost O(num_peers^2) sockets across the job where a binomial-tree collective touches
+    // O(log num_peers) of them.
     std::vector<Utils::peer_num> want_connect;
-    if (target < peer_id && !have_link(target)) {
+    if (target < peer_id) {
         want_connect.push_back(target);
     }
 
     std::map<Utils::peer_num, int> unconfirmed;
     long next_connect_attempt = 0;
     long next_publish_attempt = 0;
-
-    // After a relocation reset, this loop's locals belong to the pre-relocation attempt; the
-    // connects in flight aimed at addresses that meant something on the old machine. Restart
-    // THIS establishment on the fresh transport, same target, same deadline.
-    auto restart_on_fresh_transport = [&] {
-        for (auto& [rank, fd] : unconfirmed) {
-            (void) rank;
-            ::close(fd);
-        }
-        unconfirmed.clear();
-        ensure_listener();
-        // The dropped connect was this establishment's only path to a LOWER target:
-        // connect_batch consumed want_connect when it issued it, and nothing refills the
-        // queue once unconfirmed is cleared — without this the loop would publish and service
-        // until its whole deadline with no dial in flight (adversarial-review finding,
-        // confirmed).
-        if (target < peer_id &&
-            std::find(want_connect.begin(), want_connect.end(), target) == want_connect.end()) {
-            want_connect.push_back(target);
-        }
-    };
+    bool published = false;
 
     // One event loop, and it keeps servicing the listener the whole time it waits — accepting
-    // from any peer, not just the one we want. That is what makes lazy establishment safe: the
-    // only thing a rank ever waits for is a HIGHER rank connecting to it, so the wait-for
-    // relation runs strictly upward and cannot close a cycle, and a rank that is waiting is
+    // from any peer, not just the one we want. The only thing a rank ever waits for here is a
+    // HIGHER rank connecting to it or a LOWER rank acknowledging, and a rank that is waiting is
     // still handing out every accept and acknowledgement it owes.
-    // Set when the rank turns out to have moved with the link already in hand: the new address
-    // must be in the registry before the link is handed out.
-    bool must_publish = false;
-    while (true) {
-        if (have_link(target)) {
-            // One more check before the link is handed out. A freeze inside this loop resumes
-            // with its clock where the dump left it (criu's time namespace), so the periodic
-            // check below can still be up to a second away when the link completes — and then
-            // nothing ever resets: the rank keeps the dump host's address in the registry and
-            // its dead descriptors, and every higher peer dials an address nobody listens on
-            // until its deadline (rank 1 of a serial K8 cut, 2026-09-27, mid-repair of its
-            // link to the rank dumped just before it). The fresh link itself was made from the
-            // new machine and survives the reset: discarding it made the peer, mid-handshake
-            // on it, fail its repair a second time (the first fix did that; ranks crashed).
-            int kept = -1;
-            if (auto it = pending_links.find(target); it != pending_links.end()) {
-                kept = it->second;
-                pending_links.erase(it);
-            }
-            const bool moved = reset_transport_if_relocated();
-            if (kept >= 0) {
-                pending_links[target] = kept;
-            }
-            if (moved) {
-                if (have_link(target)) {
-                    ensure_listener();
-                } else {
-                    restart_on_fresh_transport();   // it was adopted already, and the reset took it
-                }
-                must_publish = true;
-                next_publish_attempt = 0;
-            }
-            if (!must_publish && have_link(target)) {
-                break;
-            }
-        }
+    while (pending_links.count(target) == 0) {
         long now = monotonic_ms();
-        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
-            static thread_local long last_bm_note = 0;
-            if (now - last_bm_note > 3000) {
-                last_bm_note = now;
-                std::fprintf(stderr,
-                             "[lt] BUILD-MESH-WAIT target=%u dialer=%d pending=%zu unconfirmed=%zu next_pub_in=%ld\n",
-                             static_cast<unsigned>(target), target < peer_id ? 1 : 0,
-                             pending_links.size(), unconfirmed.size(),
-                             next_publish_attempt - now);
-            }
-        }
         if (now >= deadline_ms) {
             for (auto& [rank, fd] : unconfirmed) {
                 (void) rank;
@@ -768,31 +383,17 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             throw Utils::Timeout();
         }
 
-        // Re-advertise PERIODICALLY while waiting, never behind a publish-once latch: the
-        // latch was a stack local a criu image preserves, so a rank frozen inside this loop
-        // and restored on a different machine resumed with it already true and kept the
-        // dump host's address in the registry for the establishment's whole remainder — the
-        // one freeze position publish-time re-derivation cannot reach on its own
-        // (adversarial-review finding, confirmed; also the traced evacuation signature:
-        // peers connected to the moved rank while it waited behind the stale entry). A
-        // refresh a second is one HSET against a registry already serving every
-        // establishment's HGETALL polls, and it also renews the TTL for long waits.
-        if (now >= next_publish_attempt) {
-            if (reset_transport_if_relocated()) {
-                restart_on_fresh_transport();
-            }
+        if (!published && now >= next_publish_attempt) {
             try {
                 publish_self(deadline_ms);
-                next_publish_attempt = monotonic_ms() + 1000;
-                must_publish = false;
+                published = true;
             } catch (const std::runtime_error&) {
                 next_publish_attempt = monotonic_ms() + registry_poll_interval_ms;
             }
         }
 
         if (!want_connect.empty() && now >= next_connect_attempt) {
-            // One HGETALL for the whole map rather than an HGET per peer, and one batch of
-            // concurrent connects rather than a round trip each.
+            // One HGETALL for the whole map rather than an HGET per peer.
             std::map<Utils::peer_num, PeerAddr> addrs;
             bool registry_reachable = true;
             try {
@@ -831,55 +432,15 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
                                                                         : connect_retry_interval_ms);
         }
 
-        // Take whatever frames are already waiting on this rank's other links. Without
-        // this, a rank stuck here reads nothing else, and after a restore — when several links
-        // rebuild at once — every rank ends up holding a frame another rank is waiting for.
-        const bool serviced_progress = service_established_links(target);
-
-        // Re-test the exit condition HERE, not only at the loop top: the servicing pass
-        // above nests pumps, pumps run service_transport, and adopt_pending can complete
-        // this very establishment from inside the body. Falling through to the poll with
-        // the condition already satisfied slept a restored rank for its entire repair
-        // deadline once — every peer socket drained, nothing left to wake it, the frame its
-        // application wanted already parked in a lane one stack frame above — and its four
-        // peers timed out ~50 ms before its own deadline would have woken it.
-        if (have_link(target)) {
-            continue;
-        }
-
         // Always poll the listener, even when the peer we want is one we connect to: a lower
         // rank blocked here still owes accepts and acknowledgements to the ranks above it.
         std::vector<struct pollfd> pfds;
         std::vector<Utils::peer_num> pfd_rank;
         pfds.push_back({listen_fd, POLLIN, 0});
         pfd_rank.push_back(0);
-        const std::size_t listener_slots = 1;
         for (const auto& [rank, fd] : unconfirmed) {
             pfds.push_back({fd, POLLIN, 0});
             pfd_rank.push_back(rank);
-        }
-        // The established links are polled too, so this loop wakes when their bytes arrive
-        // and the servicing pass above gets to run. A listener-side wait used to sleep here
-        // until its deadline: harmless when servicing could only ever take whole frames —
-        // whatever it left behind stayed left behind — but fatal now that servicing stages
-        // oversized frames a socket buffer at a time, where sleeping means the peer's
-        // half-delivered frame jams both ends for the rest of the deadline. Only after a
-        // pass that made progress, though: a readable socket servicing REFUSED to drain (a
-        // frame still growing, an app-owned stream, a decode failure) would wake this poll
-        // instantly and spin the loop at full speed; after a refusal the poll sleeps a
-        // bounded slice on the listener and timers alone, and the next pass re-judges.
-        const std::size_t unconfirmed_end = pfds.size();
-        if (serviced_progress) {
-            for (Utils::peer_num q = 0; q < num_peers; q++) {
-                if (q == peer_id || q >= sockets.size() || sockets[q] < 0) {
-                    continue;
-                }
-                if (q < app_owns_stream.size() && app_owns_stream[q]) {
-                    continue;   // mid-frame on the application's side; servicing skips it
-                }
-                pfds.push_back({sockets[q], POLLIN, 0});
-                pfd_rank.push_back(q);
-            }
         }
 
         // Sleep no longer than the nearest pending retry, so a scheduled registry poll or
@@ -888,28 +449,8 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
         if (!want_connect.empty()) {
             budget = std::min<long>(budget, std::max<long>(next_connect_attempt - monotonic_ms(), 1));
         }
-        // The publish is periodic now, so its retry timer always bounds the sleep.
-        budget = std::min<long>(budget, std::max<long>(next_publish_attempt - monotonic_ms(), 1));
-        if (!serviced_progress) {
-            // The established sockets are out of the poll set this iteration, but the
-            // servicing pass must still come back: the staging heuristic judges a frame
-            // jammed by observing NO growth across a slice, and a stalled frame's rescue is
-            // the pass after that judgement. One pump-slice heartbeat.
-            budget = std::min<long>(budget, 20);
-        }
-        if (const char* lt = std::getenv("FMI_LINK_TRACE"); lt && lt[0] == '1') {
-            // Before the poll, not only at the loop top: a body that never returns from its
-            // poll is invisible to the loop-top beacon, and that silence cost a forensic
-            // pass exactly one inference it could not witness directly.
-            static thread_local long last_bp_note = 0;
-            const long now_bp = monotonic_ms();
-            if (now_bp - last_bp_note > 3000) {
-                last_bp_note = now_bp;
-                std::fprintf(stderr,
-                             "[lt] BUILD-MESH-POLL target=%u budget=%ld nfds=%zu progress=%d\n",
-                             static_cast<unsigned>(target), budget, pfds.size(),
-                             serviced_progress ? 1 : 0);
-            }
+        if (!published) {
+            budget = std::min<long>(budget, std::max<long>(next_publish_attempt - monotonic_ms(), 1));
         }
         int pr = ::poll(pfds.data(), pfds.size(), static_cast<int>(std::max<long>(budget, 0)));
         if (pr < 0) {
@@ -926,20 +467,11 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             if (pfds[i].revents == 0) {
                 continue;
             }
-            if (i < listener_slots) {
+            if (i == 0) {
                 accept_one();
-                // Adopt for every rank EXCEPT the target (whose pending entry is this very
-                // wait's completion condition, popped by establish()). Without this, a
-                // connection accepted here for a third rank sits parked and unread for as
-                // long as this wait lasts, while its sender - acknowledged at accept - has
-                // moved on to frames and possibly a replay nobody drains.
+                // Every rank except the target goes into the socket table at once; the
+                // target's entry is what ends this wait, and establish() takes it.
                 adopt_pending(target);
-                continue;
-            }
-            if (i >= unconfirmed_end) {
-                // An established link has bytes; the next iteration's servicing pass takes
-                // them. Nothing to do here — and in particular no unconfirmed lookup, whose
-                // rank numbers these slots can collide with.
                 continue;
             }
             Utils::peer_num rank = pfd_rank[i];
@@ -948,7 +480,7 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
                 continue;
             }
             Utils::peer_num acked = 0;
-            if (read_frame(it->second, acked, 0) && acked == rank) {
+            if (read_hello(it->second, acked, 0) && acked == rank) {
                 pending_links[rank] = it->second;
                 total_connections.fetch_add(1);
             } else {
@@ -960,6 +492,10 @@ void FMI::Comm::DirectTCP::build_mesh(Utils::peer_num target, long deadline_ms) 
             }
             unconfirmed.erase(it);
         }
+    }
+    for (auto& [rank, fd] : unconfirmed) {
+        (void) rank;
+        ::close(fd);
     }
 }
 
@@ -979,15 +515,6 @@ int FMI::Comm::DirectTCP::establish(Utils::peer_num partner_id, const std::strin
         build_mesh(partner_id, monotonic_ms() + static_cast<long>(max_timeout));
         it = pending_links.find(partner_id);
         if (it == pending_links.end()) {
-            // No pending entry, but the link may nevertheless be up: a servicing pass nested
-            // inside this very establishment (pump → service_transport → adopt_pending, which
-            // excludes nothing) can have adopted the target already. That is a completed
-            // establishment, not a failure — check_socket stores the same fd back and pays
-            // any reconcile debt the adoption deferred. Throwing here instead reported a
-            // Timeout for a healthy link.
-            if (partner_id < sockets.size() && sockets[partner_id] >= 0) {
-                return sockets[partner_id];
-            }
             throw Utils::Timeout();
         }
     }
@@ -1010,13 +537,8 @@ void FMI::Comm::DirectTCP::close_transport_state() {
     }
     listen_port = 0;
     listener_nonce = 0;
-    // Clearing the listener is what forces a fresh bind and a fresh advertisement on next use.
-    // Only finalize() and the destructor reach this today, so "next use" means a channel
-    // rebuilt from scratch. It also leaves the rank correct if the process is ever resumed
-    // somewhere else, where the port it held is gone and the address it advertised is wrong.
     advertised_ip.clear();
     if (registry) {
         registry->disconnect();
     }
 }
-

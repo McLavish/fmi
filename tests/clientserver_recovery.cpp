@@ -1005,7 +1005,7 @@ BOOST_AUTO_TEST_CASE(unreachable_store_fails_within_the_io_timeout) {
  * the poll loop costs about what the loop charges for it. A dial against an address that answers
  * nothing costs the whole connect timeout while the loop charges one `timeout` — 1 ms in every
  * shipped config — so a channel that dialled on every pass turned a 20 ms budget into twelve
- * seconds, and the 5000 ms of config/fmi_identity_test.json into the better part of an hour.
+ * seconds, and a budget of 5000 ms into the better part of an hour.
  *
  * The bound below is deliberately loose: what it has to catch is the ratio, not the constant. One
  * dial's worth of overrun is unavoidable (an unreachable store cannot be recognised faster than a
