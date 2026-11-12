@@ -382,6 +382,12 @@ void FMI::Utils::MigrationTrigger::run_migration(Comm::DrainParticipant& target,
 #endif
     std::fflush(nullptr);
 
+    // What the rank can time of its own move, each piece on one machine: up to here it has run
+    // on the machine it leaves, and after the stop below it runs on the one it arrives on. The
+    // stretch between the two is on no clock of the rank's: criu restores it into a time
+    // namespace whose monotonic clock leaves part of the stop out.
+    const long stopping = monotonic_ms();
+
     if (rehearsal_only) {
         // The regression net: everything above and below is the real sequence, and only the
         // stop is replaced. hold_ms is how a test keeps a survivor waiting across a window
@@ -396,9 +402,12 @@ void FMI::Utils::MigrationTrigger::run_migration(Comm::DrainParticipant& target,
     }
 
     // Execution continues here after a CRIU restore, a SIGCONT, or the rehearsal's hold.
+    const long continued = monotonic_ms();
     restore_count.fetch_add(1, std::memory_order_acq_rel);
     target.resume_after_restore();
+    const long back = monotonic_ms();
     BOOST_LOG_TRIVIAL(info) << "MigrationTrigger: rank " << target.local_rank() << " of "
                             << target.channel_comm_name() << " is back at epoch " << epoch()
-                            << " after " << (monotonic_ms() - started) << " ms";
+                            << " after " << (back - started) << " ms (" << (stopping - started)
+                            << " ms to the stop, " << (back - continued) << " ms to come back)";
 }
